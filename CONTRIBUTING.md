@@ -31,11 +31,12 @@ Desktop package or captured user data to a fixture. The miniature package
 fixture under `tests/fixtures` is generated locally from harmless test files.
 
 The public coverage gate requires at least 90% line coverage across `bin/` and
-`scripts/`. Install Ruby and Bashcov 3.3.0, then run:
+`scripts/`. Install Ruby and Bundler, then install the exact locked dependency
+set and run:
 
 ```bash
-gem install bashcov -v 3.3.0
-make coverage
+bundle install
+bundle exec make coverage
 ```
 
 Coverage is a backstop, not a substitute for behavior assertions. New failure

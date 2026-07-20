@@ -47,6 +47,27 @@ EOF
     "${PROJECT_ROOT}/.simplecov"
 }
 
+@test "coverage target rejects a stale result when the runner produces nothing" {
+  local coverage_dir="${BATS_TEST_TMPDIR}/coverage"
+
+  mkdir -p "${coverage_dir}"
+  cat >"${coverage_dir}/.resultset.json" <<'JSON'
+{
+  "stale": {
+    "coverage": {
+      "/project/bin/tool": [1, 1, 1, 1]
+    }
+  }
+}
+JSON
+
+  run make --no-print-directory -s -C "${PROJECT_ROOT}" \
+    BASHCOV=true COVERAGE_DIR="${coverage_dir}" COVERAGE_MINIMUM=100 coverage
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"result set is missing"* ]]
+}
+
 @test "lifecycle targets forward exactly one command to the manager" {
   local target
 

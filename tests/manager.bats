@@ -474,6 +474,82 @@ JSON
   grep -Fq '# user modification' "${desktop}"
 }
 
+@test "migration is restartable after manager temporary files are left behind" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local cache_root="${TEST_HOME}/.cache/devin-desktop-manager"
+  local state_root="${TEST_HOME}/.local/state/devin-desktop-manager"
+  local release
+
+  install_fixture
+  downgrade_to_public_0_1_layout
+  release="$(find "${install_root}/releases" -mindepth 1 -maxdepth 1 \
+    -type d -print -quit)"
+  printf 'partial\n' >"${install_root}/.devin-desktop-manager-owned.new.12345"
+  printf 'partial\n' >"${cache_root}/.devin-desktop-manager-owned.new.12345"
+  printf 'partial\n' >"${state_root}/.devin-desktop-manager-owned.new.12345"
+  printf 'partial\n' >"${release}/release.json.new.12345"
+
+  run install_fixture
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"migrating verified public 0.1.0 installation"* ]]
+  run find "${install_root}" "${cache_root}" "${state_root}" \
+    -name '*.new.12345' -print
+  [ -z "${output}" ]
+}
+
+@test "migration accepts a valid legacy installation after cache eviction" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local cache_root="${TEST_HOME}/.cache/devin-desktop-manager"
+
+  install_fixture
+  downgrade_to_public_0_1_layout
+  rm -rf -- "${cache_root}"
+
+  run install_fixture
+
+  [ "${status}" -eq 0 ]
+  [ -f "${install_root}/.devin-desktop-manager-owned" ]
+  [ -f "${cache_root}/.devin-desktop-manager-owned" ]
+}
+
+@test "migration rejects an invalid legacy previous link without claiming it" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+
+  install_fixture
+  downgrade_to_public_0_1_layout
+  ln -s "releases/missing-release" "${install_root}/previous"
+
+  run install_fixture
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"could not be safely verified"* ]]
+  [ ! -e "${install_root}/.devin-desktop-manager-owned" ]
+}
+
+@test "migration rejects a symlinked legacy release without changing its target" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local release release_name external metadata_before
+
+  install_fixture
+  downgrade_to_public_0_1_layout
+  release="$(find "${install_root}/releases" -mindepth 1 -maxdepth 1 \
+    -type d -print -quit)"
+  release_name="$(basename "${release}")"
+  external="${BATS_TEST_TMPDIR}/external-release"
+  mv -- "${release}" "${external}"
+  ln -s "${external}" "${install_root}/releases/${release_name}"
+  metadata_before="$(sha256sum "${external}/release.json" | awk '{print $1}')"
+
+  run install_fixture
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"could not be safely verified"* ]]
+  [ ! -e "${install_root}/.devin-desktop-manager-owned" ]
+  [ "$(sha256sum "${external}/release.json" | awk '{print $1}')" = \
+    "${metadata_before}" ]
+}
+
 @test "update refuses a symlinked installation root" {
   local target="${BATS_TEST_TMPDIR}/foreign-root"
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
@@ -1248,6 +1324,8 @@ EOF
   staged_before="$(find "${TEST_HOME}/.local/opt" -maxdepth 1 \
     -type d -name 'devin-desktop.uninstall-*' -print -quit)"
   [ -n "${staged_before}" ]
+  rm -f -- "${staged_before}/.devin-desktop-manager-owned"
+  rm -rf -- "${staged_before}/releases"
 
   run install_fixture
 

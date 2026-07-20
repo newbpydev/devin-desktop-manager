@@ -298,9 +298,11 @@ legacy_root_marker_is_compatible() {
 legacy_release_metadata_is_valid() {
   local release_dir="$1"
   local metadata="${release_dir}/release.json"
+  local entry name
   local version build product_version sha256 artifact_url expected_id
   local url_prefix="https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/"
 
+  [[ -d "${release_dir}" && ! -L "${release_dir}" ]] || return 1
   [[ -f "${metadata}" && ! -L "${metadata}" ]] || return 1
   jq -e --arg manager_id "${MANAGER_ID}" '
     type == "object" and
@@ -359,6 +361,25 @@ legacy_release_metadata_is_valid() {
     ! -L "${release_dir}/integration/devin-desktop.png" ]] || return 1
   [[ -f "${release_dir}/integration/devin-desktop-workspace.xml" &&
     ! -L "${release_dir}/integration/devin-desktop-workspace.xml" ]] || return 1
+
+  while IFS= read -r -d '' entry; do
+    name="$(basename "${entry}")"
+    case "${name}" in
+      app|integration)
+        [[ -d "${entry}" && ! -L "${entry}" ]] || return 1
+        ;;
+      release.json)
+        [[ -f "${entry}" && ! -L "${entry}" ]] || return 1
+        ;;
+      release.json.new.*)
+        [[ "${name#release.json.new.}" =~ ^[0-9]+$ &&
+          -f "${entry}" && ! -L "${entry}" ]] || return 1
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  done < <(find "${release_dir}" -mindepth 1 -maxdepth 1 -print0)
 }
 
 legacy_release_inventory_is_valid() {
@@ -366,9 +387,13 @@ legacy_release_inventory_is_valid() {
 
   [[ -d "${RELEASES_DIR}" && ! -L "${RELEASES_DIR}" ]] || return 1
   current_target="$(release_target "${CURRENT_LINK}")" || return 1
-  previous_target="$(release_target "${PREVIOUS_LINK}" || true)"
+  previous_target=""
+  if [[ -e "${PREVIOUS_LINK}" || -L "${PREVIOUS_LINK}" ]]; then
+    previous_target="$(release_target "${PREVIOUS_LINK}")" || return 1
+  fi
 
   while IFS= read -r -d '' release_entry; do
+    [[ -d "${release_entry}" && ! -L "${release_entry}" ]] || return 1
     relative="releases/$(basename "${release_entry}")"
     [[ "${relative}" == "${current_target}" ||
       "${relative}" == "${previous_target}" ]] || return 1
@@ -432,6 +457,7 @@ legacy_state_is_valid() {
 
 legacy_install_root_is_valid() {
   local entry name
+  local saw_lock=false saw_releases=false
 
   [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] || return 1
   while IFS= read -r -d '' entry; do
@@ -439,33 +465,47 @@ legacy_install_root_is_valid() {
     case "${name}" in
       releases)
         [[ -d "${entry}" && ! -L "${entry}" ]] || return 1
+        saw_releases=true
         ;;
       current|previous)
         [[ -L "${entry}" ]] || return 1
         ;;
       .manager.lock)
         [[ -f "${entry}" && ! -L "${entry}" ]] || return 1
+        saw_lock=true
         ;;
       "${OWNERSHIP_SENTINEL_NAME}")
         owned_root_is_valid "${INSTALL_ROOT}" || return 1
+        ;;
+      "${OWNERSHIP_SENTINEL_NAME}".new.*)
+        [[ "${name#"${OWNERSHIP_SENTINEL_NAME}.new."}" =~ ^[0-9]+$ &&
+          -f "${entry}" && ! -L "${entry}" ]] || return 1
         ;;
       *)
         return 1
         ;;
     esac
   done < <(find "${INSTALL_ROOT}" -mindepth 1 -maxdepth 1 -print0)
+  [[ "${saw_releases}" == "true" && "${saw_lock}" == "true" ]] || return 1
   legacy_release_inventory_is_valid
 }
 
 legacy_cache_root_is_valid() {
   local entry name release_id
 
+  if [[ ! -e "${CACHE_ROOT}" && ! -L "${CACHE_ROOT}" ]]; then
+    return 0
+  fi
   [[ -d "${CACHE_ROOT}" && ! -L "${CACHE_ROOT}" ]] || return 1
   legacy_root_marker_is_compatible "${CACHE_ROOT}" || return 1
   while IFS= read -r -d '' entry; do
     name="$(basename "${entry}")"
     case "${name}" in
       "${OWNERSHIP_SENTINEL_NAME}")
+        ;;
+      "${OWNERSHIP_SENTINEL_NAME}".new.*)
+        [[ "${name#"${OWNERSHIP_SENTINEL_NAME}.new."}" =~ ^[0-9]+$ &&
+          -f "${entry}" && ! -L "${entry}" ]] || return 1
         ;;
       Devin-linux-x64-*.deb|Devin-linux-x64-*.deb.part)
         [[ -f "${entry}" && ! -L "${entry}" ]] || return 1
@@ -490,6 +530,10 @@ legacy_state_root_is_valid() {
     name="$(basename "${entry}")"
     case "${name}" in
       state.json|"${OWNERSHIP_SENTINEL_NAME}") ;;
+      "${OWNERSHIP_SENTINEL_NAME}".new.*)
+        [[ "${name#"${OWNERSHIP_SENTINEL_NAME}.new."}" =~ ^[0-9]+$ &&
+          -f "${entry}" && ! -L "${entry}" ]] || return 1
+        ;;
       *) return 1 ;;
     esac
   done < <(find "${STATE_DIR}" -mindepth 1 -maxdepth 1 -print0)
@@ -511,6 +555,33 @@ upgrade_legacy_release_metadata() {
   mv -Tf -- "${temporary}" "${metadata}"
 }
 
+cleanup_legacy_migration_temporaries() {
+  local path name
+
+  for path in \
+    "${INSTALL_ROOT}/${OWNERSHIP_SENTINEL_NAME}.new."* \
+    "${CACHE_ROOT}/${OWNERSHIP_SENTINEL_NAME}.new."* \
+    "${STATE_DIR}/${OWNERSHIP_SENTINEL_NAME}.new."* \
+    "${RELEASES_DIR}"/*/release.json.new.*; do
+    [[ -e "${path}" || -L "${path}" ]] || continue
+    name="$(basename "${path}")"
+    case "${name}" in
+      "${OWNERSHIP_SENTINEL_NAME}".new.*)
+        [[ "${name#"${OWNERSHIP_SENTINEL_NAME}.new."}" =~ ^[0-9]+$ ]] ||
+          return 1
+        ;;
+      release.json.new.*)
+        [[ "${name#release.json.new.}" =~ ^[0-9]+$ ]] || return 1
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+    [[ -f "${path}" && ! -L "${path}" ]] || return 1
+    rm -f -- "${path}" || return 1
+  done
+}
+
 migrate_legacy_layout_if_needed() {
   local sentinel="${INSTALL_ROOT}/${OWNERSHIP_SENTINEL_NAME}"
   local release_dir
@@ -528,10 +599,18 @@ migrate_legacy_layout_if_needed() {
   fi
 
   info "migrating verified public 0.1.0 installation to ownership schema 1"
+  cleanup_legacy_migration_temporaries ||
+    die "could not clean an interrupted ownership migration"
   while IFS= read -r -d '' release_dir; do
     upgrade_legacy_release_metadata "${release_dir}" ||
       die "could not upgrade legacy release metadata: ${release_dir}"
   done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -type d -print0)
+  if [[ ! -e "${CACHE_ROOT}" && ! -L "${CACHE_ROOT}" ]]; then
+    mkdir -p -- "${CACHE_ROOT}" ||
+      die "could not recreate the legacy cache root"
+    chmod 0700 "${CACHE_ROOT}" ||
+      die "could not secure the legacy cache root"
+  fi
   write_ownership_sentinel "${CACHE_ROOT}" ||
     die "could not mark the legacy cache as manager-owned"
   write_ownership_sentinel "${STATE_DIR}" ||
@@ -1687,8 +1766,8 @@ recover_pending_uninstall_cleanup() {
     die "unfinished uninstall cleanup path is unsafe: ${staged_root}"
 
   if [[ -e "${staged_root}" || -L "${staged_root}" ]]; then
-    owned_root_is_valid "${staged_root}" ||
-      die "unfinished uninstall cleanup root is not manager-owned: ${staged_root}"
+    [[ -d "${staged_root}" && ! -L "${staged_root}" ]] ||
+      die "unfinished uninstall cleanup root is unsafe: ${staged_root}"
     info "finishing an interrupted uninstall cleanup"
     rm -rf -- "${staged_root}" ||
       die "could not finish uninstall cleanup: ${staged_root}"

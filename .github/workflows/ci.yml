@@ -31,13 +31,15 @@ jobs:
             desktop-file-utils \
             jq \
             libarchive-tools \
+            ruby-bundler \
             ruby-dev \
             shellcheck \
             shared-mime-info \
             xdg-utils
-          sudo gem install bashcov -v 3.3.0 --no-document
+          bundle config set --local deployment true
+          bundle install
 
       - name: Run offline quality gate
         run: |
           make verify
-          make coverage
+          bundle exec make coverage

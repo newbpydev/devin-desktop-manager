@@ -7,7 +7,9 @@ Only repository maintainers publish releases.
 1. Update `MANAGER_VERSION` in `bin/devin-desktop-manager` and `VERSION` in the
    `Makefile`.
 2. Move relevant changelog entries into a dated version heading.
-3. Install the pinned Bashcov 3.3.0 dependency and run `make release-check`; it
+3. Install Ruby and Bundler, run `bundle config set --local deployment true`
+   followed by `bundle install`, then run `bundle exec make release-check`. The
+   committed lockfile fixes Bashcov 3.3.0 and its dependency graph; the command
    runs lint, behavior tests, the 90% line-coverage gate, version consistency,
    and deterministic packaging with `SHA256SUMS`.
 4. Review the archive contents and test installation from that archive in a

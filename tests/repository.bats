@@ -81,8 +81,9 @@ setup() {
 
   grep -Fq 'ubuntu-24.04' "${ci}"
   grep -Fq 'make verify' "${ci}"
-  grep -Fq 'make coverage' "${ci}"
-  grep -Fq 'bashcov -v 3.3.0' "${ci}"
+  grep -Fq 'bundle exec make coverage' "${ci}"
+  grep -Fq 'bundle config set --local deployment true' "${ci}"
+  grep -Fq 'bundle install' "${ci}"
   grep -Fq 'pull_request:' "${ci}"
   run grep -F 'pull_request_target:' "${ci}"
   [ "${status}" -ne 0 ]
@@ -100,13 +101,24 @@ setup() {
 
   grep -Fq "tags:" "${workflow}"
   grep -Fq "'v*'" "${workflow}"
-  grep -Fq 'make release-check' "${workflow}"
-  grep -Fq 'bashcov -v 3.3.0' "${workflow}"
+  grep -Fq 'bundle exec make release-check' "${workflow}"
+  grep -Fq 'bundle config set --local deployment true' "${workflow}"
+  grep -Fq 'bundle install' "${workflow}"
+  run grep -F 'sudo gem install' "${workflow}"
+  [ "${status}" -ne 0 ]
   grep -Fq 'SHA256SUMS' "${workflow}"
   grep -Fq 'actions/attest-build-provenance' "${workflow}"
   grep -Fq -- '--draft' "${workflow}"
   grep -Fq 'id-token: write' "${workflow}"
   grep -Fq 'attestations: write' "${workflow}"
+}
+
+@test "Ruby coverage dependencies are fully locked" {
+  [ -s "${PROJECT_ROOT}/Gemfile" ]
+  [ -s "${PROJECT_ROOT}/Gemfile.lock" ]
+  grep -Fq 'gem "bashcov", "3.3.0"' "${PROJECT_ROOT}/Gemfile"
+  grep -Fq 'bashcov (3.3.0)' "${PROJECT_ROOT}/Gemfile.lock"
+  grep -Fq 'BUNDLED WITH' "${PROJECT_ROOT}/Gemfile.lock"
 }
 
 @test "Dependabot checks pinned GitHub Actions weekly" {

@@ -37,18 +37,20 @@ jobs:
             desktop-file-utils \
             jq \
             libarchive-tools \
+            ruby-bundler \
             ruby-dev \
             shellcheck \
             shared-mime-info \
             xdg-utils
-          sudo gem install bashcov -v 3.3.0 --no-document
+          bundle config set --local deployment true
+          bundle install
 
       - name: Verify and package exact version
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           version="${GITHUB_REF_NAME#v}"
-          make release-check VERSION="${version}"
+          bundle exec make release-check VERSION="${version}"
 
       - name: Attest source archive provenance
         uses: actions/attest-build-provenance@78e6cbd37d0ac1a40113c04f2037dacf1ea3f12e # v4

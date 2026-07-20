@@ -137,14 +137,15 @@ preserved. For automation, use `make uninstall-yes`.
 ## Development
 
 ```bash
+bundle install
 make verify
-make coverage
+bundle exec make coverage
 make package
 ```
 
 Tests use deterministic miniature Debian-package fixtures and never download
 Devin Desktop. The separate scheduled canary checks the live official manifest.
-See [CONTRIBUTING.md](CONTRIBUTING.md) for Bashcov setup and the TDD workflow,
+See [CONTRIBUTING.md](CONTRIBUTING.md) for locked Bashcov setup and the TDD workflow,
 and [docs/RELEASING.md](docs/RELEASING.md) for the release process.
 
 ## License

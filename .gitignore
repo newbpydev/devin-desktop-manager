@@ -1,5 +1,7 @@
 /dist/
 /coverage/
+/.bundle/
+/vendor/bundle/
 *.tmp
 *.part
 /.idea/

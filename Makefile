@@ -69,6 +69,7 @@ test:
 	@"$(BATS)" tests
 
 coverage:
+	@rm -f -- "$(COVERAGE_DIR)/.resultset.json"
 	@COVERAGE_MINIMUM="$(COVERAGE_MINIMUM)" COVERAGE_DIR="$(COVERAGE_DIR)" \
 		COVERAGE_COMMAND_NAME=bats-suite \
 		"$(BASHCOV)" -- "$(BATS)" tests
