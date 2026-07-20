@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+umask 077
+
+main() {
+  local output="${1:-}"
+  local mode="${2:-safe}"
+  local build="${3:-0d4bf12ed4a7597cb8ae9016fe8474468aad98a2}"
+  local version="${4:-3.4.27}"
+  local work
+  local -a data_tar_options=()
+  local control_tar_source="."
+
+  [[ -n "${output}" ]] ||
+    {
+      printf 'Usage: build-mini-deb OUTPUT [safe|unsafe-symlink]\n' >&2
+      exit 2
+    }
+  work="$(mktemp -d)"
+  # Expand the quoted temporary path while the local variable is still in scope.
+  # shellcheck disable=SC2064
+  trap "rm -rf -- $(printf '%q' "${work}")" EXIT
+
+  mkdir -p \
+    "${work}/control" \
+    "${work}/data/usr/share/devin-desktop/bin" \
+    "${work}/data/usr/share/applications" \
+    "${work}/data/usr/share/pixmaps" \
+    "${work}/data/usr/share/mime/packages"
+
+  cat >"${work}/control/control" <<EOF
+Package: devin-desktop
+Version: 1:${version}-1
+Architecture: amd64
+Maintainer: Test Fixture <test@example.invalid>
+Description: Deterministic Devin Desktop manager test fixture
+EOF
+  cat >"${work}/data/usr/share/devin-desktop/devin-desktop" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  cat >"${work}/data/usr/share/devin-desktop/bin/devin-desktop" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "--version" ]]; then
+  printf '%s\n' "1.110.1" "${build}" "x64"
+fi
+EOF
+  chmod 0755 \
+    "${work}/data/usr/share/devin-desktop/devin-desktop" \
+    "${work}/data/usr/share/devin-desktop/bin/devin-desktop"
+  cat >"${work}/data/usr/share/applications/devin-desktop.desktop" <<'EOF'
+[Desktop Entry]
+Name=Devin
+Type=Application
+Exec=devin-desktop
+EOF
+  cat >"${work}/data/usr/share/applications/devin-desktop-url-handler.desktop" <<'EOF'
+[Desktop Entry]
+Name=Devin URL
+Type=Application
+Exec=devin-desktop %U
+EOF
+  printf 'fixture icon\n' >"${work}/data/usr/share/pixmaps/devin-desktop.png"
+  cat >"${work}/data/usr/share/mime/packages/devin-desktop-workspace.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-devin-desktop-workspace">
+    <comment>Devin Desktop Workspace</comment>
+    <glob pattern="*.code-workspace"/>
+  </mime-type>
+</mime-info>
+EOF
+
+  if [[ "${mode}" == "unsafe-symlink" ]]; then
+    ln -s ../../../../../../etc/passwd \
+      "${work}/data/usr/share/devin-desktop/unsafe-link"
+  elif [[ "${mode}" == "unsafe-hardlink" ]]; then
+    printf 'hard link fixture\n' \
+      >"${work}/data/usr/share/devin-desktop/hard-a"
+    ln "${work}/data/usr/share/devin-desktop/hard-a" \
+      "${work}/data/usr/share/devin-desktop/hard-b"
+    data_tar_options+=(--transform='flags=h;s|.*|outside-target|')
+  elif [[ "${mode}" == "control-no-dot" ]]; then
+    control_tar_source="control"
+  elif [[ "${mode}" != "safe" ]]; then
+    printf 'Unknown fixture mode: %s\n' "${mode}" >&2
+    exit 2
+  fi
+
+  printf '2.0\n' >"${work}/debian-binary"
+  tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+    -C "${work}/control" -czf "${work}/control.tar.gz" "${control_tar_source}"
+  tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+    "${data_tar_options[@]}" -C "${work}/data" -czf "${work}/data.tar.gz" .
+
+  rm -f -- "${output}"
+  (
+    cd "${work}"
+    ar crD "${output}" debian-binary control.tar.gz data.tar.gz
+  )
+}
+
+main "$@"

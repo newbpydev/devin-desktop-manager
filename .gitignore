@@ -1,0 +1,6 @@
+/dist/
+*.tmp
+*.part
+/.idea/
+/.vscode/
+*~

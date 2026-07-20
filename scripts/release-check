@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+usage() {
+  printf 'Usage: release-check VERSION\n' >&2
+  exit 2
+}
+
+main() {
+  local version="${1:-}"
+  local project_root manager_version make_version release_tag
+
+  (($# == 1)) || usage
+  project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  manager_version="$(
+    "${project_root}/bin/devin-desktop-manager" --version | awk '{print $2}'
+  )"
+  make_version="$(
+    awk '$1 == "VERSION" && $2 == ":=" {print $3; exit}' "${project_root}/Makefile"
+  )"
+
+  [[ "${manager_version}" == "${version}" ]] ||
+    {
+      printf 'release-check: manager version %s does not match %s\n' \
+        "${manager_version}" "${version}" >&2
+      exit 1
+    }
+  [[ "${make_version}" == "${version}" ]] ||
+    {
+      printf 'release-check: Makefile version %s does not match %s\n' \
+        "${make_version}" "${version}" >&2
+      exit 1
+    }
+  grep -Fq "## [${version}]" "${project_root}/CHANGELOG.md" ||
+    {
+      printf 'release-check: CHANGELOG.md has no %s release entry\n' \
+        "${version}" >&2
+      exit 1
+    }
+  [[ -f "${project_root}/LICENSE" ]] ||
+    {
+      printf 'release-check: LICENSE is missing\n' >&2
+      exit 1
+    }
+
+  release_tag="${RELEASE_TAG:-}"
+  if [[ -z "${release_tag}" && "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+    release_tag="${GITHUB_REF_NAME:-}"
+  fi
+  if [[ -n "${release_tag}" && "${release_tag}" != "v${version}" ]]; then
+    printf 'release-check: tag %s must match v%s\n' \
+      "${release_tag}" "${version}" >&2
+    exit 1
+  fi
+
+  printf 'Release contract is consistent for v%s\n' "${version}"
+}
+
+main "$@"

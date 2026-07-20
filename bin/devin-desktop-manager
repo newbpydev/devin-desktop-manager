@@ -1,0 +1,1751 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+shopt -s inherit_errexit 2>/dev/null ||
+  {
+    printf 'devin-desktop-manager: error: Bash 4.4 or newer is required\n' >&2
+    exit 1
+  }
+umask 077
+
+readonly MANAGER_VERSION="0.1.0"
+readonly MANAGER_ID="io.github.newbpydev.devin-desktop-manager"
+readonly MANAGER_DESKTOP_MARKER="X-Devin-Desktop-Manager=true"
+readonly MANIFEST_URL="https://windsurf-stable.codeium.com/api/update/linux-x64-deb/stable/latest"
+readonly MANIFEST_MAX_BYTES=1048576
+
+readonly HOME_DIR="${HOME:-}"
+readonly INSTALL_ROOT="${HOME_DIR}/.local/opt/devin-desktop"
+readonly RELEASES_DIR="${INSTALL_ROOT}/releases"
+readonly CURRENT_LINK="${INSTALL_ROOT}/current"
+readonly PREVIOUS_LINK="${INSTALL_ROOT}/previous"
+readonly CACHE_ROOT="${XDG_CACHE_HOME:-${HOME_DIR}/.cache}/devin-desktop-manager"
+readonly DATA_HOME="${XDG_DATA_HOME:-${HOME_DIR}/.local/share}"
+readonly STATE_HOME="${XDG_STATE_HOME:-${HOME_DIR}/.local/state}"
+readonly CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME_DIR}/.config}"
+readonly STATE_DIR="${STATE_HOME}/devin-desktop-manager"
+readonly STATE_FILE="${STATE_DIR}/state.json"
+readonly BIN_DIR="${HOME_DIR}/.local/bin"
+readonly APP_COMMAND="${BIN_DIR}/devin-desktop"
+readonly MANAGER_COMMAND="${BIN_DIR}/devin-desktop-manager"
+
+readonly MAIN_DESKTOP_ID="devin-desktop-manager.desktop"
+readonly URL_DESKTOP_ID="devin-desktop-manager-url-handler.desktop"
+readonly ICON_NAME="devin-desktop-manager"
+readonly MAIN_DESKTOP="${DATA_HOME}/applications/${MAIN_DESKTOP_ID}"
+readonly URL_DESKTOP="${DATA_HOME}/applications/${URL_DESKTOP_ID}"
+readonly ICON_FILE="${DATA_HOME}/icons/hicolor/512x512/apps/${ICON_NAME}.png"
+readonly MIME_FILE="${DATA_HOME}/mime/packages/devin-desktop-manager-workspace.xml"
+
+readonly LEGACY_MAIN_DESKTOP_ID="devin-desktop.desktop"
+readonly LEGACY_URL_DESKTOP_ID="devin-desktop-url-handler.desktop"
+readonly LEGACY_MAIN_DESKTOP="${DATA_HOME}/applications/${LEGACY_MAIN_DESKTOP_ID}"
+readonly LEGACY_URL_DESKTOP="${DATA_HOME}/applications/${LEGACY_URL_DESKTOP_ID}"
+readonly LEGACY_ICON_FILE="${DATA_HOME}/icons/hicolor/512x512/apps/devin-desktop.png"
+readonly LEGACY_MIME_FILE="${DATA_HOME}/mime/packages/devin-desktop-workspace.xml"
+
+readonly MIME_DEVIN="x-scheme-handler/devin"
+readonly MIME_WINDSURF="x-scheme-handler/windsurf"
+readonly MIME_WORKSPACE="application/x-devin-desktop-workspace"
+declare -ar CURL_SECURITY_OPTIONS=(
+  --fail
+  --location
+  --proto '=https'
+  --proto-redir '=https'
+  --max-redirs 5
+  --retry 4
+  --retry-delay 2
+  --retry-all-errors
+  --connect-timeout 20
+)
+
+STAGING_PATH=""
+INTEGRATION_STAGE=""
+TRANSACTION_BACKUP=""
+
+info() {
+  printf 'devin-desktop-manager: %s\n' "$*" >&2
+}
+
+warn() {
+  printf 'devin-desktop-manager: warning: %s\n' "$*" >&2
+}
+
+die() {
+  printf 'devin-desktop-manager: error: %s\n' "$*" >&2
+  exit 1
+}
+
+cleanup() {
+  local path
+
+  for path in "${STAGING_PATH}" "${INTEGRATION_STAGE}" "${TRANSACTION_BACKUP}"; do
+    [[ -n "${path}" && -e "${path}" ]] || continue
+    case "${path}" in
+      "${INSTALL_ROOT}"/.staging-*|"${INSTALL_ROOT}"/.integration-*|/tmp/devin-desktop-manager.*)
+        rm -rf -- "${path}"
+        ;;
+      *)
+        warn "refusing to clean unexpected temporary path: ${path}"
+        ;;
+    esac
+  done
+}
+
+trap cleanup EXIT
+
+usage() {
+  cat <<'EOF'
+Usage: devin-desktop-manager <command>
+
+Manage the official stable Devin Desktop release without AUR or sudo.
+
+Commands:
+  install        Install the current official stable release (idempotent)
+  status         Show locally installed current and rollback releases
+  check          Check the official stable channel without changing files
+  update         Install and activate the current official stable release
+  rollback       Swap the current and previous releases
+  set-defaults   Make Devin Desktop the default for its URL schemes/workspaces
+  doctor         Validate the installation and desktop integration
+  uninstall      Remove manager-owned files after confirmation
+  version        Show the manager version
+  help           Show this help
+EOF
+}
+
+dependency_hint() {
+  cat >&2 <<'EOF'
+Install the missing tools with your distribution package manager.
+Debian/Ubuntu: curl jq libarchive-tools util-linux desktop-file-utils shared-mime-info xdg-utils
+Arch Linux:    curl jq libarchive util-linux desktop-file-utils shared-mime-info xdg-utils
+Fedora:        curl jq bsdtar util-linux desktop-file-utils shared-mime-info xdg-utils
+See docs/INSTALL.md for details.
+EOF
+}
+
+require_commands() {
+  local command_name
+  local -a missing=()
+
+  for command_name in "$@"; do
+    command -v "${command_name}" >/dev/null 2>&1 || missing+=("${command_name}")
+  done
+
+  if ((${#missing[@]} > 0)); then
+    printf 'devin-desktop-manager: error: missing required commands: %s\n' \
+      "${missing[*]}" >&2
+    dependency_hint
+    exit 1
+  fi
+}
+
+require_manifest_commands() {
+  require_commands curl jq
+}
+
+require_download_commands() {
+  require_manifest_commands
+  require_commands bsdtar sha256sum awk grep
+}
+
+require_release_commands() {
+  require_commands jq sha256sum ldd readlink find timeout
+}
+
+require_mutation_commands() {
+  require_download_commands
+  require_commands flock ldd readlink find mktemp timeout unshare
+}
+
+require_integration_commands() {
+  require_commands desktop-file-validate update-desktop-database \
+    update-mime-database xdg-mime
+}
+
+validate_absolute_directory() {
+  local name="$1"
+  local value="$2"
+
+  [[ -n "${value}" && "${value}" == /* ]] ||
+    die "${name} must be set to an absolute path"
+  [[ "${value}" != *$'\n'* && "${value}" != *$'\r'* ]] ||
+    die "${name} contains an unsupported control character"
+}
+
+validate_environment() {
+  validate_absolute_directory HOME "${HOME_DIR}"
+  validate_absolute_directory XDG_CACHE_HOME \
+    "${XDG_CACHE_HOME:-${HOME_DIR}/.cache}"
+  validate_absolute_directory XDG_DATA_HOME \
+    "${XDG_DATA_HOME:-${HOME_DIR}/.local/share}"
+  validate_absolute_directory XDG_STATE_HOME \
+    "${XDG_STATE_HOME:-${HOME_DIR}/.local/state}"
+  validate_absolute_directory XDG_CONFIG_HOME \
+    "${XDG_CONFIG_HOME:-${HOME_DIR}/.config}"
+}
+
+ensure_not_root() {
+  ((EUID != 0)) ||
+    die "refusing to run as root; use an unprivileged desktop user"
+}
+
+ensure_supported_architecture() {
+  [[ "$(uname -s)" == "Linux" ]] ||
+    die "only Linux is supported"
+  [[ "$(uname -m)" == "x86_64" ]] ||
+    die "only the official Linux x86_64 stable build is supported"
+}
+
+ensure_user_namespaces() {
+  require_commands unshare
+  unshare --user --map-root-user true >/dev/null 2>&1 ||
+    die "unprivileged user namespaces are unavailable; refusing to use --no-sandbox"
+}
+
+ensure_layout() {
+  mkdir -p -- "${INSTALL_ROOT}" "${RELEASES_DIR}" "${CACHE_ROOT}" \
+    "${BIN_DIR}" "${STATE_DIR}"
+  chmod 0700 "${INSTALL_ROOT}" "${RELEASES_DIR}" "${CACHE_ROOT}" "${STATE_DIR}"
+}
+
+acquire_lock() {
+  ensure_layout
+  exec 9>"${INSTALL_ROOT}/.manager.lock"
+  flock -n 9 || die "another Devin Desktop manager operation is running"
+}
+
+release_target() {
+  local link_path="$1"
+  local target release_name
+
+  [[ -L "${link_path}" ]] || return 1
+  target="$(readlink "${link_path}")"
+  [[ "${target}" == releases/* && "${target}" != *"/"*"/"* ]] || return 1
+  release_name="${target#releases/}"
+  is_safe_release_identifier "${release_name}" || return 1
+  [[ -d "${INSTALL_ROOT}/${target}" ]] || return 1
+  printf '%s\n' "${target}"
+}
+
+release_path() {
+  local link_path="$1"
+  local target
+
+  target="$(release_target "${link_path}")" || return 1
+  printf '%s\n' "${INSTALL_ROOT}/${target}"
+}
+
+release_label() {
+  local release_dir="$1"
+
+  if [[ -f "${release_dir}/release.json" ]]; then
+    jq -r '"\(.windsurfVersion) (\(.build[0:12]))"' \
+      "${release_dir}/release.json" 2>/dev/null || basename "${release_dir}"
+  else
+    basename "${release_dir}"
+  fi
+}
+
+app_is_running() {
+  local process_path executable
+
+  for process_path in /proc/[0-9]*; do
+    executable="$(readlink "${process_path}/exe" 2>/dev/null || true)"
+    case "${executable}" in
+      "${RELEASES_DIR}"/*/app/devin-desktop) return 0 ;;
+    esac
+  done
+
+  return 1
+}
+
+require_app_stopped() {
+  if app_is_running; then
+    die "Devin Desktop is running; close it before changing managed releases"
+  fi
+}
+
+is_safe_release_identifier() {
+  local value="$1"
+
+  [[ "${value}" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]]
+}
+
+release_identifier() {
+  local version="$1"
+  local build="$2"
+  local sha256="$3"
+
+  printf '%s-%s-%s\n' "${version}" "${build:0:12}" "${sha256:0:12}"
+}
+
+fetch_manifest() {
+  local manifest
+  local url sha256 version build product_version timestamp display_name
+  local url_prefix url_path url_build url_filename expected_filename
+  manifest="$(
+    curl "${CURL_SECURITY_OPTIONS[@]}" \
+      --silent --show-error --max-time 60 \
+      --max-filesize "${MANIFEST_MAX_BYTES}" \
+      "${MANIFEST_URL}"
+  )" || die "could not fetch the official stable manifest"
+
+  ((${#manifest} > 0 && ${#manifest} <= MANIFEST_MAX_BYTES)) ||
+    die "official manifest is empty or exceeds ${MANIFEST_MAX_BYTES} bytes"
+
+  jq -e '
+    (.url | type == "string") and
+    (.sha256hash | type == "string") and
+    (.windsurfVersion | type == "string") and
+    (.version | type == "string") and
+    (.productVersion | type == "string") and
+    (.timestamp | type == "number") and
+    (.displayName | type == "string")
+  ' <<<"${manifest}" >/dev/null || die "official manifest is missing required fields"
+
+  url="$(jq -r '.url' <<<"${manifest}")"
+  sha256="$(jq -r '.sha256hash' <<<"${manifest}")"
+  version="$(jq -r '.windsurfVersion' <<<"${manifest}")"
+  build="$(jq -r '.version' <<<"${manifest}")"
+  product_version="$(jq -r '.productVersion' <<<"${manifest}")"
+  timestamp="$(jq -r '.timestamp' <<<"${manifest}")"
+  display_name="$(jq -r '.displayName' <<<"${manifest}")"
+
+  is_safe_release_identifier "${version}" ||
+    die "official manifest returned an unsafe stable version identifier"
+  is_safe_release_identifier "${build}" ||
+    die "official manifest returned an unsafe build identifier"
+  is_safe_release_identifier "${product_version}" ||
+    die "official manifest returned an unsafe product version identifier"
+
+  url_prefix="https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/"
+  [[ "${url}" == "${url_prefix}"* ]] ||
+    die "official manifest returned an unexpected artifact URL"
+  url_path="${url#"${url_prefix}"}"
+  [[ "${url_path}" == */* && "${url_path#*/}" != */* ]] ||
+    die "official manifest returned an unexpected artifact path"
+  url_build="${url_path%%/*}"
+  url_filename="${url_path#*/}"
+  expected_filename="Devin-linux-x64-${version}.deb"
+  [[ "${url_build}" == "${build}" ]] ||
+    die "artifact URL build does not match the manifest"
+  [[ "${url_filename}" == "${expected_filename}" ]] ||
+    die "artifact URL version does not match the manifest"
+  [[ "${sha256}" =~ ^[0-9a-f]{64}$ ]] ||
+    die "official manifest returned an invalid SHA-256"
+  [[ "${timestamp}" =~ ^[0-9]+$ ]] ||
+    die "official manifest returned an invalid timestamp"
+  [[ -n "${display_name}" ]] ||
+    die "official manifest returned an empty platform name"
+
+  printf '%s\n' "${manifest}"
+}
+
+manifest_matches_current() {
+  local manifest="$1"
+  local current_dir expected_hash expected_url
+
+  current_dir="$(release_path "${CURRENT_LINK}")" || return 1
+  [[ -f "${current_dir}/release.json" ]] || return 1
+
+  expected_hash="$(jq -r '.sha256hash' <<<"${manifest}")"
+  expected_url="$(jq -r '.url' <<<"${manifest}")"
+
+  [[ "$(jq -r '.sha256 // empty' "${current_dir}/release.json")" == "${expected_hash}" &&
+    "$(jq -r '.artifactUrl // empty' "${current_dir}/release.json")" == "${expected_url}" ]]
+}
+
+reject_manifest_downgrade() {
+  local manifest="$1"
+  local current_dir current_timestamp manifest_timestamp
+
+  current_dir="$(release_path "${CURRENT_LINK}")" || return 0
+  [[ -f "${current_dir}/release.json" ]] ||
+    die "active release metadata is missing"
+
+  current_timestamp="$(jq -r '.releaseTimestamp // empty' "${current_dir}/release.json")"
+  manifest_timestamp="$(jq -r '.timestamp' <<<"${manifest}")"
+  [[ "${current_timestamp}" =~ ^[0-9]+$ ]] ||
+    die "active release metadata has an invalid timestamp"
+
+  if ((manifest_timestamp < current_timestamp)); then
+    die "official manifest is older than the active release; refusing an automatic downgrade"
+  fi
+}
+
+normalize_archive_member() {
+  local member="$1"
+
+  while [[ "${member}" == ./* ]]; do
+    member="${member#./}"
+  done
+  member="${member%/}"
+  printf '%s\n' "${member}"
+}
+
+validate_member_path() {
+  local member="$1"
+
+  [[ -n "${member}" && "${member}" != /* &&
+    "${member}" != ".." && "${member}" != ../* &&
+    "${member}" != */../* && "${member}" != */.. ]] ||
+    die "archive contains an unsafe member path"
+}
+
+validate_deb() {
+  local artifact="$1"
+  local expected_version="$2"
+  local debian_count=0 control_count=0 data_count=0
+  local member normalized control_member="" data_member=""
+  local control_text package_version normalized_version
+  local members_file="${STAGING_PATH}/deb-members.txt"
+  local control_members_file="${STAGING_PATH}/control-members.txt"
+  local debian_version
+  declare -A seen_members=()
+
+  bsdtar -tf "${artifact}" >"${members_file}" ||
+    die "download is not a readable Debian package"
+
+  while IFS= read -r member; do
+    normalized="$(normalize_archive_member "${member}")"
+    validate_member_path "${normalized}"
+    [[ -z "${seen_members["${normalized}"]+present}" ]] ||
+      die "Debian package contains a duplicate member: ${normalized}"
+    seen_members["${normalized}"]=1
+
+    case "${normalized}" in
+      debian-binary)
+        ((debian_count += 1))
+        ;;
+      control.tar.*)
+        ((control_count += 1))
+        control_member="${member}"
+        ;;
+      data.tar.*)
+        ((data_count += 1))
+        data_member="${member}"
+        ;;
+      *)
+        die "Debian package contains an unexpected member: ${normalized}"
+        ;;
+    esac
+  done <"${members_file}"
+
+  ((debian_count == 1 && control_count == 1 && data_count == 1)) ||
+    die "download is not a supported Debian package"
+
+  debian_version="$(bsdtar -xOf "${artifact}" \
+    "$(awk '
+      {
+        value = $0
+        sub(/^\.\//, "", value)
+        if (value == "debian-binary") {
+          print
+          exit
+        }
+      }
+    ' "${members_file}")")" ||
+    die "could not inspect the Debian package version"
+  [[ "${debian_version//$'\n'/}" == "2.0" ]] ||
+    die "download uses an unsupported Debian package format"
+
+  bsdtar -xOf "${artifact}" "${control_member}" |
+    bsdtar -tf - >"${control_members_file}" ||
+    die "could not inspect Debian package metadata"
+
+  while IFS= read -r member; do
+    normalized="$(normalize_archive_member "${member}")"
+    [[ -n "${normalized}" ]] || continue
+    validate_member_path "${normalized}"
+  done <"${control_members_file}"
+
+  (($(awk '
+    {
+      value = $0
+      while (sub(/^\.\//, "", value)) {}
+      sub(/\/$/, "", value)
+      if (value == "control") count++
+    }
+    END { print count + 0 }
+  ' "${control_members_file}") == 1)) ||
+    die "Debian package metadata is missing or duplicated"
+
+  control_text="$(
+    bsdtar -xOf "${artifact}" "${control_member}" | bsdtar -xOf - ./control
+  )" || die "could not read Debian package metadata"
+
+  if [[ "$(grep -c '^Package:' <<<"${control_text}")" -ne 1 ]] ||
+    ! grep -qx 'Package: devin-desktop' <<<"${control_text}"; then
+    die "downloaded package identity is not devin-desktop"
+  fi
+  if [[ "$(grep -c '^Architecture:' <<<"${control_text}")" -ne 1 ]] ||
+    ! grep -qx 'Architecture: amd64' <<<"${control_text}"; then
+    die "downloaded package architecture is not amd64"
+  fi
+  [[ "$(grep -c '^Version:' <<<"${control_text}")" -eq 1 ]] ||
+    die "downloaded package version metadata is missing or duplicated"
+
+  package_version="$(awk -F ': ' '$1 == "Version" { print $2; exit }' <<<"${control_text}")"
+  normalized_version="${package_version#*:}"
+  case "${normalized_version}" in
+    "${expected_version}"|"${expected_version}"-*) ;;
+    *) die "downloaded package version does not match the manifest" ;;
+  esac
+
+  printf '%s\n' "${data_member}"
+}
+
+validate_archive_paths() {
+  local artifact="$1"
+  local data_member="$2"
+  local member_list="$3"
+  local verbose_list="${member_list}.verbose"
+  local member normalized line link_target link_member resolved_target
+  declare -A seen_members=()
+
+  bsdtar -xOf "${artifact}" "${data_member}" | bsdtar -tf - >"${member_list}" ||
+    die "could not inspect the application payload"
+
+  while IFS= read -r member; do
+    normalized="$(normalize_archive_member "${member}")"
+    [[ -n "${normalized}" ]] || continue
+    validate_member_path "${normalized}"
+    [[ -z "${seen_members["${normalized}"]+present}" ]] ||
+      die "application payload contains a duplicate path: ${normalized}"
+    seen_members["${normalized}"]=1
+  done <"${member_list}"
+
+  bsdtar -xOf "${artifact}" "${data_member}" |
+    LC_ALL=C bsdtar -tvf - >"${verbose_list}" ||
+    die "could not inspect application payload link metadata"
+  while IFS= read -r line; do
+    case "${line:0:1}" in
+      h)
+        [[ "${line}" == *" link to "* ]] ||
+          die "application payload contains malformed hard link metadata"
+        link_target="${line##* link to }"
+        normalized="$(normalize_archive_member "${link_target}")"
+        validate_member_path "${normalized}"
+        [[ -n "${seen_members["${normalized}"]+present}" ]] ||
+          die "application payload hard link target is outside the payload"
+        ;;
+      l)
+        [[ "${line}" == *" -> "* ]] ||
+          die "application payload contains malformed symbolic link metadata"
+        link_target="${line##* -> }"
+        [[ "${link_target}" != /* ]] ||
+          die "application payload contains a link that escapes its extraction root"
+        link_member=""
+        for member in "${!seen_members[@]}"; do
+          if [[ "${line}" == *" ./${member} -> ${link_target}" ||
+            "${line}" == *" ${member} -> ${link_target}" ]]; then
+            link_member="${member}"
+            break
+          fi
+        done
+        [[ -n "${link_member}" ]] ||
+          die "application payload contains ambiguous symbolic link metadata"
+        resolved_target="$(
+          readlink -m -- "/payload/$(dirname "${link_member}")/${link_target}"
+        )"
+        case "${resolved_target}" in
+          /payload|/payload/*) ;;
+          *) die "application payload contains a link that escapes its extraction root" ;;
+        esac
+        ;;
+    esac
+  done <"${verbose_list}"
+
+  for member in \
+    usr/share/devin-desktop/devin-desktop \
+    usr/share/devin-desktop/bin/devin-desktop \
+    usr/share/applications/devin-desktop.desktop \
+    usr/share/applications/devin-desktop-url-handler.desktop \
+    usr/share/pixmaps/devin-desktop.png \
+    usr/share/mime/packages/devin-desktop-workspace.xml; do
+    [[ -n "${seen_members["${member}"]+present}" ]] ||
+      die "application payload is missing required path: ${member}"
+  done
+}
+
+validate_extracted_links() {
+  local root="$1"
+  local link_path link_target resolved
+
+  while IFS= read -r -d '' link_path; do
+    link_target="$(readlink "${link_path}")"
+    resolved="$(readlink -m -- "$(dirname "${link_path}")/${link_target}")"
+    case "${resolved}" in
+      "${root}"/*) ;;
+      *) die "application payload contains a link that escapes its extraction root" ;;
+    esac
+  done < <(find "${root}" -type l -print0)
+}
+
+validate_release() {
+  local release_dir="$1"
+  local expected_build="${2:-}"
+  local expected_product_version="${3:-}"
+  local app_dir="${release_dir}/app"
+  local version_text build_output architecture_output probe_status
+  local -a version_output=()
+
+  [[ -x "${app_dir}/devin-desktop" && ! -L "${app_dir}/devin-desktop" ]] ||
+    die "release is missing the Devin Desktop executable"
+  [[ -x "${app_dir}/bin/devin-desktop" && ! -L "${app_dir}/bin/devin-desktop" ]] ||
+    die "release is missing the terminal launcher"
+  [[ -f "${release_dir}/release.json" && ! -L "${release_dir}/release.json" ]] ||
+    die "release is missing manager metadata"
+  [[ -f "${release_dir}/integration/devin-desktop.png" &&
+    ! -L "${release_dir}/integration/devin-desktop.png" ]] ||
+    die "release is missing its integration icon"
+  [[ -f "${release_dir}/integration/devin-desktop-workspace.xml" &&
+    ! -L "${release_dir}/integration/devin-desktop-workspace.xml" ]] ||
+    die "release is missing its MIME declaration"
+
+  if ldd "${app_dir}/devin-desktop" 2>&1 | grep -q 'not found'; then
+    die "release has missing runtime libraries"
+  fi
+
+  if version_text="$(
+    timeout --signal=TERM --kill-after=5s 30s \
+      "${app_dir}/bin/devin-desktop" --version
+  )"; then
+    :
+  else
+    probe_status=$?
+    case "${probe_status}" in
+      124|137) die "release version probe timed out" ;;
+      *) die "release version probe failed" ;;
+    esac
+  fi
+  mapfile -t version_output <<<"${version_text}"
+  ((${#version_output[@]} >= 3)) ||
+    die "release version probe returned incomplete output"
+
+  build_output="${version_output[1]}"
+  architecture_output="${version_output[2]}"
+  case "${architecture_output}" in
+    x64|x86_64|amd64) ;;
+    *) die "release version probe returned an unexpected architecture" ;;
+  esac
+  if [[ -n "${expected_build}" && "${build_output}" != "${expected_build}" ]]; then
+    die "release build does not match the official manifest"
+  fi
+  if [[ -n "${expected_product_version}" &&
+    "${version_output[0]}" != "${expected_product_version}" ]]; then
+    die "release product version does not match the official manifest"
+  fi
+}
+
+write_release_metadata() {
+  local destination="$1"
+  local manifest="$2"
+  local installed_at
+
+  installed_at="$(date --utc +'%Y-%m-%dT%H:%M:%SZ')"
+  jq -n \
+    --arg windsurfVersion "$(jq -r '.windsurfVersion' <<<"${manifest}")" \
+    --arg productVersion "$(jq -r '.productVersion' <<<"${manifest}")" \
+    --arg build "$(jq -r '.version' <<<"${manifest}")" \
+    --arg artifactUrl "$(jq -r '.url' <<<"${manifest}")" \
+    --arg sha256 "$(jq -r '.sha256hash' <<<"${manifest}")" \
+    --argjson releaseTimestamp "$(jq -r '.timestamp' <<<"${manifest}")" \
+    --arg installedAt "${installed_at}" \
+    '{
+      windsurfVersion: $windsurfVersion,
+      productVersion: $productVersion,
+      build: $build,
+      artifactUrl: $artifactUrl,
+      sha256: $sha256,
+      releaseTimestamp: $releaseTimestamp,
+      installedAt: $installedAt
+    }' >"${destination}"
+  chmod 0600 "${destination}"
+}
+
+assemble_release() {
+  local artifact="$1"
+  local manifest="$2"
+  local destination="$3"
+  local data_member member_list app_source integration_source
+  local build product_version
+
+  STAGING_PATH="${INSTALL_ROOT}/.staging-$(basename "${destination}")-$$"
+  mkdir -p -- "${STAGING_PATH}/root" "${STAGING_PATH}/release/integration"
+
+  data_member="$(validate_deb "${artifact}" "$(jq -r '.windsurfVersion' <<<"${manifest}")")"
+  member_list="${STAGING_PATH}/archive-members.txt"
+  validate_archive_paths "${artifact}" "${data_member}" "${member_list}"
+
+  bsdtar -xOf "${artifact}" "${data_member}" |
+    bsdtar -xf - --no-same-owner -C "${STAGING_PATH}/root" ||
+    die "could not extract the application payload"
+  validate_extracted_links "${STAGING_PATH}/root"
+
+  app_source="${STAGING_PATH}/root/usr/share/devin-desktop"
+  integration_source="${STAGING_PATH}/root/usr/share"
+  [[ -d "${app_source}" && ! -L "${app_source}" ]] ||
+    die "application payload has an invalid application directory"
+
+  mv -- "${app_source}" "${STAGING_PATH}/release/app"
+  cp -- "${integration_source}/pixmaps/devin-desktop.png" \
+    "${STAGING_PATH}/release/integration/devin-desktop.png"
+  cp -- "${integration_source}/mime/packages/devin-desktop-workspace.xml" \
+    "${STAGING_PATH}/release/integration/devin-desktop-workspace.xml"
+  chmod 0644 \
+    "${STAGING_PATH}/release/integration/devin-desktop.png" \
+    "${STAGING_PATH}/release/integration/devin-desktop-workspace.xml"
+  write_release_metadata "${STAGING_PATH}/release/release.json" "${manifest}"
+
+  build="$(jq -r '.version' <<<"${manifest}")"
+  product_version="$(jq -r '.productVersion' <<<"${manifest}")"
+  validate_release "${STAGING_PATH}/release" "${build}" "${product_version}"
+
+  mv -- "${STAGING_PATH}/release" "${destination}"
+  rm -rf -- "${STAGING_PATH}"
+  STAGING_PATH=""
+}
+
+set_managed_link() {
+  local link_path="$1"
+  local target="$2"
+  local temporary
+
+  temporary="${INSTALL_ROOT}/.$(basename "${link_path}").new.$$"
+  rm -f -- "${temporary}"
+  ln -s -- "${target}" "${temporary}"
+  mv -Tf -- "${temporary}" "${link_path}"
+}
+
+state_is_valid() {
+  [[ -f "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || return 1
+  jq -e '
+    .schemaVersion == 1 and
+    (.managerVersion | type == "string") and
+    (.originalDefaults | type == "object") and
+    (.managedFiles | type == "object")
+  ' "${STATE_FILE}" >/dev/null 2>&1
+}
+
+validate_state_or_absent() {
+  if [[ -e "${STATE_FILE}" || -L "${STATE_FILE}" ]]; then
+    state_is_valid ||
+      die "manager state is invalid or unsafe: ${STATE_FILE}"
+  fi
+}
+
+managed_file_matches_state() {
+  local key="$1"
+  local path="$2"
+  local expected_path expected_hash
+
+  state_is_valid || return 1
+  expected_path="$(jq -r --arg key "${key}" \
+    '.managedFiles[$key].path // empty' "${STATE_FILE}")"
+  expected_hash="$(jq -r --arg key "${key}" \
+    '.managedFiles[$key].sha256 // empty' "${STATE_FILE}")"
+  [[ "${expected_path}" == "${path}" && "${expected_hash}" =~ ^[0-9a-f]{64}$ ]] ||
+    return 1
+  [[ -f "${path}" && ! -L "${path}" ]] || return 1
+  [[ "$(sha256sum "${path}" | awk '{print $1}')" == "${expected_hash}" ]]
+}
+
+ensure_regular_path_manageable() {
+  local path="$1"
+  local key="$2"
+  local marker_allowed="${3:-false}"
+
+  [[ -e "${path}" || -L "${path}" ]] || return 0
+  [[ -f "${path}" && ! -L "${path}" ]] ||
+    die "${path} exists and is not a manager-owned regular file"
+
+  if state_is_valid; then
+    managed_file_matches_state "${key}" "${path}" ||
+      die "${path} was modified and cannot be safely replaced"
+    return
+  fi
+  if [[ "${marker_allowed}" == "true" ]] &&
+    grep -qx "${MANAGER_DESKTOP_MARKER}" "${path}"; then
+    return 0
+  fi
+
+  die "${path} exists or was modified and cannot be safely replaced"
+}
+
+ensure_app_command_manageable() {
+  [[ -e "${APP_COMMAND}" || -L "${APP_COMMAND}" ]] || return 0
+  [[ -L "${APP_COMMAND}" ]] ||
+    die "${APP_COMMAND} exists and is not a manager-owned symlink"
+  [[ "$(readlink "${APP_COMMAND}")" == "${CURRENT_LINK}/app/bin/devin-desktop" ]] ||
+    die "${APP_COMMAND} points outside the managed installation"
+}
+
+ensure_integration_manageable() {
+  validate_state_or_absent
+  ensure_app_command_manageable
+  ensure_regular_path_manageable "${MAIN_DESKTOP}" mainDesktop true
+  ensure_regular_path_manageable "${URL_DESKTOP}" urlDesktop true
+  ensure_regular_path_manageable "${ICON_FILE}" icon false
+  ensure_regular_path_manageable "${MIME_FILE}" mime false
+}
+
+write_desktop_entries() {
+  local main_destination="$1"
+  local url_destination="$2"
+  local escaped_command="${APP_COMMAND//\\/\\\\}"
+
+  escaped_command="${escaped_command//\"/\\\"}"
+  escaped_command="${escaped_command//\`/\\\`}"
+  escaped_command="${escaped_command//\$/\\\$}"
+
+  cat >"${main_destination}" <<EOF
+[Desktop Entry]
+Name=Devin
+Comment=Tomorrow's Editor, Today.
+GenericName=Text Editor
+Exec="${escaped_command}" %F
+Icon=${ICON_NAME}
+Type=Application
+StartupNotify=false
+StartupWMClass=Devin
+Categories=TextEditor;Development;IDE;
+MimeType=${MIME_WORKSPACE};
+Actions=new-empty-window;
+Keywords=vscode;
+${MANAGER_DESKTOP_MARKER}
+
+[Desktop Action new-empty-window]
+Name=New Empty Window
+Exec="${escaped_command}" --new-window %F
+Icon=${ICON_NAME}
+EOF
+
+  cat >"${url_destination}" <<EOF
+[Desktop Entry]
+Name=Devin - URL Handler
+Comment=Tomorrow's Editor, Today.
+GenericName=Text Editor
+Exec="${escaped_command}" --open-url %U
+Icon=${ICON_NAME}
+Type=Application
+NoDisplay=true
+StartupNotify=true
+StartupWMClass=Devin
+Categories=Utility;TextEditor;Development;IDE;
+MimeType=${MIME_DEVIN};${MIME_WINDSURF};
+Keywords=vscode;
+${MANAGER_DESKTOP_MARKER}
+EOF
+  chmod 0644 "${main_destination}" "${url_destination}"
+}
+
+build_integration_stage() {
+  local release_dir="$1"
+
+  require_integration_commands
+  ensure_integration_manageable
+  [[ -f "${release_dir}/integration/devin-desktop.png" ]] ||
+    die "release integration icon is missing"
+  [[ -f "${release_dir}/integration/devin-desktop-workspace.xml" ]] ||
+    die "release MIME declaration is missing"
+
+  INTEGRATION_STAGE="${INSTALL_ROOT}/.integration-$$"
+  mkdir -p "${INTEGRATION_STAGE}"
+  write_desktop_entries \
+    "${INTEGRATION_STAGE}/${MAIN_DESKTOP_ID}" \
+    "${INTEGRATION_STAGE}/${URL_DESKTOP_ID}"
+  cp -- "${release_dir}/integration/devin-desktop.png" \
+    "${INTEGRATION_STAGE}/${ICON_NAME}.png"
+  cp -- "${release_dir}/integration/devin-desktop-workspace.xml" \
+    "${INTEGRATION_STAGE}/devin-desktop-manager-workspace.xml"
+  chmod 0644 "${INTEGRATION_STAGE}/${ICON_NAME}.png" \
+    "${INTEGRATION_STAGE}/devin-desktop-manager-workspace.xml"
+
+  desktop-file-validate \
+    "${INTEGRATION_STAGE}/${MAIN_DESKTOP_ID}" \
+    "${INTEGRATION_STAGE}/${URL_DESKTOP_ID}"
+}
+
+atomic_copy() {
+  local source="$1"
+  local destination="$2"
+  local mode="$3"
+  local temporary="${destination}.new.$$"
+
+  mkdir -p -- "$(dirname "${destination}")"
+  rm -f -- "${temporary}"
+  cp -- "${source}" "${temporary}"
+  chmod "${mode}" "${temporary}"
+  mv -Tf -- "${temporary}" "${destination}"
+}
+
+atomic_app_link() {
+  local temporary="${APP_COMMAND}.new.$$"
+
+  mkdir -p -- "${BIN_DIR}"
+  rm -f -- "${temporary}"
+  ln -s -- "${CURRENT_LINK}/app/bin/devin-desktop" "${temporary}"
+  mv -Tf -- "${temporary}" "${APP_COMMAND}"
+}
+
+query_default() {
+  xdg-mime query default "$1" 2>/dev/null || true
+}
+
+normalize_original_default() {
+  local value="$1"
+
+  case "${value}" in
+    "${MAIN_DESKTOP_ID}"|"${URL_DESKTOP_ID}")
+      printf '\n'
+      ;;
+    "${LEGACY_MAIN_DESKTOP_ID}"|"${LEGACY_URL_DESKTOP_ID}")
+      if legacy_desktop_id_owned "${value}"; then
+        printf '\n'
+      else
+        printf '%s\n' "${value}"
+      fi
+      ;;
+    *)
+      printf '%s\n' "${value}"
+      ;;
+  esac
+}
+
+original_default() {
+  local mime_type="$1"
+  local current
+
+  if state_is_valid; then
+    jq -r --arg mime "${mime_type}" \
+      '.originalDefaults[$mime] // ""' "${STATE_FILE}"
+    return
+  fi
+
+  current="$(query_default "${mime_type}")"
+  normalize_original_default "${current}"
+}
+
+is_safe_desktop_id() {
+  local value="$1"
+
+  [[ -z "${value}" || "${value}" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*\.desktop$ ]]
+}
+
+register_one_association() {
+  local mime_type="$1"
+  local desktop_id="$2"
+  local force="$3"
+  local current
+
+  current="$(query_default "${mime_type}")"
+  if [[ "${force}" == "true" ]]; then
+    xdg-mime default "${desktop_id}" "${mime_type}"
+    return
+  fi
+
+  case "${current}" in
+    ""|"${desktop_id}")
+      xdg-mime default "${desktop_id}" "${mime_type}"
+      ;;
+    "${LEGACY_MAIN_DESKTOP_ID}"|"${LEGACY_URL_DESKTOP_ID}")
+      if legacy_desktop_id_owned "${current}"; then
+        xdg-mime default "${desktop_id}" "${mime_type}"
+      else
+        warn "leaving existing default for ${mime_type} unchanged: ${current}"
+      fi
+      ;;
+    *)
+      warn "leaving existing default for ${mime_type} unchanged: ${current}"
+      ;;
+  esac
+}
+
+register_associations() {
+  local force="${1:-false}"
+
+  register_one_association "${MIME_DEVIN}" "${URL_DESKTOP_ID}" "${force}" ||
+    return 1
+  register_one_association "${MIME_WINDSURF}" "${URL_DESKTOP_ID}" "${force}" ||
+    return 1
+  register_one_association "${MIME_WORKSPACE}" "${MAIN_DESKTOP_ID}" "${force}"
+}
+
+legacy_desktop_owned() {
+  local path="$1"
+
+  [[ -f "${path}" && ! -L "${path}" ]] &&
+    grep -qx "${MANAGER_DESKTOP_MARKER}" "${path}"
+}
+
+legacy_desktop_id_owned() {
+  local desktop_id="$1"
+
+  case "${desktop_id}" in
+    "${LEGACY_MAIN_DESKTOP_ID}")
+      legacy_desktop_owned "${LEGACY_MAIN_DESKTOP}"
+      ;;
+    "${LEGACY_URL_DESKTOP_ID}")
+      legacy_desktop_owned "${LEGACY_URL_DESKTOP}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+asset_matches_release() {
+  local path="$1"
+  local release_name="$2"
+  local release_dir path_hash release_hash
+
+  [[ -f "${path}" && ! -L "${path}" ]] || return 1
+  path_hash="$(sha256sum "${path}" | awk '{print $1}')"
+  for release_dir in \
+    "$(release_path "${CURRENT_LINK}" 2>/dev/null || true)" \
+    "$(release_path "${PREVIOUS_LINK}" 2>/dev/null || true)"; do
+    [[ -n "${release_dir}" && -f "${release_dir}/integration/${release_name}" ]] ||
+      continue
+    release_hash="$(
+      sha256sum "${release_dir}/integration/${release_name}" | awk '{print $1}'
+    )"
+    if [[ "${path_hash}" == "${release_hash}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+remove_legacy_integration() {
+  local legacy_assets_owned=false
+
+  if legacy_desktop_owned "${LEGACY_MAIN_DESKTOP}" &&
+    legacy_desktop_owned "${LEGACY_URL_DESKTOP}"; then
+    legacy_assets_owned=true
+  fi
+  if legacy_desktop_owned "${LEGACY_MAIN_DESKTOP}"; then
+    rm -f -- "${LEGACY_MAIN_DESKTOP}"
+  fi
+  if legacy_desktop_owned "${LEGACY_URL_DESKTOP}"; then
+    rm -f -- "${LEGACY_URL_DESKTOP}"
+  fi
+  if [[ "${legacy_assets_owned}" == "true" ]] &&
+    asset_matches_release "${LEGACY_ICON_FILE}" devin-desktop.png; then
+    rm -f -- "${LEGACY_ICON_FILE}"
+  fi
+  if [[ "${legacy_assets_owned}" == "true" ]] &&
+    asset_matches_release "${LEGACY_MIME_FILE}" devin-desktop-workspace.xml; then
+    rm -f -- "${LEGACY_MIME_FILE}"
+  fi
+}
+
+write_state() {
+  local original_devin="$1"
+  local original_windsurf="$2"
+  local original_workspace="$3"
+  local temporary="${STATE_FILE}.new.$$"
+  local main_hash url_hash icon_hash mime_hash
+
+  is_safe_desktop_id "${original_devin}" ||
+    die "existing default for ${MIME_DEVIN} is unsafe"
+  is_safe_desktop_id "${original_windsurf}" ||
+    die "existing default for ${MIME_WINDSURF} is unsafe"
+  is_safe_desktop_id "${original_workspace}" ||
+    die "existing default for ${MIME_WORKSPACE} is unsafe"
+
+  main_hash="$(sha256sum "${MAIN_DESKTOP}" | awk '{print $1}')"
+  url_hash="$(sha256sum "${URL_DESKTOP}" | awk '{print $1}')"
+  icon_hash="$(sha256sum "${ICON_FILE}" | awk '{print $1}')"
+  mime_hash="$(sha256sum "${MIME_FILE}" | awk '{print $1}')"
+
+  mkdir -p "${STATE_DIR}"
+  jq -n \
+    --arg managerVersion "${MANAGER_VERSION}" \
+    --arg devin "${original_devin}" \
+    --arg windsurf "${original_windsurf}" \
+    --arg workspace "${original_workspace}" \
+    --arg mainPath "${MAIN_DESKTOP}" \
+    --arg mainHash "${main_hash}" \
+    --arg urlPath "${URL_DESKTOP}" \
+    --arg urlHash "${url_hash}" \
+    --arg iconPath "${ICON_FILE}" \
+    --arg iconHash "${icon_hash}" \
+    --arg mimePath "${MIME_FILE}" \
+    --arg mimeHash "${mime_hash}" \
+    --arg commandPath "${APP_COMMAND}" \
+    --arg commandTarget "${CURRENT_LINK}/app/bin/devin-desktop" \
+    --arg mimeDevin "${MIME_DEVIN}" \
+    --arg mimeWindsurf "${MIME_WINDSURF}" \
+    --arg mimeWorkspace "${MIME_WORKSPACE}" \
+    '{
+      schemaVersion: 1,
+      managerVersion: $managerVersion,
+      originalDefaults: {
+        ($mimeDevin): $devin,
+        ($mimeWindsurf): $windsurf,
+        ($mimeWorkspace): $workspace
+      },
+      managedFiles: {
+        mainDesktop: {path: $mainPath, sha256: $mainHash},
+        urlDesktop: {path: $urlPath, sha256: $urlHash},
+        icon: {path: $iconPath, sha256: $iconHash},
+        mime: {path: $mimePath, sha256: $mimeHash}
+      },
+      appCommand: {path: $commandPath, target: $commandTarget}
+    }' >"${temporary}"
+  chmod 0600 "${temporary}"
+  mv -Tf -- "${temporary}" "${STATE_FILE}"
+}
+
+refresh_desktop_caches() {
+  update-desktop-database "${DATA_HOME}/applications" || return 1
+  update-mime-database "${DATA_HOME}/mime" || return 1
+  if command -v kbuildsycoca6 >/dev/null 2>&1; then
+    kbuildsycoca6 --noincremental >/dev/null ||
+      warn "KDE cache refresh failed; log out and back in if the launcher is stale"
+  fi
+}
+
+install_integration_from_stage() {
+  local original_devin original_windsurf original_workspace
+
+  original_devin="$(original_default "${MIME_DEVIN}")"
+  original_windsurf="$(original_default "${MIME_WINDSURF}")"
+  original_workspace="$(original_default "${MIME_WORKSPACE}")"
+
+  atomic_app_link || return 1
+  atomic_copy "${INTEGRATION_STAGE}/${MAIN_DESKTOP_ID}" "${MAIN_DESKTOP}" 0644 ||
+    return 1
+  atomic_copy "${INTEGRATION_STAGE}/${URL_DESKTOP_ID}" "${URL_DESKTOP}" 0644 ||
+    return 1
+  atomic_copy "${INTEGRATION_STAGE}/${ICON_NAME}.png" "${ICON_FILE}" 0644 ||
+    return 1
+  atomic_copy "${INTEGRATION_STAGE}/devin-desktop-manager-workspace.xml" \
+    "${MIME_FILE}" 0644 || return 1
+  register_associations false || return 1
+  remove_legacy_integration || return 1
+  refresh_desktop_caches || return 1
+  write_state "${original_devin}" "${original_windsurf}" "${original_workspace}"
+}
+
+snapshot_path() {
+  local source="$1"
+  local name="$2"
+
+  if [[ -e "${source}" || -L "${source}" ]]; then
+    cp -a -- "${source}" "${TRANSACTION_BACKUP}/${name}"
+  fi
+}
+
+backup_transaction() {
+  TRANSACTION_BACKUP="$(mktemp -d /tmp/devin-desktop-manager.XXXXXX)"
+  chmod 0700 "${TRANSACTION_BACKUP}"
+
+  snapshot_path "${CURRENT_LINK}" current
+  snapshot_path "${PREVIOUS_LINK}" previous
+  snapshot_path "${APP_COMMAND}" app-command
+  snapshot_path "${MAIN_DESKTOP}" main-desktop
+  snapshot_path "${URL_DESKTOP}" url-desktop
+  snapshot_path "${ICON_FILE}" icon
+  snapshot_path "${MIME_FILE}" mime
+  snapshot_path "${STATE_FILE}" state
+  snapshot_path "${LEGACY_MAIN_DESKTOP}" legacy-main
+  snapshot_path "${LEGACY_URL_DESKTOP}" legacy-url
+  snapshot_path "${LEGACY_ICON_FILE}" legacy-icon
+  snapshot_path "${LEGACY_MIME_FILE}" legacy-mime
+  snapshot_path "${CONFIG_HOME}/mimeapps.list" config-mimeapps
+  snapshot_path "${DATA_HOME}/applications/mimeapps.list" applications-mimeapps
+  snapshot_path "${DATA_HOME}/mimeapps.list" data-mimeapps
+}
+
+restore_path() {
+  local destination="$1"
+  local name="$2"
+
+  rm -rf -- "${destination}"
+  if [[ -e "${TRANSACTION_BACKUP}/${name}" ||
+    -L "${TRANSACTION_BACKUP}/${name}" ]]; then
+    mkdir -p -- "$(dirname "${destination}")"
+    cp -a -- "${TRANSACTION_BACKUP}/${name}" "${destination}"
+  fi
+}
+
+restore_transaction() {
+  restore_path "${CURRENT_LINK}" current
+  restore_path "${PREVIOUS_LINK}" previous
+  restore_path "${APP_COMMAND}" app-command
+  restore_path "${MAIN_DESKTOP}" main-desktop
+  restore_path "${URL_DESKTOP}" url-desktop
+  restore_path "${ICON_FILE}" icon
+  restore_path "${MIME_FILE}" mime
+  restore_path "${STATE_FILE}" state
+  restore_path "${LEGACY_MAIN_DESKTOP}" legacy-main
+  restore_path "${LEGACY_URL_DESKTOP}" legacy-url
+  restore_path "${LEGACY_ICON_FILE}" legacy-icon
+  restore_path "${LEGACY_MIME_FILE}" legacy-mime
+  restore_path "${CONFIG_HOME}/mimeapps.list" config-mimeapps
+  restore_path "${DATA_HOME}/applications/mimeapps.list" applications-mimeapps
+  restore_path "${DATA_HOME}/mimeapps.list" data-mimeapps
+
+  if command -v update-desktop-database >/dev/null 2>&1 &&
+    command -v update-mime-database >/dev/null 2>&1; then
+    update-desktop-database "${DATA_HOME}/applications" >/dev/null 2>&1 || true
+    update-mime-database "${DATA_HOME}/mime" >/dev/null 2>&1 || true
+  fi
+}
+
+discard_transaction() {
+  rm -rf -- "${TRANSACTION_BACKUP}"
+  TRANSACTION_BACKUP=""
+  rm -rf -- "${INTEGRATION_STAGE}"
+  INTEGRATION_STAGE=""
+}
+
+prune_releases() {
+  local current_target previous_target release_dir relative
+
+  current_target="$(release_target "${CURRENT_LINK}" || true)"
+  previous_target="$(release_target "${PREVIOUS_LINK}" || true)"
+
+  while IFS= read -r -d '' release_dir; do
+    relative="releases/$(basename "${release_dir}")"
+    if [[ "${relative}" != "${current_target}" && "${relative}" != "${previous_target}" ]]; then
+      info "removing superseded release $(basename "${release_dir}")"
+      rm -rf -- "${release_dir}"
+    fi
+  done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -type d -print0)
+}
+
+activate_release() {
+  local destination="$1"
+  local old_target new_target
+
+  old_target="$(release_target "${CURRENT_LINK}" || true)"
+  new_target="releases/$(basename "${destination}")"
+
+  if [[ -n "${old_target}" && "${old_target}" != "${new_target}" ]]; then
+    set_managed_link "${PREVIOUS_LINK}" "${old_target}"
+  fi
+  set_managed_link "${CURRENT_LINK}" "${new_target}"
+}
+
+download_release() {
+  local manifest="$1"
+  local url sha256 version build release_id destination artifact partial actual_sha
+
+  url="$(jq -r '.url' <<<"${manifest}")"
+  sha256="$(jq -r '.sha256hash' <<<"${manifest}")"
+  version="$(jq -r '.windsurfVersion' <<<"${manifest}")"
+  build="$(jq -r '.version' <<<"${manifest}")"
+  release_id="$(release_identifier "${version}" "${build}" "${sha256}")"
+  destination="${RELEASES_DIR}/${release_id}"
+  artifact="${CACHE_ROOT}/Devin-linux-x64-${release_id}.deb"
+  partial="${artifact}.part"
+
+  if [[ -d "${destination}" ]]; then
+    if [[ -f "${destination}/release.json" &&
+      "$(jq -r '.sha256 // empty' "${destination}/release.json")" == "${sha256}" ]]; then
+      validate_release "${destination}" "${build}" \
+        "$(jq -r '.productVersion' <<<"${manifest}")"
+      printf '%s\n' "${destination}"
+      return
+    fi
+    die "existing release directory does not match the official manifest: ${destination}"
+  fi
+
+  if [[ -f "${artifact}" ]]; then
+    actual_sha="$(sha256sum "${artifact}" | awk '{print $1}')"
+    if [[ "${actual_sha}" != "${sha256}" ]]; then
+      warn "discarding a cached artifact with the wrong checksum"
+      rm -f -- "${artifact}"
+    fi
+  fi
+
+  if [[ ! -f "${artifact}" ]]; then
+    info "downloading official Devin Desktop ${version}"
+    if [[ -f "${partial}" ]]; then
+      curl "${CURL_SECURITY_OPTIONS[@]}" --show-error --max-time 7200 \
+        --continue-at - --output "${partial}" "${url}" ||
+        die "download failed; the partial file was kept for retry"
+    else
+      curl "${CURL_SECURITY_OPTIONS[@]}" --show-error --max-time 7200 \
+        --output "${partial}" "${url}" ||
+        die "download failed; the partial file was kept for retry"
+    fi
+    mv -- "${partial}" "${artifact}"
+  fi
+
+  actual_sha="$(sha256sum "${artifact}" | awk '{print $1}')"
+  if [[ "${actual_sha}" != "${sha256}" ]]; then
+    rm -f -- "${artifact}" "${partial}"
+    die "downloaded artifact failed the official SHA-256 check"
+  fi
+
+  info "verified official SHA-256 ${sha256}"
+  assemble_release "${artifact}" "${manifest}" "${destination}"
+  rm -f -- "${artifact}" "${partial}"
+  printf '%s\n' "${destination}"
+}
+
+command_status() {
+  local current_dir previous_dir
+
+  require_commands jq readlink
+
+  if current_dir="$(release_path "${CURRENT_LINK}")"; then
+    printf 'Current:  %s\n' "$(release_label "${current_dir}")"
+    printf 'Location: %s\n' "${current_dir}/app"
+  else
+    printf 'Current:  not installed\n'
+  fi
+
+  if previous_dir="$(release_path "${PREVIOUS_LINK}")"; then
+    printf 'Previous: %s\n' "$(release_label "${previous_dir}")"
+  else
+    printf 'Previous: none\n'
+  fi
+}
+
+command_check() {
+  local manifest latest current_dir
+
+  require_manifest_commands
+  require_commands readlink
+  ensure_supported_architecture
+  manifest="$(fetch_manifest)"
+  latest="$(jq -r '"\(.windsurfVersion) (\(.version[0:12]))"' <<<"${manifest}")"
+
+  if manifest_matches_current "${manifest}"; then
+    printf 'Current: %s\nLatest:  %s\nStatus:  up to date\n' "${latest}" "${latest}"
+  elif current_dir="$(release_path "${CURRENT_LINK}")"; then
+    printf 'Current: %s\nLatest:  %s\nStatus:  update available\n' \
+      "$(release_label "${current_dir}")" "${latest}"
+  else
+    printf 'Current: not installed\nLatest:  %s\nStatus:  ready to install\n' "${latest}"
+  fi
+}
+
+activate_with_integration() {
+  local destination="$1"
+
+  build_integration_stage "${destination}"
+  backup_transaction
+
+  if ! (
+    activate_release "${destination}" || exit 1
+    install_integration_from_stage || exit 1
+  ); then
+    warn "activation failed; restoring the previous release and desktop state"
+    restore_transaction
+    exit 1
+  fi
+
+  discard_transaction
+}
+
+command_update() {
+  local manifest destination
+
+  require_mutation_commands
+  require_integration_commands
+  ensure_supported_architecture
+  ensure_user_namespaces
+  acquire_lock
+  require_app_stopped
+  manifest="$(fetch_manifest)"
+
+  if manifest_matches_current "${manifest}"; then
+    info "the active release already matches the official stable manifest"
+    destination="$(release_path "${CURRENT_LINK}")"
+    validate_release \
+      "${destination}" \
+      "$(jq -r '.version' <<<"${manifest}")" \
+      "$(jq -r '.productVersion' <<<"${manifest}")"
+    activate_with_integration "${destination}"
+    command_status
+    return
+  fi
+
+  reject_manifest_downgrade "${manifest}"
+  destination="$(download_release "${manifest}")"
+  activate_with_integration "${destination}"
+
+  prune_releases
+  info "official Devin Desktop installation is active"
+  command_status
+}
+
+command_rollback() {
+  local current_target previous_target previous_path
+  local metadata_build metadata_product
+
+  require_release_commands
+  require_commands flock unshare
+  require_integration_commands
+  ensure_supported_architecture
+  ensure_user_namespaces
+  acquire_lock
+  require_app_stopped
+
+  current_target="$(release_target "${CURRENT_LINK}")" ||
+    die "no active release is installed"
+  previous_target="$(release_target "${PREVIOUS_LINK}")" ||
+    die "no previous release is available"
+  previous_path="${INSTALL_ROOT}/${previous_target}"
+  metadata_build="$(jq -r '.build // empty' "${previous_path}/release.json")"
+  metadata_product="$(jq -r '.productVersion // empty' "${previous_path}/release.json")"
+  validate_release "${previous_path}" "${metadata_build}" "${metadata_product}"
+  build_integration_stage "${previous_path}"
+  backup_transaction
+
+  if ! (
+    set_managed_link "${CURRENT_LINK}" "${previous_target}" || exit 1
+    set_managed_link "${PREVIOUS_LINK}" "${current_target}" || exit 1
+    install_integration_from_stage || exit 1
+  ); then
+    warn "rollback failed; restoring the prior release and desktop state"
+    restore_transaction
+    exit 1
+  fi
+
+  discard_transaction
+  info "rollback complete"
+  command_status
+}
+
+command_set_defaults() {
+  require_commands jq sha256sum readlink flock
+  require_integration_commands
+  ensure_supported_architecture
+  acquire_lock
+  release_path "${CURRENT_LINK}" >/dev/null ||
+    die "no active release is installed"
+  ensure_integration_manageable
+  state_is_valid ||
+    die "desktop integration state is missing; run update first"
+
+  backup_transaction
+  if ! (
+    register_associations true || exit 1
+    refresh_desktop_caches || exit 1
+  ); then
+    warn "could not set defaults; restoring the previous desktop state"
+    restore_transaction
+    exit 1
+  fi
+  discard_transaction
+  info "Devin Desktop is now the default for its URL schemes and workspace files"
+}
+
+command_doctor() {
+  local current_dir metadata_build metadata_product command_target
+  local handler
+  local -a failures=()
+  local -a warnings=()
+
+  require_release_commands
+  require_integration_commands
+  ensure_supported_architecture
+  ensure_user_namespaces
+
+  current_dir="$(release_path "${CURRENT_LINK}")" ||
+    die "no active release is installed"
+  metadata_build="$(jq -r '.build // empty' "${current_dir}/release.json")"
+  metadata_product="$(jq -r '.productVersion // empty' "${current_dir}/release.json")"
+  validate_release "${current_dir}" "${metadata_build}" "${metadata_product}"
+
+  [[ -L "${APP_COMMAND}" ]] || failures+=("terminal command is not a symlink")
+  command_target="$(readlink -f "${APP_COMMAND}" 2>/dev/null || true)"
+  [[ "${command_target}" == "${current_dir}/app/bin/devin-desktop" ]] ||
+    failures+=("terminal command does not resolve through the current release")
+
+  desktop-file-validate "${MAIN_DESKTOP}" >/dev/null 2>&1 ||
+    failures+=("main desktop entry is invalid")
+  desktop-file-validate "${URL_DESKTOP}" >/dev/null 2>&1 ||
+    failures+=("URL desktop entry is invalid")
+  managed_file_matches_state mainDesktop "${MAIN_DESKTOP}" ||
+    failures+=("main desktop entry differs from manager state")
+  managed_file_matches_state urlDesktop "${URL_DESKTOP}" ||
+    failures+=("URL desktop entry differs from manager state")
+  managed_file_matches_state icon "${ICON_FILE}" ||
+    failures+=("application icon differs from manager state")
+  managed_file_matches_state mime "${MIME_FILE}" ||
+    failures+=("workspace MIME declaration differs from manager state")
+  [[ "$(stat -c '%a' "${STATE_FILE}" 2>/dev/null || true)" == "600" ]] ||
+    failures+=("manager state permissions are not 0600")
+
+  handler="$(query_default "${MIME_DEVIN}")"
+  [[ "${handler}" == "${URL_DESKTOP_ID}" ]] ||
+    warnings+=("Devin URL default is ${handler:-unset}; run set-defaults to change it")
+  handler="$(query_default "${MIME_WINDSURF}")"
+  [[ "${handler}" == "${URL_DESKTOP_ID}" ]] ||
+    warnings+=("Windsurf URL default is ${handler:-unset}; run set-defaults to change it")
+  handler="$(query_default "${MIME_WORKSPACE}")"
+  [[ "${handler}" == "${MAIN_DESKTOP_ID}" ]] ||
+    warnings+=("workspace default is ${handler:-unset}; run set-defaults to change it")
+
+  if ! command -v kbuildsycoca6 >/dev/null 2>&1; then
+    warnings+=("KDE cache utility is not installed; this is expected on non-KDE desktops")
+  fi
+
+  if ((${#failures[@]} > 0)); then
+    printf 'Installation problems:\n' >&2
+    printf '  - %s\n' "${failures[@]}" >&2
+    exit 1
+  fi
+
+  printf 'Healthy: %s\n' "$(release_label "${current_dir}")"
+  printf 'Command: %s\n' "${APP_COMMAND}"
+  printf 'Launcher: %s\n' "${MAIN_DESKTOP}"
+  printf 'Sandbox: unprivileged user namespaces available\n'
+  if ((${#warnings[@]} > 0)); then
+    printf 'Warnings:\n' >&2
+    for handler in "${warnings[@]}"; do
+      printf '  - %s\n' "${handler}" >&2
+    done
+  fi
+}
+
+rewrite_mimeapps_without_handler() {
+  local file="$1"
+  local mime_type="$2"
+  local desktop_id="$3"
+  local temporary
+
+  [[ -f "${file}" && ! -L "${file}" ]] || return 0
+  temporary="${file}.new.$$"
+  awk -v mime="${mime_type}" -v remove_id="${desktop_id}" '
+    /^\[/ { section = $0 }
+    section == "[Default Applications]" && index($0, mime "=") == 1 {
+      value = substr($0, length(mime) + 2)
+      count = split(value, entries, ";")
+      output = ""
+      for (entry_index = 1; entry_index <= count; entry_index++) {
+        if (entries[entry_index] != "" && entries[entry_index] != remove_id) {
+          output = output entries[entry_index] ";"
+        }
+      }
+      if (output != "") {
+        print mime "=" output
+      }
+      next
+    }
+    { print }
+  ' "${file}" >"${temporary}" || return 1
+  chmod --reference="${file}" "${temporary}"
+  mv -Tf -- "${temporary}" "${file}"
+}
+
+remove_handler_from_user_defaults() {
+  local mime_type="$1"
+  local desktop_id="$2"
+  local file
+
+  for file in \
+    "${CONFIG_HOME}/mimeapps.list" \
+    "${DATA_HOME}/applications/mimeapps.list" \
+    "${DATA_HOME}/mimeapps.list"; do
+    rewrite_mimeapps_without_handler "${file}" "${mime_type}" "${desktop_id}"
+  done
+}
+
+restore_one_association() {
+  local mime_type="$1"
+  local desktop_id="$2"
+  local original="$3"
+  local current
+
+  current="$(query_default "${mime_type}")"
+  if [[ "${current}" == "${desktop_id}" ]] ||
+    legacy_desktop_id_owned "${current}"; then
+    remove_handler_from_user_defaults "${mime_type}" "${desktop_id}" || return 1
+    if [[ "${current}" != "${desktop_id}" ]]; then
+      remove_handler_from_user_defaults "${mime_type}" "${current}" || return 1
+    fi
+    if [[ -n "${original}" ]]; then
+      xdg-mime default "${original}" "${mime_type}"
+    fi
+  else
+    remove_handler_from_user_defaults "${mime_type}" "${desktop_id}" || return 1
+    warn "leaving user-selected default for ${mime_type} unchanged: ${current:-unset}"
+  fi
+}
+
+restore_associations() {
+  local original_devin="" original_windsurf="" original_workspace=""
+
+  if state_is_valid; then
+    original_devin="$(jq -r --arg mime "${MIME_DEVIN}" \
+      '.originalDefaults[$mime] // ""' "${STATE_FILE}")"
+    original_windsurf="$(jq -r --arg mime "${MIME_WINDSURF}" \
+      '.originalDefaults[$mime] // ""' "${STATE_FILE}")"
+    original_workspace="$(jq -r --arg mime "${MIME_WORKSPACE}" \
+      '.originalDefaults[$mime] // ""' "${STATE_FILE}")"
+  fi
+
+  restore_one_association "${MIME_DEVIN}" "${URL_DESKTOP_ID}" "${original_devin}" ||
+    return 1
+  restore_one_association "${MIME_WINDSURF}" "${URL_DESKTOP_ID}" "${original_windsurf}" ||
+    return 1
+  restore_one_association "${MIME_WORKSPACE}" "${MAIN_DESKTOP_ID}" "${original_workspace}"
+}
+
+remove_managed_regular_file() {
+  local path="$1"
+  local key="$2"
+  local marker_allowed="${3:-false}"
+
+  [[ -e "${path}" || -L "${path}" ]] || return 0
+  if state_is_valid; then
+    if managed_file_matches_state "${key}" "${path}"; then
+      rm -f -- "${path}"
+    else
+      warn "leaving modified or non-manager-owned path in place: ${path}"
+    fi
+  elif [[ "${marker_allowed}" == "true" && -f "${path}" && ! -L "${path}" ]] &&
+    grep -qx "${MANAGER_DESKTOP_MARKER}" "${path}"; then
+    rm -f -- "${path}"
+  else
+    warn "leaving modified or non-manager-owned path in place: ${path}"
+  fi
+}
+
+remove_manager_command_if_owned() {
+  [[ -e "${MANAGER_COMMAND}" || -L "${MANAGER_COMMAND}" ]] || return 0
+
+  if [[ -L "${MANAGER_COMMAND}" ]]; then
+    case "$(readlink -f "${MANAGER_COMMAND}" 2>/dev/null || true)" in
+      "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)")
+        rm -f -- "${MANAGER_COMMAND}"
+        return
+        ;;
+    esac
+  elif [[ -f "${MANAGER_COMMAND}" ]] &&
+    grep -Fqx "readonly MANAGER_ID=\"${MANAGER_ID}\"" \
+      "${MANAGER_COMMAND}"; then
+    rm -f -- "${MANAGER_COMMAND}"
+    return
+  fi
+
+  warn "leaving non-manager-owned command in place: ${MANAGER_COMMAND}"
+}
+
+perform_uninstall() {
+  restore_associations || return 1
+
+  if [[ -L "${APP_COMMAND}" &&
+    "$(readlink "${APP_COMMAND}")" == "${CURRENT_LINK}/app/bin/devin-desktop" ]]; then
+    rm -f -- "${APP_COMMAND}"
+  elif [[ -e "${APP_COMMAND}" || -L "${APP_COMMAND}" ]]; then
+    warn "leaving non-manager-owned command in place: ${APP_COMMAND}"
+  fi
+
+  remove_managed_regular_file "${MAIN_DESKTOP}" mainDesktop true || return 1
+  remove_managed_regular_file "${URL_DESKTOP}" urlDesktop true || return 1
+  remove_managed_regular_file "${ICON_FILE}" icon false || return 1
+  remove_managed_regular_file "${MIME_FILE}" mime false || return 1
+  remove_legacy_integration || return 1
+  refresh_desktop_caches || return 1
+  rm -rf -- "${CACHE_ROOT}" "${INSTALL_ROOT}" "${STATE_DIR}" || return 1
+  remove_manager_command_if_owned
+}
+
+command_uninstall() {
+  local answer="${1:-}"
+
+  require_commands jq sha256sum readlink flock awk mktemp
+  require_integration_commands
+  acquire_lock
+  require_app_stopped
+  validate_state_or_absent
+
+  if [[ "${answer}" != "--yes" ]]; then
+    if [[ ! -t 0 ]]; then
+      die "uninstall requires an interactive terminal or --yes"
+    fi
+    printf 'Remove the managed Devin Desktop application and manager? [y/N] '
+    read -r answer
+    [[ "${answer,,}" == "y" || "${answer,,}" == "yes" ]] || {
+      info "uninstall cancelled"
+      return
+    }
+  fi
+
+  backup_transaction
+  if ! (perform_uninstall); then
+    warn "uninstall failed; restoring manager-owned files and desktop defaults"
+    restore_transaction
+    exit 1
+  fi
+  discard_transaction
+  info "managed application removed; Devin CLI and user configuration were preserved"
+}
+
+main() {
+  local command_name="${1:-help}"
+
+  case "${command_name}" in
+    help|-h|--help)
+      (($# == 1)) || die "help does not accept arguments"
+      usage
+      return
+      ;;
+    version|-V|--version)
+      (($# == 1)) || die "version does not accept arguments"
+      printf 'devin-desktop-manager %s\n' "${MANAGER_VERSION}"
+      return
+      ;;
+  esac
+
+  validate_environment
+  ensure_not_root
+
+  case "${command_name}" in
+    install|update)
+      shift
+      (($# == 0)) || die "${command_name} does not accept arguments"
+      command_update
+      ;;
+    status)
+      shift
+      (($# == 0)) || die "status does not accept arguments"
+      command_status
+      ;;
+    check)
+      shift
+      (($# == 0)) || die "check does not accept arguments"
+      command_check
+      ;;
+    rollback)
+      shift
+      (($# == 0)) || die "rollback does not accept arguments"
+      command_rollback
+      ;;
+    set-defaults)
+      shift
+      (($# == 0)) || die "set-defaults does not accept arguments"
+      command_set_defaults
+      ;;
+    doctor)
+      shift
+      (($# == 0)) || die "doctor does not accept arguments"
+      command_doctor
+      ;;
+    uninstall)
+      shift
+      (($# <= 1)) || die "uninstall accepts only --yes"
+      [[ $# == 0 || "$1" == "--yes" ]] || die "uninstall accepts only --yes"
+      command_uninstall "${1:-}"
+      ;;
+    *)
+      usage >&2
+      die "unknown command: ${command_name}"
+      ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

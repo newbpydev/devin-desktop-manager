@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+umask 077
+
+usage() {
+  printf 'Usage: package-release VERSION OUTPUT_DIRECTORY\n' >&2
+  exit 2
+}
+
+main() {
+  local version="${1:-}"
+  local output_directory="${2:-}"
+  local project_root archive_name archive_path file_list
+
+  (($# == 2)) || usage
+  [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] ||
+    {
+      printf 'package-release: invalid release version: %s\n' "${version}" >&2
+      exit 1
+    }
+
+  project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  output_directory="$(mkdir -p "${output_directory}" && cd "${output_directory}" && pwd)"
+  archive_name="devin-desktop-manager-${version}.tar.gz"
+  archive_path="${output_directory}/${archive_name}"
+  file_list="$(mktemp)"
+  # Expand the quoted temporary path while the local variable is still in scope.
+  # shellcheck disable=SC2064
+  trap "rm -f -- $(printf '%q' "${file_list}")" EXIT
+
+  (
+    cd "${project_root}"
+    if git rev-parse --verify HEAD >/dev/null 2>&1; then
+      git ls-files --cached -z
+    else
+      git ls-files --cached --others --exclude-standard -z
+    fi | LC_ALL=C sort -z >"${file_list}"
+  )
+  [[ -s "${file_list}" ]] ||
+    {
+      printf 'package-release: no repository files found\n' >&2
+      exit 1
+    }
+
+  rm -f -- "${archive_path}" "${output_directory}/SHA256SUMS"
+  (
+    cd "${project_root}"
+    tar --null --files-from="${file_list}" \
+      --sort=name \
+      --mtime='@0' \
+      --owner=0 \
+      --group=0 \
+      --numeric-owner \
+      --mode='u+rwX,go+rX,go-w' \
+      --transform="s,^,devin-desktop-manager-${version}/," \
+      --format=posix \
+      --pax-option=delete=atime,delete=ctime \
+      -cf -
+  ) | gzip -n -9 >"${archive_path}"
+  chmod 0644 "${archive_path}"
+
+  (
+    cd "${output_directory}"
+    sha256sum "${archive_name}" >SHA256SUMS
+    chmod 0644 SHA256SUMS
+  )
+
+  printf 'Created %s\n' "${archive_path}"
+  printf 'Created %s\n' "${output_directory}/SHA256SUMS"
+}
+
+main "$@"

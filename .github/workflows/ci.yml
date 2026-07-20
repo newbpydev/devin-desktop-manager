@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Offline verification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            bats \
+            desktop-file-utils \
+            jq \
+            libarchive-tools \
+            shellcheck \
+            shared-mime-info \
+            xdg-utils
+
+      - name: Run offline quality gate
+        run: make verify

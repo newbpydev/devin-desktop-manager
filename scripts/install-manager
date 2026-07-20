@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+umask 077
+
+readonly PROJECT_ID="io.github.newbpydev.devin-desktop-manager"
+
+usage() {
+  printf 'Usage: install-manager [--link] SOURCE DESTINATION\n' >&2
+  exit 2
+}
+
+is_manager_source() {
+  local path="$1"
+
+  [[ -f "${path}" ]] &&
+    grep -Fqx "readonly MANAGER_ID=\"${PROJECT_ID}\"" "${path}"
+}
+
+ensure_destination_manageable() {
+  local source="$1"
+  local destination="$2"
+  local resolved_source resolved_destination
+
+  [[ -e "${destination}" || -L "${destination}" ]] || return 0
+
+  if [[ -L "${destination}" ]]; then
+    resolved_source="$(readlink -f "${source}")"
+    resolved_destination="$(readlink -f "${destination}" 2>/dev/null || true)"
+    if [[ "${resolved_destination}" == "${resolved_source}" ]] ||
+      is_manager_source "${resolved_destination}"; then
+      return 0
+    fi
+  elif is_manager_source "${destination}"; then
+    return 0
+  fi
+
+  printf 'install-manager: refusing to replace unrelated path: %s\n' \
+    "${destination}" >&2
+  exit 1
+}
+
+main() {
+  local mode="copy"
+  local source destination temporary
+
+  if [[ "${1:-}" == "--link" ]]; then
+    mode="link"
+    shift
+  fi
+  (($# == 2)) || usage
+  source="$1"
+  destination="$2"
+
+  [[ -f "${source}" && -x "${source}" ]] ||
+    {
+      printf 'install-manager: source is not an executable file: %s\n' \
+        "${source}" >&2
+      exit 1
+    }
+  is_manager_source "${source}" ||
+    {
+      printf 'install-manager: source does not identify this project: %s\n' \
+        "${source}" >&2
+      exit 1
+    }
+
+  ensure_destination_manageable "${source}" "${destination}"
+  mkdir -p -- "$(dirname "${destination}")"
+
+  temporary="$(mktemp "${destination}.tmp.XXXXXX")"
+  trap 'rm -f -- "${temporary}"' EXIT
+  if [[ "${mode}" == "link" ]]; then
+    rm -f -- "${temporary}"
+    ln -s -- "$(readlink -f "${source}")" "${temporary}"
+  else
+    install -m 0755 -- "${source}" "${temporary}"
+  fi
+  mv -Tf -- "${temporary}" "${destination}"
+  trap - EXIT
+
+  if [[ "${mode}" == "link" ]]; then
+    printf 'Linked %s -> %s\n' "${destination}" "$(readlink "${destination}")"
+  else
+    printf 'Installed %s\n' "${destination}"
+  fi
+}
+
+main "$@"

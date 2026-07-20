@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Verify and draft release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out annotated tag
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Require an annotated tag
+        run: |
+          test "$(git cat-file -t "${GITHUB_REF}")" = tag
+
+      - name: Install release dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            bats \
+            desktop-file-utils \
+            jq \
+            libarchive-tools \
+            shellcheck \
+            shared-mime-info \
+            xdg-utils
+
+      - name: Verify and package exact version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          make release-check VERSION="${version}"
+
+      - name: Attest source archive provenance
+        uses: actions/attest-build-provenance@78e6cbd37d0ac1a40113c04f2037dacf1ea3f12e # v4
+        with:
+          subject-path: dist/devin-desktop-manager-*.tar.gz
+
+      - name: Create draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --draft \
+            --verify-tag \
+            --generate-notes \
+            --title "Devin Desktop Manager ${GITHUB_REF_NAME}" \
+            dist/devin-desktop-manager-*.tar.gz \
+            dist/SHA256SUMS

@@ -1,0 +1,53 @@
+name: Bug report
+description: Report a reproducible Devin Desktop Manager problem
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report vulnerabilities here. Follow SECURITY.md for private reporting.
+  - type: input
+    id: version
+    attributes:
+      label: Manager version
+      description: Output of `devin-desktop-manager --version`
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Linux and desktop environment
+      placeholder: Ubuntu 24.04, GNOME on Wayland, x86_64
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Include the exact command after removing sensitive data.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and diagnostics
+      description: Include redacted `status` and `doctor` output when relevant.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed credentials, private paths, and workspace data.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
