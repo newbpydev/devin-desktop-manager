@@ -37,9 +37,11 @@ jobs:
             desktop-file-utils \
             jq \
             libarchive-tools \
+            ruby-dev \
             shellcheck \
             shared-mime-info \
             xdg-utils
+          sudo gem install bashcov -v 3.3.0 --no-document
 
       - name: Verify and package exact version
         env:

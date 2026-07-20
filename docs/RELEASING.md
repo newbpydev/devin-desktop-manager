@@ -7,8 +7,9 @@ Only repository maintainers publish releases.
 1. Update `MANAGER_VERSION` in `bin/devin-desktop-manager` and `VERSION` in the
    `Makefile`.
 2. Move relevant changelog entries into a dated version heading.
-3. Run `make release-check`; it runs the complete offline gate, validates
-   version consistency, and builds a deterministic archive plus `SHA256SUMS`.
+3. Install the pinned Bashcov 3.3.0 dependency and run `make release-check`; it
+   runs lint, behavior tests, the 90% line-coverage gate, version consistency,
+   and deterministic packaging with `SHA256SUMS`.
 4. Review the archive contents and test installation from that archive in a
    disposable user account or VM.
 5. Confirm the scheduled manifest canary is green.
@@ -25,8 +26,8 @@ git tag -a v0.1.0 -m "Devin Desktop Manager v0.1.0"
 git push origin v0.1.0
 ```
 
-The release workflow rejects lightweight tags and version mismatches. It
-re-runs verification, creates the deterministic source archive and
+The release workflow rejects lightweight tags, version mismatches, and coverage
+below 90%. It re-runs verification, creates the deterministic source archive and
 `SHA256SUMS`, generates a GitHub artifact attestation, and creates a draft
 GitHub release. It never packages or uploads Devin Desktop.
 

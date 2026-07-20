@@ -101,6 +101,7 @@ setup() {
   grep -Fq "tags:" "${workflow}"
   grep -Fq "'v*'" "${workflow}"
   grep -Fq 'make release-check' "${workflow}"
+  grep -Fq 'bashcov -v 3.3.0' "${workflow}"
   grep -Fq 'SHA256SUMS' "${workflow}"
   grep -Fq 'actions/attest-build-provenance' "${workflow}"
   grep -Fq -- '--draft' "${workflow}"

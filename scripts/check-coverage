@@ -41,8 +41,9 @@ main() {
   percentage="$(awk -v covered="${covered}" -v relevant="${relevant}" \
     'BEGIN { printf "%.2f", covered * 100 / relevant }')"
 
-  if ! awk -v actual="${percentage}" -v required="${minimum}" \
-    'BEGIN { exit !(actual >= required) }'; then
+  if ! awk -v covered="${covered}" -v relevant="${relevant}" \
+    -v required="${minimum}" \
+    'BEGIN { exit !(covered * 100 >= required * relevant) }'; then
     printf 'check-coverage: %s%% is below required %.2f%% (%s/%s)\n' \
       "${percentage}" "${minimum}" "${covered}" "${relevant}" >&2
     exit 1

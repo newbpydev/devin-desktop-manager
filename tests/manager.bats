@@ -140,6 +140,20 @@ if [[ -n "${MOCK_RM_FAIL_PATH:-}" ]]; then
     [[ "${argument}" != "${MOCK_RM_FAIL_PATH}" ]] || exit 73
   done
 fi
+if [[ -n "${MOCK_RM_SIGNAL_AFTER_PATH:-}" ]]; then
+  for argument in "$@"; do
+    if [[ "${argument}" == "${MOCK_RM_SIGNAL_AFTER_PATH}" ]]; then
+      "$(command -p -v rm)" "$@"
+      kill -TERM "${PPID}"
+      exit 0
+    fi
+  done
+fi
+if [[ -n "${MOCK_RM_SIGNAL_BEFORE_PATTERN:-}" &&
+  "$*" == *"${MOCK_RM_SIGNAL_BEFORE_PATTERN}"* ]]; then
+  kill -TERM "${PPID}"
+  exit 143
+fi
 exec "$(command -p -v rm)" "$@"
 EOF
   chmod 0755 "${MOCK_BIN}"/*
@@ -225,6 +239,24 @@ install_fixture() {
   write_manifest_curl \
     "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
   manager_env update
+}
+
+downgrade_to_public_0_1_layout() {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local cache_root="${TEST_HOME}/.cache/devin-desktop-manager"
+  local state_root="${TEST_HOME}/.local/state/devin-desktop-manager"
+  local metadata temporary
+
+  while IFS= read -r -d '' metadata; do
+    temporary="${metadata}.legacy"
+    jq 'del(.schemaVersion, .managerId)' "${metadata}" >"${temporary}"
+    mv -Tf -- "${temporary}" "${metadata}"
+  done < <(find "${install_root}/releases" -name release.json -type f -print0)
+  rm -f -- \
+    "${install_root}/.devin-desktop-manager-owned" \
+    "${cache_root}/.devin-desktop-manager-owned" \
+    "${state_root}/.devin-desktop-manager-owned"
+  : >"${install_root}/.manager.lock"
 }
 
 @test "version reports the public CLI contract" {
@@ -386,8 +418,60 @@ JSON
   run manager_env update
 
   [ "${status}" -ne 0 ]
-  [[ "${output}" == *"not owned by Devin Desktop Manager"* ]]
+  [[ "${output}" == *"could not be safely verified"* ]] || {
+    printf 'unexpected manager output: %s\n' "${output}" >&3
+    return 1
+  }
   [ "$(cat "${foreign}")" = "user data" ]
+}
+
+@test "update safely migrates the public 0.1.0 installation layout" {
+  local second="${BATS_TEST_TMPDIR}/second.deb"
+  local second_build="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+
+  install_fixture
+  downgrade_to_public_0_1_layout
+  "${FIXTURE_BUILDER}" "${second}" safe "${second_build}" "3.4.28"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${second_build}/Devin-linux-x64-3.4.28.deb" \
+    "${second}" "3.4.28" "${second_build}" 1783378474000
+
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"migrating verified public 0.1.0 installation"* ]]
+  [ -f "${install_root}/.devin-desktop-manager-owned" ]
+  [ -f "${TEST_HOME}/.cache/devin-desktop-manager/.devin-desktop-manager-owned" ]
+  [ -f "${TEST_HOME}/.local/state/devin-desktop-manager/.devin-desktop-manager-owned" ]
+  run jq -e \
+    --arg manager "io.github.newbpydev.devin-desktop-manager" \
+    '.schemaVersion == 1 and .managerId == $manager' \
+    "${install_root}"/releases/*/release.json
+  [ "${status}" -eq 0 ]
+  case "$(readlink "${install_root}/current")" in
+    releases/3.4.28-*) ;;
+    *) return 1 ;;
+  esac
+}
+
+@test "migration rejects a near-miss legacy layout without claiming it" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local desktop="${TEST_HOME}/.local/share/applications/devin-desktop-manager.desktop"
+
+  install_fixture
+  downgrade_to_public_0_1_layout
+  printf '# user modification\n' >>"${desktop}"
+
+  run install_fixture
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"could not be safely verified"* ]]
+  [ ! -e "${install_root}/.devin-desktop-manager-owned" ]
+  run jq -e 'has("managerId") or has("schemaVersion")' \
+    "${install_root}/releases"/*/release.json
+  [ "${status}" -ne 0 ]
+  grep -Fq '# user modification' "${desktop}"
 }
 
 @test "update refuses a symlinked installation root" {
@@ -401,7 +485,10 @@ JSON
   run manager_env update
 
   [ "${status}" -ne 0 ]
-  [[ "${output}" == *"must not be a symbolic link"* ]]
+  [[ "${output}" == *"must not be a symbolic link"* ]] || {
+    printf 'unexpected manager output: %s\n' "${output}" >&3
+    return 1
+  }
   [ "$(cat "${target}/keep.txt")" = "user data" ]
 }
 
@@ -1115,6 +1202,62 @@ EOF
   [ "$(readlink "${install_root}/current")" = "${current_before}" ]
   [ -x "${install_root}/${current_before}/app/bin/devin-desktop" ]
   [ -L "${manager_command}" ]
+}
+
+@test "termination after manager command removal restores the full installation" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local manager_command="${TEST_HOME}/.local/bin/devin-desktop-manager"
+  local current_before
+
+  install_fixture
+  ln -s "${MANAGER}" "${manager_command}"
+  current_before="$(readlink "${install_root}/current")"
+
+  run env MOCK_RM_SIGNAL_AFTER_PATH="${manager_command}" \
+    HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" \
+    "${MANAGER}" uninstall --yes
+
+  [ "${status}" -eq 143 ]
+  [ -L "${manager_command}" ]
+  [ "$(readlink "${install_root}/current")" = "${current_before}" ]
+  [ -x "${install_root}/${current_before}/app/bin/devin-desktop" ]
+}
+
+@test "the next mutation finishes an interrupted committed uninstall cleanup" {
+  local cleanup_record="${TEST_HOME}/.local/state/devin-desktop-manager.cleanup"
+  local staged_before
+
+  install_fixture
+
+  run env MOCK_RM_SIGNAL_BEFORE_PATTERN=".uninstall-" \
+    HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" \
+    "${MANAGER}" uninstall --yes
+
+  [ "${status}" -eq 143 ]
+  [ -f "${cleanup_record}" ]
+  staged_before="$(find "${TEST_HOME}/.local/opt" -maxdepth 1 \
+    -type d -name 'devin-desktop.uninstall-*' -print -quit)"
+  [ -n "${staged_before}" ]
+
+  run install_fixture
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"finishing an interrupted uninstall cleanup"* ]]
+  [ ! -e "${cleanup_record}" ]
+  run find "${TEST_HOME}/.local/opt" -maxdepth 1 \
+    -type d -name 'devin-desktop.uninstall-*' -print
+  [ -z "${output}" ]
+  [ -L "${TEST_HOME}/.local/opt/devin-desktop/current" ]
 }
 
 @test "relative XDG paths are rejected before any mutation" {

@@ -41,6 +41,7 @@ EOF
 @test "coverage target enforces the public repository threshold" {
   grep -Fq 'coverage:' "${PROJECT_ROOT}/Makefile"
   grep -Fq 'COVERAGE_MINIMUM ?= 90' "${PROJECT_ROOT}/Makefile"
+  grep -Fq 'release-check: verify coverage' "${PROJECT_ROOT}/Makefile"
   grep -Fq 'make coverage' "${PROJECT_ROOT}/CONTRIBUTING.md"
   grep -Fq 'minimum_coverage ENV.fetch("COVERAGE_MINIMUM", "90")' \
     "${PROJECT_ROOT}/.simplecov"

@@ -101,6 +101,8 @@ The manager:
 - never adds Electron's insecure `--no-sandbox` option;
 - records a durable transaction journal before changing release links,
   integration files, MIME defaults, or state, and recovers it after interruption;
+- records committed uninstall cleanup separately, so the next mutation can
+  safely remove a staged release tree left by interruption;
 - marks manager roots and releases with versioned ownership metadata, refusing
   to overwrite or recursively remove paths it cannot prove it owns.
 
@@ -110,9 +112,11 @@ mode `0600` at
 Desktop, icon, and MIME files use manager-specific names under
 `${XDG_DATA_HOME:-~/.local/share}`.
 
-If a manager root already contains data but lacks its ownership marker, the
-manager stops without changing it. Move the conflicting directory aside and
-inspect it manually; the manager never adopts a non-empty unknown root.
+An installation created by the public 0.1.0 layout is migrated automatically
+after its release links, metadata, state paths, and managed-file hashes all
+validate. This is the only non-empty markerless layout the manager adopts. For
+any other markerless root, the manager stops without changing it; move the
+conflicting directory aside and inspect it manually.
 
 The separate official `devin` CLI and Devin/Windsurf user configuration are
 outside this project's ownership and are preserved by uninstall.

@@ -29,6 +29,7 @@ readonly STATE_DIR="${STATE_HOME}/devin-desktop-manager"
 readonly STATE_FILE="${STATE_DIR}/state.json"
 readonly LOCK_FILE="${STATE_HOME}/devin-desktop-manager.lock"
 readonly TRANSACTION_JOURNAL="${STATE_HOME}/devin-desktop-manager.transaction"
+readonly UNINSTALL_CLEANUP_RECORD="${STATE_HOME}/devin-desktop-manager.cleanup"
 readonly BIN_DIR="${HOME_DIR}/.local/bin"
 readonly APP_COMMAND="${BIN_DIR}/devin-desktop"
 readonly MANAGER_COMMAND="${BIN_DIR}/devin-desktop-manager"
@@ -250,11 +251,23 @@ owned_root_is_valid() {
   [[ "$(cat "${sentinel}")" == "$(ownership_sentinel_content)" ]]
 }
 
+write_ownership_sentinel() {
+  local root="$1"
+  local sentinel="${root}/${OWNERSHIP_SENTINEL_NAME}"
+  local temporary="${sentinel}.new.$$"
+
+  if [[ -e "${sentinel}" || -L "${sentinel}" ]]; then
+    owned_root_is_valid "${root}" || return 1
+    return
+  fi
+  printf '%s' "$(ownership_sentinel_content)" >"${temporary}" || return 1
+  chmod 0600 "${temporary}" || return 1
+  mv -Tf -- "${temporary}" "${sentinel}"
+}
+
 ensure_owned_root() {
   local root="$1"
   local label="$2"
-  local sentinel="${root}/${OWNERSHIP_SENTINEL_NAME}"
-  local temporary="${sentinel}.new.$$"
 
   [[ ! -L "${root}" ]] || die "${label} must not be a symbolic link: ${root}"
   if [[ -e "${root}" ]]; then
@@ -262,20 +275,273 @@ ensure_owned_root() {
     if ! owned_root_is_valid "${root}"; then
       directory_is_empty "${root}" ||
         die "${label} is not owned by Devin Desktop Manager: ${root}"
-      printf '%s' "$(ownership_sentinel_content)" >"${temporary}"
-      chmod 0600 "${temporary}"
-      mv -Tf -- "${temporary}" "${sentinel}"
+      write_ownership_sentinel "${root}" ||
+        die "could not mark ${label} as manager-owned: ${root}"
     fi
   else
     mkdir -p -- "${root}"
-    printf '%s' "$(ownership_sentinel_content)" >"${temporary}"
-    chmod 0600 "${temporary}"
-    mv -Tf -- "${temporary}" "${sentinel}"
+    write_ownership_sentinel "${root}" ||
+      die "could not mark ${label} as manager-owned: ${root}"
   fi
   chmod 0700 "${root}"
 }
 
+legacy_root_marker_is_compatible() {
+  local root="$1"
+  local sentinel="${root}/${OWNERSHIP_SENTINEL_NAME}"
+
+  if [[ -e "${sentinel}" || -L "${sentinel}" ]]; then
+    owned_root_is_valid "${root}"
+  fi
+}
+
+legacy_release_metadata_is_valid() {
+  local release_dir="$1"
+  local metadata="${release_dir}/release.json"
+  local version build product_version sha256 artifact_url expected_id
+  local url_prefix="https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/"
+
+  [[ -f "${metadata}" && ! -L "${metadata}" ]] || return 1
+  jq -e --arg manager_id "${MANAGER_ID}" '
+    type == "object" and
+    (
+      del(.schemaVersion, .managerId) | keys | sort
+    ) == [
+      "artifactUrl",
+      "build",
+      "installedAt",
+      "productVersion",
+      "releaseTimestamp",
+      "sha256",
+      "windsurfVersion"
+    ] and
+    (
+      (
+        (has("schemaVersion") | not) and
+        (has("managerId") | not)
+      ) or (
+        .schemaVersion == 1 and
+        .managerId == $manager_id
+      )
+    ) and
+    (.windsurfVersion | type == "string") and
+    (.productVersion | type == "string") and
+    (.build | type == "string") and
+    (.artifactUrl | type == "string") and
+    (.sha256 | type == "string") and
+    (.releaseTimestamp | type == "number") and
+    (.installedAt | type == "string")
+  ' "${metadata}" >/dev/null 2>&1 || return 1
+
+  version="$(jq -r '.windsurfVersion' "${metadata}")"
+  product_version="$(jq -r '.productVersion' "${metadata}")"
+  build="$(jq -r '.build' "${metadata}")"
+  sha256="$(jq -r '.sha256' "${metadata}")"
+  artifact_url="$(jq -r '.artifactUrl' "${metadata}")"
+  is_safe_release_identifier "${version}" || return 1
+  is_safe_release_identifier "${product_version}" || return 1
+  is_safe_release_identifier "${build}" || return 1
+  [[ "${sha256}" =~ ^[0-9a-f]{64}$ ]] || return 1
+  [[ "${artifact_url}" == \
+    "${url_prefix}${build}/Devin-linux-x64-${version}.deb" ]] || return 1
+  expected_id="$(release_identifier "${version}" "${build}" "${sha256}")" ||
+    return 1
+  [[ "$(basename "${release_dir}")" == "${expected_id}" ]] || return 1
+
+  [[ -d "${release_dir}/app" && ! -L "${release_dir}/app" ]] || return 1
+  [[ -d "${release_dir}/integration" &&
+    ! -L "${release_dir}/integration" ]] || return 1
+  [[ -x "${release_dir}/app/devin-desktop" &&
+    ! -L "${release_dir}/app/devin-desktop" ]] || return 1
+  [[ -x "${release_dir}/app/bin/devin-desktop" &&
+    ! -L "${release_dir}/app/bin/devin-desktop" ]] || return 1
+  [[ -f "${release_dir}/integration/devin-desktop.png" &&
+    ! -L "${release_dir}/integration/devin-desktop.png" ]] || return 1
+  [[ -f "${release_dir}/integration/devin-desktop-workspace.xml" &&
+    ! -L "${release_dir}/integration/devin-desktop-workspace.xml" ]] || return 1
+}
+
+legacy_release_inventory_is_valid() {
+  local current_target previous_target release_entry relative
+
+  [[ -d "${RELEASES_DIR}" && ! -L "${RELEASES_DIR}" ]] || return 1
+  current_target="$(release_target "${CURRENT_LINK}")" || return 1
+  previous_target="$(release_target "${PREVIOUS_LINK}" || true)"
+
+  while IFS= read -r -d '' release_entry; do
+    relative="releases/$(basename "${release_entry}")"
+    [[ "${relative}" == "${current_target}" ||
+      "${relative}" == "${previous_target}" ]] || return 1
+    legacy_release_metadata_is_valid "${release_entry}" || return 1
+  done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -print0)
+}
+
+legacy_state_is_valid() {
+  local original
+
+  state_is_valid || return 1
+  jq -e \
+    --arg manager_version "0.1.0" \
+    --arg mime_devin "${MIME_DEVIN}" \
+    --arg mime_windsurf "${MIME_WINDSURF}" \
+    --arg mime_workspace "${MIME_WORKSPACE}" \
+    --arg main_path "${MAIN_DESKTOP}" \
+    --arg url_path "${URL_DESKTOP}" \
+    --arg icon_path "${ICON_FILE}" \
+    --arg mime_path "${MIME_FILE}" \
+    --arg command_path "${APP_COMMAND}" \
+    --arg command_target "${CURRENT_LINK}/app/bin/devin-desktop" '
+      (keys | sort) == [
+        "appCommand",
+        "managedFiles",
+        "managerVersion",
+        "originalDefaults",
+        "schemaVersion"
+      ] and
+      .schemaVersion == 1 and
+      .managerVersion == $manager_version and
+      (.originalDefaults | keys | sort) ==
+        ([$mime_devin, $mime_windsurf, $mime_workspace] | sort) and
+      ([.originalDefaults[] | type] | all(. == "string")) and
+      (.managedFiles | keys | sort) ==
+        ["icon", "mainDesktop", "mime", "urlDesktop"] and
+      .managedFiles.mainDesktop.path == $main_path and
+      .managedFiles.urlDesktop.path == $url_path and
+      .managedFiles.icon.path == $icon_path and
+      .managedFiles.mime.path == $mime_path and
+      .appCommand == {
+        path: $command_path,
+        target: $command_target
+      }
+    ' "${STATE_FILE}" >/dev/null 2>&1 || return 1
+
+  for original in \
+    "$(jq -r --arg mime "${MIME_DEVIN}" '.originalDefaults[$mime]' "${STATE_FILE}")" \
+    "$(jq -r --arg mime "${MIME_WINDSURF}" '.originalDefaults[$mime]' "${STATE_FILE}")" \
+    "$(jq -r --arg mime "${MIME_WORKSPACE}" '.originalDefaults[$mime]' "${STATE_FILE}")"; do
+    is_safe_desktop_id "${original}" || return 1
+  done
+  managed_file_matches_state mainDesktop "${MAIN_DESKTOP}" || return 1
+  managed_file_matches_state urlDesktop "${URL_DESKTOP}" || return 1
+  managed_file_matches_state icon "${ICON_FILE}" || return 1
+  managed_file_matches_state mime "${MIME_FILE}" || return 1
+  [[ -L "${APP_COMMAND}" &&
+    "$(readlink "${APP_COMMAND}")" == \
+      "${CURRENT_LINK}/app/bin/devin-desktop" ]]
+}
+
+legacy_install_root_is_valid() {
+  local entry name
+
+  [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] || return 1
+  while IFS= read -r -d '' entry; do
+    name="$(basename "${entry}")"
+    case "${name}" in
+      releases)
+        [[ -d "${entry}" && ! -L "${entry}" ]] || return 1
+        ;;
+      current|previous)
+        [[ -L "${entry}" ]] || return 1
+        ;;
+      .manager.lock)
+        [[ -f "${entry}" && ! -L "${entry}" ]] || return 1
+        ;;
+      "${OWNERSHIP_SENTINEL_NAME}")
+        owned_root_is_valid "${INSTALL_ROOT}" || return 1
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  done < <(find "${INSTALL_ROOT}" -mindepth 1 -maxdepth 1 -print0)
+  legacy_release_inventory_is_valid
+}
+
+legacy_cache_root_is_valid() {
+  local entry name release_id
+
+  [[ -d "${CACHE_ROOT}" && ! -L "${CACHE_ROOT}" ]] || return 1
+  legacy_root_marker_is_compatible "${CACHE_ROOT}" || return 1
+  while IFS= read -r -d '' entry; do
+    name="$(basename "${entry}")"
+    case "${name}" in
+      "${OWNERSHIP_SENTINEL_NAME}")
+        ;;
+      Devin-linux-x64-*.deb|Devin-linux-x64-*.deb.part)
+        [[ -f "${entry}" && ! -L "${entry}" ]] || return 1
+        release_id="${name#Devin-linux-x64-}"
+        release_id="${release_id%.part}"
+        release_id="${release_id%.deb}"
+        is_safe_release_identifier "${release_id}" || return 1
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  done < <(find "${CACHE_ROOT}" -mindepth 1 -maxdepth 1 -print0)
+}
+
+legacy_state_root_is_valid() {
+  local entry name
+
+  [[ -d "${STATE_DIR}" && ! -L "${STATE_DIR}" ]] || return 1
+  legacy_root_marker_is_compatible "${STATE_DIR}" || return 1
+  while IFS= read -r -d '' entry; do
+    name="$(basename "${entry}")"
+    case "${name}" in
+      state.json|"${OWNERSHIP_SENTINEL_NAME}") ;;
+      *) return 1 ;;
+    esac
+  done < <(find "${STATE_DIR}" -mindepth 1 -maxdepth 1 -print0)
+  legacy_state_is_valid
+}
+
+upgrade_legacy_release_metadata() {
+  local release_dir="$1"
+  local metadata="${release_dir}/release.json"
+  local temporary="${metadata}.new.$$"
+
+  jq --arg manager_id "${MANAGER_ID}" '
+    . + {
+      schemaVersion: 1,
+      managerId: $manager_id
+    }
+  ' "${metadata}" >"${temporary}" || return 1
+  chmod 0600 "${temporary}" || return 1
+  mv -Tf -- "${temporary}" "${metadata}"
+}
+
+migrate_legacy_layout_if_needed() {
+  local sentinel="${INSTALL_ROOT}/${OWNERSHIP_SENTINEL_NAME}"
+  local release_dir
+
+  [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] || return 0
+  if [[ -e "${sentinel}" || -L "${sentinel}" ]] ||
+    directory_is_empty "${INSTALL_ROOT}"; then
+    return 0
+  fi
+
+  if ! legacy_install_root_is_valid ||
+    ! legacy_cache_root_is_valid ||
+    ! legacy_state_root_is_valid; then
+    die "public 0.1.0 installation could not be safely verified; refusing ownership migration"
+  fi
+
+  info "migrating verified public 0.1.0 installation to ownership schema 1"
+  while IFS= read -r -d '' release_dir; do
+    upgrade_legacy_release_metadata "${release_dir}" ||
+      die "could not upgrade legacy release metadata: ${release_dir}"
+  done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -type d -print0)
+  write_ownership_sentinel "${CACHE_ROOT}" ||
+    die "could not mark the legacy cache as manager-owned"
+  write_ownership_sentinel "${STATE_DIR}" ||
+    die "could not mark the legacy state as manager-owned"
+  write_ownership_sentinel "${INSTALL_ROOT}" ||
+    die "could not mark the legacy installation as manager-owned"
+}
+
 ensure_layout() {
+  migrate_legacy_layout_if_needed
   ensure_owned_root "${INSTALL_ROOT}" "installation root"
   [[ ! -L "${RELEASES_DIR}" ]] ||
     die "release directory must not be a symbolic link: ${RELEASES_DIR}"
@@ -294,6 +560,7 @@ acquire_lock() {
   exec 9>"${LOCK_FILE}"
   flock -n 9 || die "another Devin Desktop manager operation is running"
   recover_pending_transaction
+  recover_pending_uninstall_cleanup
   ensure_layout
 }
 
@@ -1241,6 +1508,7 @@ backup_transaction() {
   snapshot_path "${CURRENT_LINK}" current || return 1
   snapshot_path "${PREVIOUS_LINK}" previous || return 1
   snapshot_path "${APP_COMMAND}" app-command || return 1
+  snapshot_path "${MANAGER_COMMAND}" manager-command || return 1
   snapshot_path "${MAIN_DESKTOP}" main-desktop || return 1
   snapshot_path "${URL_DESKTOP}" url-desktop || return 1
   snapshot_path "${ICON_FILE}" icon || return 1
@@ -1317,6 +1585,7 @@ restore_transaction() {
   restore_path "${CURRENT_LINK}" current || failed=1
   restore_path "${PREVIOUS_LINK}" previous || failed=1
   restore_path "${APP_COMMAND}" app-command || failed=1
+  restore_path "${MANAGER_COMMAND}" manager-command || failed=1
   restore_path "${MAIN_DESKTOP}" main-desktop || failed=1
   restore_path "${URL_DESKTOP}" url-desktop || failed=1
   restore_path "${ICON_FILE}" icon || failed=1
@@ -1362,6 +1631,70 @@ recover_pending_transaction() {
       restore_transaction ||
         die "unfinished transaction recovery failed; preserved at ${TRANSACTION_JOURNAL}"
     }
+}
+
+uninstall_cleanup_record_path() {
+  jq -er --arg manager_id "${MANAGER_ID}" \
+    --argjson schema_version "${OWNERSHIP_SCHEMA_VERSION}" '
+      select(
+        .schemaVersion == $schema_version and
+        .managerId == $manager_id and
+        (.stagedInstallRoot | type == "string")
+      )
+      | .stagedInstallRoot
+    ' "${UNINSTALL_CLEANUP_RECORD}" 2>/dev/null
+}
+
+validate_staged_install_root_path() {
+  local path="$1"
+  local suffix
+
+  [[ "${path}" == "${INSTALL_ROOT}.uninstall-"* ]] || return 1
+  suffix="${path#"${INSTALL_ROOT}.uninstall-"}"
+  [[ "${suffix}" =~ ^[0-9]+$ ]]
+}
+
+write_uninstall_cleanup_record() {
+  local staged_root="$1"
+  local temporary="${UNINSTALL_CLEANUP_RECORD}.new.$$"
+
+  validate_staged_install_root_path "${staged_root}" || return 1
+  [[ ! -e "${UNINSTALL_CLEANUP_RECORD}" &&
+    ! -L "${UNINSTALL_CLEANUP_RECORD}" ]] || return 1
+  jq -n \
+    --arg manager_id "${MANAGER_ID}" \
+    --argjson schema_version "${OWNERSHIP_SCHEMA_VERSION}" \
+    --arg staged_root "${staged_root}" '{
+      schemaVersion: $schema_version,
+      managerId: $manager_id,
+      stagedInstallRoot: $staged_root
+    }' >"${temporary}" || return 1
+  chmod 0600 "${temporary}" || return 1
+  mv -Tf -- "${temporary}" "${UNINSTALL_CLEANUP_RECORD}"
+}
+
+recover_pending_uninstall_cleanup() {
+  local staged_root
+
+  [[ ! -e "${UNINSTALL_CLEANUP_RECORD}" &&
+    ! -L "${UNINSTALL_CLEANUP_RECORD}" ]] && return 0
+  [[ -f "${UNINSTALL_CLEANUP_RECORD}" &&
+    ! -L "${UNINSTALL_CLEANUP_RECORD}" ]] ||
+    die "unfinished uninstall cleanup record is invalid: ${UNINSTALL_CLEANUP_RECORD}"
+  staged_root="$(uninstall_cleanup_record_path)" ||
+    die "unfinished uninstall cleanup record is invalid: ${UNINSTALL_CLEANUP_RECORD}"
+  validate_staged_install_root_path "${staged_root}" ||
+    die "unfinished uninstall cleanup path is unsafe: ${staged_root}"
+
+  if [[ -e "${staged_root}" || -L "${staged_root}" ]]; then
+    owned_root_is_valid "${staged_root}" ||
+      die "unfinished uninstall cleanup root is not manager-owned: ${staged_root}"
+    info "finishing an interrupted uninstall cleanup"
+    rm -rf -- "${staged_root}" ||
+      die "could not finish uninstall cleanup: ${staged_root}"
+  fi
+  rm -f -- "${UNINSTALL_CLEANUP_RECORD}" ||
+    die "could not remove uninstall cleanup record"
 }
 
 release_directory_is_owned() {
@@ -1885,10 +2218,18 @@ command_uninstall() {
     exit 1
   fi
   local staged_root="${STAGED_INSTALL_ROOT}"
+  if ! write_uninstall_cleanup_record "${staged_root}"; then
+    warn "uninstall cleanup could not be made durable; restoring the installation"
+    restore_transaction ||
+      die "uninstall recovery failed; preserved at ${TRANSACTION_JOURNAL}"
+    exit 1
+  fi
   discard_transaction ||
     die "uninstall completed but transaction cleanup failed"
   if [[ -n "${staged_root}" ]] && ! rm -rf -- "${staged_root}"; then
     warn "uninstall completed, but old release data remains at ${staged_root}"
+  elif ! rm -f -- "${UNINSTALL_CLEANUP_RECORD}"; then
+    warn "uninstall completed, but its cleanup record remains at ${UNINSTALL_CLEANUP_RECORD}"
   fi
   STAGED_INSTALL_ROOT=""
   info "managed application removed; Devin CLI and user configuration were preserved"

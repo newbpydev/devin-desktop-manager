@@ -74,14 +74,18 @@ refused. Add `~/.local/bin` to `PATH` if your distribution does not already.
 ## Existing path collisions
 
 The manager creates versioned ownership markers in its installation, cache,
-and state roots. If one of those paths already contains data without a valid
-marker, installation stops without modifying or deleting it. Move the
-conflicting path aside, inspect its contents, and retry. Do not add a marker by
-hand: ownership metadata is part of the manager's deletion safety boundary.
+and state roots. It automatically migrates the public 0.1.0 markerless layout
+only after validating its release links, release metadata, state paths, and
+managed-file hashes. A near-miss or any other path containing data without a
+valid marker is left unchanged. Move that conflicting path aside, inspect its
+contents, and retry. Do not add a marker by hand: ownership metadata is part of
+the manager's deletion safety boundary.
 
 Interrupted mutations leave a private transaction journal beside the state
 directory. The next mutating command acquires the manager lock and restores
-that journal before starting new work.
+that journal before starting new work. If interruption happens after an
+uninstall commits, a separate validated cleanup record lets the next mutation
+remove only the manager-owned staged release tree.
 
 ## User namespaces
 

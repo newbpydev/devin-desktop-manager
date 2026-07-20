@@ -32,6 +32,23 @@ JSON
   [[ "${output}" == *"80.00% is below required 90.00%"* ]]
 }
 
+@test "coverage checker compares exact counts before rounding for display" {
+  jq -n '{
+    "bats-suite": {
+      coverage: {
+        "/project/bin/tool": [
+          range(0; 20000) | if . < 17999 then 1 else 0 end
+        ]
+      }
+    }
+  }' >"${RESULTSET}"
+
+  run "${CHECKER}" "${RESULTSET}" 90
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"90.00% is below required 90.00% (17999/20000)"* ]]
+}
+
 @test "coverage checker rejects malformed or empty result data" {
   printf '{}\n' >"${RESULTSET}"
 
