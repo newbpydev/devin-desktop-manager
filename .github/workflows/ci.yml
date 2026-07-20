@@ -27,12 +27,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes \
             bats \
+            curl \
             desktop-file-utils \
             jq \
             libarchive-tools \
+            ruby-dev \
             shellcheck \
             shared-mime-info \
             xdg-utils
+          sudo gem install bashcov -v 3.3.0 --no-document
 
       - name: Run offline quality gate
-        run: make verify
+        run: |
+          make verify
+          make coverage

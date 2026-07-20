@@ -13,6 +13,9 @@ Only repository maintainers publish releases.
    disposable user account or VM.
 5. Confirm the scheduled manifest canary is green.
 
+To validate an extracted or staged source tree with the checker from this
+checkout, set `RELEASE_CHECK_PROJECT_ROOT` to that absolute directory.
+
 ## Tag and draft
 
 Create an annotated tag whose name exactly matches the manager version:

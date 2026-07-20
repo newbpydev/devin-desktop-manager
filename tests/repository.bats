@@ -81,6 +81,8 @@ setup() {
 
   grep -Fq 'ubuntu-24.04' "${ci}"
   grep -Fq 'make verify' "${ci}"
+  grep -Fq 'make coverage' "${ci}"
+  grep -Fq 'bashcov -v 3.3.0' "${ci}"
   grep -Fq 'pull_request:' "${ci}"
   run grep -F 'pull_request_target:' "${ci}"
   [ "${status}" -ne 0 ]

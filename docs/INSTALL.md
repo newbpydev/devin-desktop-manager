@@ -71,6 +71,18 @@ make doctor
 No command requires `sudo`. Running the manager as root is intentionally
 refused. Add `~/.local/bin` to `PATH` if your distribution does not already.
 
+## Existing path collisions
+
+The manager creates versioned ownership markers in its installation, cache,
+and state roots. If one of those paths already contains data without a valid
+marker, installation stops without modifying or deleting it. Move the
+conflicting path aside, inspect its contents, and retry. Do not add a marker by
+hand: ownership metadata is part of the manager's deletion safety boundary.
+
+Interrupted mutations leave a private transaction journal beside the state
+directory. The next mutating command acquires the manager lock and restores
+that journal before starting new work.
+
 ## User namespaces
 
 The extracted Electron bundle cannot use a root-owned setuid sandbox in a

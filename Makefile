@@ -8,12 +8,15 @@ APP ?= $(HOME)/.local/bin/devin-desktop
 DIST_DIR ?= $(CURDIR)/dist
 BATS ?= bats
 SHELLCHECK ?= shellcheck
+BASHCOV ?= bashcov
+COVERAGE_MINIMUM ?= 90
+COVERAGE_DIR ?= coverage
 
 .DEFAULT_GOAL := help
 
 .PHONY: help install-manager link link-dev install status check update rollback \
 	set-defaults doctor run app-version test lint verify package release-check \
-	uninstall uninstall-yes clean
+	coverage uninstall uninstall-yes clean
 
 help:
 	@printf '%s\n' \
@@ -36,6 +39,7 @@ help:
 		'Development and release:' \
 		'  make link-dev        Symlink the manager source for local development' \
 		'  make test            Run the offline Bats behavior suite' \
+		'  make coverage        Run tests with at least 90% line coverage' \
 		'  make lint            Run Bash syntax and ShellCheck validation' \
 		'  make verify          Run lint and the complete offline test suite' \
 		'  make package         Build a deterministic source archive and SHA256SUMS' \
@@ -64,6 +68,13 @@ app-version:
 test:
 	@"$(BATS)" tests
 
+coverage:
+	@COVERAGE_MINIMUM="$(COVERAGE_MINIMUM)" COVERAGE_DIR="$(COVERAGE_DIR)" \
+		COVERAGE_COMMAND_NAME=bats-suite \
+		"$(BASHCOV)" -- "$(BATS)" tests
+	@./scripts/check-coverage \
+		"$(COVERAGE_DIR)/.resultset.json" "$(COVERAGE_MINIMUM)"
+
 lint:
 	@bash -n "$(PROJECT_MANAGER)" scripts/*
 	@"$(SHELLCHECK)" "$(PROJECT_MANAGER)" scripts/*
@@ -84,4 +95,4 @@ uninstall-yes:
 	@"$(MANAGER)" uninstall --yes
 
 clean:
-	@rm -rf -- "$(DIST_DIR)"
+	@rm -rf -- "$(DIST_DIR)" "$(COVERAGE_DIR)"

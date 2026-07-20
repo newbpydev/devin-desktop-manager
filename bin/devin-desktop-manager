@@ -11,6 +11,8 @@ umask 077
 readonly MANAGER_VERSION="0.1.0"
 readonly MANAGER_ID="io.github.newbpydev.devin-desktop-manager"
 readonly MANAGER_DESKTOP_MARKER="X-Devin-Desktop-Manager=true"
+readonly OWNERSHIP_SCHEMA_VERSION=1
+readonly OWNERSHIP_SENTINEL_NAME=".devin-desktop-manager-owned"
 readonly MANIFEST_URL="https://windsurf-stable.codeium.com/api/update/linux-x64-deb/stable/latest"
 readonly MANIFEST_MAX_BYTES=1048576
 
@@ -25,6 +27,8 @@ readonly STATE_HOME="${XDG_STATE_HOME:-${HOME_DIR}/.local/state}"
 readonly CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME_DIR}/.config}"
 readonly STATE_DIR="${STATE_HOME}/devin-desktop-manager"
 readonly STATE_FILE="${STATE_DIR}/state.json"
+readonly LOCK_FILE="${STATE_HOME}/devin-desktop-manager.lock"
+readonly TRANSACTION_JOURNAL="${STATE_HOME}/devin-desktop-manager.transaction"
 readonly BIN_DIR="${HOME_DIR}/.local/bin"
 readonly APP_COMMAND="${BIN_DIR}/devin-desktop"
 readonly MANAGER_COMMAND="${BIN_DIR}/devin-desktop-manager"
@@ -62,6 +66,8 @@ declare -ar CURL_SECURITY_OPTIONS=(
 STAGING_PATH=""
 INTEGRATION_STAGE=""
 TRANSACTION_BACKUP=""
+STAGED_INSTALL_ROOT=""
+TRANSACTION_RESTORING=false
 
 info() {
   printf 'devin-desktop-manager: %s\n' "$*" >&2
@@ -79,10 +85,10 @@ die() {
 cleanup() {
   local path
 
-  for path in "${STAGING_PATH}" "${INTEGRATION_STAGE}" "${TRANSACTION_BACKUP}"; do
+  for path in "${STAGING_PATH}" "${INTEGRATION_STAGE}"; do
     [[ -n "${path}" && -e "${path}" ]] || continue
     case "${path}" in
-      "${INSTALL_ROOT}"/.staging-*|"${INSTALL_ROOT}"/.integration-*|/tmp/devin-desktop-manager.*)
+      "${INSTALL_ROOT}"/.staging-*|"${INSTALL_ROOT}"/.integration-*)
         rm -rf -- "${path}"
         ;;
       *)
@@ -90,9 +96,31 @@ cleanup() {
         ;;
     esac
   done
+  case "${TRANSACTION_BACKUP}" in
+    "${TRANSACTION_JOURNAL}".new.*)
+      rm -rf -- "${TRANSACTION_BACKUP}"
+      TRANSACTION_BACKUP=""
+      ;;
+  esac
 }
 
 trap cleanup EXIT
+
+handle_transaction_signal() {
+  local status="$1"
+
+  trap - INT TERM HUP
+  if [[ -n "${TRANSACTION_BACKUP}" && "${TRANSACTION_RESTORING}" != "true" ]]; then
+    warn "operation interrupted; restoring the previous managed state"
+    restore_transaction ||
+      warn "automatic recovery failed; the next manager mutation will retry it"
+  fi
+  exit "${status}"
+}
+
+trap 'handle_transaction_signal 130' INT
+trap 'handle_transaction_signal 143' TERM
+trap 'handle_transaction_signal 129' HUP
 
 usage() {
   cat <<'EOF'
@@ -203,16 +231,70 @@ ensure_user_namespaces() {
     die "unprivileged user namespaces are unavailable; refusing to use --no-sandbox"
 }
 
+ownership_sentinel_content() {
+  printf '%s schema=%s\n' "${MANAGER_ID}" "${OWNERSHIP_SCHEMA_VERSION}"
+}
+
+directory_is_empty() {
+  local path="$1"
+
+  [[ -z "$(find "${path}" -mindepth 1 -maxdepth 1 -print -quit)" ]]
+}
+
+owned_root_is_valid() {
+  local root="$1"
+  local sentinel="${root}/${OWNERSHIP_SENTINEL_NAME}"
+
+  [[ -d "${root}" && ! -L "${root}" &&
+    -f "${sentinel}" && ! -L "${sentinel}" ]] || return 1
+  [[ "$(cat "${sentinel}")" == "$(ownership_sentinel_content)" ]]
+}
+
+ensure_owned_root() {
+  local root="$1"
+  local label="$2"
+  local sentinel="${root}/${OWNERSHIP_SENTINEL_NAME}"
+  local temporary="${sentinel}.new.$$"
+
+  [[ ! -L "${root}" ]] || die "${label} must not be a symbolic link: ${root}"
+  if [[ -e "${root}" ]]; then
+    [[ -d "${root}" ]] || die "${label} is not a directory: ${root}"
+    if ! owned_root_is_valid "${root}"; then
+      directory_is_empty "${root}" ||
+        die "${label} is not owned by Devin Desktop Manager: ${root}"
+      printf '%s' "$(ownership_sentinel_content)" >"${temporary}"
+      chmod 0600 "${temporary}"
+      mv -Tf -- "${temporary}" "${sentinel}"
+    fi
+  else
+    mkdir -p -- "${root}"
+    printf '%s' "$(ownership_sentinel_content)" >"${temporary}"
+    chmod 0600 "${temporary}"
+    mv -Tf -- "${temporary}" "${sentinel}"
+  fi
+  chmod 0700 "${root}"
+}
+
 ensure_layout() {
-  mkdir -p -- "${INSTALL_ROOT}" "${RELEASES_DIR}" "${CACHE_ROOT}" \
-    "${BIN_DIR}" "${STATE_DIR}"
-  chmod 0700 "${INSTALL_ROOT}" "${RELEASES_DIR}" "${CACHE_ROOT}" "${STATE_DIR}"
+  ensure_owned_root "${INSTALL_ROOT}" "installation root"
+  [[ ! -L "${RELEASES_DIR}" ]] ||
+    die "release directory must not be a symbolic link: ${RELEASES_DIR}"
+  mkdir -p -- "${RELEASES_DIR}" "${BIN_DIR}"
+  [[ -d "${RELEASES_DIR}" ]] ||
+    die "release path is not a directory: ${RELEASES_DIR}"
+  ensure_owned_root "${CACHE_ROOT}" "cache root"
+  ensure_owned_root "${STATE_DIR}" "state root"
+  chmod 0700 "${RELEASES_DIR}"
 }
 
 acquire_lock() {
-  ensure_layout
-  exec 9>"${INSTALL_ROOT}/.manager.lock"
+  mkdir -p -- "${STATE_HOME}"
+  [[ ! -L "${LOCK_FILE}" ]] ||
+    die "manager lock must not be a symbolic link: ${LOCK_FILE}"
+  exec 9>"${LOCK_FILE}"
   flock -n 9 || die "another Devin Desktop manager operation is running"
+  recover_pending_transaction
+  ensure_layout
 }
 
 release_target() {
@@ -276,8 +358,11 @@ release_identifier() {
   local version="$1"
   local build="$2"
   local sha256="$3"
+  local identifier
 
-  printf '%s-%s-%s\n' "${version}" "${build:0:12}" "${sha256:0:12}"
+  identifier="${version:0:102}-${build:0:12}-${sha256:0:12}"
+  is_safe_release_identifier "${identifier}" || return 1
+  printf '%s\n' "${identifier}"
 }
 
 fetch_manifest() {
@@ -646,6 +731,7 @@ write_release_metadata() {
 
   installed_at="$(date --utc +'%Y-%m-%dT%H:%M:%SZ')"
   jq -n \
+    --arg managerId "${MANAGER_ID}" \
     --arg windsurfVersion "$(jq -r '.windsurfVersion' <<<"${manifest}")" \
     --arg productVersion "$(jq -r '.productVersion' <<<"${manifest}")" \
     --arg build "$(jq -r '.version' <<<"${manifest}")" \
@@ -654,6 +740,8 @@ write_release_metadata() {
     --argjson releaseTimestamp "$(jq -r '.timestamp' <<<"${manifest}")" \
     --arg installedAt "${installed_at}" \
     '{
+      schemaVersion: 1,
+      managerId: $managerId,
       windsurfVersion: $windsurfVersion,
       productVersion: $productVersion,
       build: $build,
@@ -891,7 +979,7 @@ atomic_app_link() {
 }
 
 query_default() {
-  xdg-mime query default "$1" 2>/dev/null || true
+  xdg-mime query default "$1" 2>/dev/null
 }
 
 normalize_original_default() {
@@ -924,7 +1012,7 @@ original_default() {
     return
   fi
 
-  current="$(query_default "${mime_type}")"
+  current="$(query_default "${mime_type}")" || return 1
   normalize_original_default "${current}"
 }
 
@@ -940,19 +1028,19 @@ register_one_association() {
   local force="$3"
   local current
 
-  current="$(query_default "${mime_type}")"
+  current="$(query_default "${mime_type}")" || return 1
   if [[ "${force}" == "true" ]]; then
-    xdg-mime default "${desktop_id}" "${mime_type}"
-    return
+    xdg-mime default "${desktop_id}" "${mime_type}" || return 1
+    return 0
   fi
 
   case "${current}" in
     ""|"${desktop_id}")
-      xdg-mime default "${desktop_id}" "${mime_type}"
+      xdg-mime default "${desktop_id}" "${mime_type}" || return 1
       ;;
     "${LEGACY_MAIN_DESKTOP_ID}"|"${LEGACY_URL_DESKTOP_ID}")
       if legacy_desktop_id_owned "${current}"; then
-        xdg-mime default "${desktop_id}" "${mime_type}"
+        xdg-mime default "${desktop_id}" "${mime_type}" || return 1
       else
         warn "leaving existing default for ${mime_type} unchanged: ${current}"
       fi
@@ -1026,18 +1114,18 @@ remove_legacy_integration() {
     legacy_assets_owned=true
   fi
   if legacy_desktop_owned "${LEGACY_MAIN_DESKTOP}"; then
-    rm -f -- "${LEGACY_MAIN_DESKTOP}"
+    rm -f -- "${LEGACY_MAIN_DESKTOP}" || return 1
   fi
   if legacy_desktop_owned "${LEGACY_URL_DESKTOP}"; then
-    rm -f -- "${LEGACY_URL_DESKTOP}"
+    rm -f -- "${LEGACY_URL_DESKTOP}" || return 1
   fi
   if [[ "${legacy_assets_owned}" == "true" ]] &&
     asset_matches_release "${LEGACY_ICON_FILE}" devin-desktop.png; then
-    rm -f -- "${LEGACY_ICON_FILE}"
+    rm -f -- "${LEGACY_ICON_FILE}" || return 1
   fi
   if [[ "${legacy_assets_owned}" == "true" ]] &&
     asset_matches_release "${LEGACY_MIME_FILE}" devin-desktop-workspace.xml; then
-    rm -f -- "${LEGACY_MIME_FILE}"
+    rm -f -- "${LEGACY_MIME_FILE}" || return 1
   fi
 }
 
@@ -1111,9 +1199,9 @@ refresh_desktop_caches() {
 install_integration_from_stage() {
   local original_devin original_windsurf original_workspace
 
-  original_devin="$(original_default "${MIME_DEVIN}")"
-  original_windsurf="$(original_default "${MIME_WINDSURF}")"
-  original_workspace="$(original_default "${MIME_WORKSPACE}")"
+  original_devin="$(original_default "${MIME_DEVIN}")" || return 1
+  original_windsurf="$(original_default "${MIME_WINDSURF}")" || return 1
+  original_workspace="$(original_default "${MIME_WORKSPACE}")" || return 1
 
   atomic_app_link || return 1
   atomic_copy "${INTEGRATION_STAGE}/${MAIN_DESKTOP_ID}" "${MAIN_DESKTOP}" 0644 ||
@@ -1135,72 +1223,172 @@ snapshot_path() {
   local name="$2"
 
   if [[ -e "${source}" || -L "${source}" ]]; then
-    cp -a -- "${source}" "${TRANSACTION_BACKUP}/${name}"
+    cp -a -- "${source}" "${TRANSACTION_BACKUP}/${name}" || return 1
   fi
 }
 
 backup_transaction() {
-  TRANSACTION_BACKUP="$(mktemp -d /tmp/devin-desktop-manager.XXXXXX)"
+  local partial="${TRANSACTION_JOURNAL}.new.$$"
+
+  [[ ! -e "${TRANSACTION_JOURNAL}" && ! -L "${TRANSACTION_JOURNAL}" ]] ||
+    die "an unfinished manager transaction requires recovery"
+  [[ ! -e "${partial}" && ! -L "${partial}" ]] ||
+    die "temporary transaction path already exists: ${partial}"
+  mkdir -p -- "${partial}"
+  TRANSACTION_BACKUP="${partial}"
   chmod 0700 "${TRANSACTION_BACKUP}"
 
-  snapshot_path "${CURRENT_LINK}" current
-  snapshot_path "${PREVIOUS_LINK}" previous
-  snapshot_path "${APP_COMMAND}" app-command
-  snapshot_path "${MAIN_DESKTOP}" main-desktop
-  snapshot_path "${URL_DESKTOP}" url-desktop
-  snapshot_path "${ICON_FILE}" icon
-  snapshot_path "${MIME_FILE}" mime
-  snapshot_path "${STATE_FILE}" state
-  snapshot_path "${LEGACY_MAIN_DESKTOP}" legacy-main
-  snapshot_path "${LEGACY_URL_DESKTOP}" legacy-url
-  snapshot_path "${LEGACY_ICON_FILE}" legacy-icon
-  snapshot_path "${LEGACY_MIME_FILE}" legacy-mime
-  snapshot_path "${CONFIG_HOME}/mimeapps.list" config-mimeapps
-  snapshot_path "${DATA_HOME}/applications/mimeapps.list" applications-mimeapps
-  snapshot_path "${DATA_HOME}/mimeapps.list" data-mimeapps
+  snapshot_path "${CURRENT_LINK}" current || return 1
+  snapshot_path "${PREVIOUS_LINK}" previous || return 1
+  snapshot_path "${APP_COMMAND}" app-command || return 1
+  snapshot_path "${MAIN_DESKTOP}" main-desktop || return 1
+  snapshot_path "${URL_DESKTOP}" url-desktop || return 1
+  snapshot_path "${ICON_FILE}" icon || return 1
+  snapshot_path "${MIME_FILE}" mime || return 1
+  snapshot_path "${STATE_FILE}" state || return 1
+  snapshot_path "${STATE_DIR}/${OWNERSHIP_SENTINEL_NAME}" state-owner || return 1
+  snapshot_path "${CACHE_ROOT}/${OWNERSHIP_SENTINEL_NAME}" cache-owner || return 1
+  snapshot_path "${LEGACY_MAIN_DESKTOP}" legacy-main || return 1
+  snapshot_path "${LEGACY_URL_DESKTOP}" legacy-url || return 1
+  snapshot_path "${LEGACY_ICON_FILE}" legacy-icon || return 1
+  snapshot_path "${LEGACY_MIME_FILE}" legacy-mime || return 1
+  snapshot_path "${CONFIG_HOME}/mimeapps.list" config-mimeapps || return 1
+  snapshot_path "${DATA_HOME}/applications/mimeapps.list" applications-mimeapps ||
+    return 1
+  snapshot_path "${DATA_HOME}/mimeapps.list" data-mimeapps || return 1
+  ownership_sentinel_content >"${TRANSACTION_BACKUP}/owner"
+  chmod 0600 "${TRANSACTION_BACKUP}/owner"
+  mv -T -- "${partial}" "${TRANSACTION_JOURNAL}"
+  TRANSACTION_BACKUP="${TRANSACTION_JOURNAL}"
 }
 
 restore_path() {
   local destination="$1"
   local name="$2"
+  local snapshot="${TRANSACTION_BACKUP}/${name}"
+  local temporary="${destination}.restore.$$"
 
-  rm -rf -- "${destination}"
-  if [[ -e "${TRANSACTION_BACKUP}/${name}" ||
-    -L "${TRANSACTION_BACKUP}/${name}" ]]; then
-    mkdir -p -- "$(dirname "${destination}")"
-    cp -a -- "${TRANSACTION_BACKUP}/${name}" "${destination}"
+  rm -rf -- "${temporary}" || return 1
+  if [[ -e "${snapshot}" || -L "${snapshot}" ]]; then
+    mkdir -p -- "$(dirname "${destination}")" || return 1
+    cp -a -- "${snapshot}" "${temporary}" || {
+      rm -rf -- "${temporary}" || true
+      return 1
+    }
+    mv -Tf -- "${temporary}" "${destination}" || {
+      rm -rf -- "${temporary}" || true
+      return 1
+    }
+  else
+    rm -rf -- "${destination}" || return 1
   fi
 }
 
+transaction_journal_is_valid() {
+  [[ -d "${TRANSACTION_BACKUP}" && ! -L "${TRANSACTION_BACKUP}" &&
+    -f "${TRANSACTION_BACKUP}/owner" &&
+    ! -L "${TRANSACTION_BACKUP}/owner" ]] || return 1
+  [[ "$(cat "${TRANSACTION_BACKUP}/owner")" == "$(ownership_sentinel_content)" ]]
+}
+
+restore_staged_install_root() {
+  local recorded=""
+
+  if [[ -f "${TRANSACTION_BACKUP}/staged-install-root" ]]; then
+    recorded="$(cat "${TRANSACTION_BACKUP}/staged-install-root")"
+    case "${recorded}" in
+      "${INSTALL_ROOT}".uninstall-*) ;;
+      *) return 1 ;;
+    esac
+    if [[ -e "${recorded}" || -L "${recorded}" ]]; then
+      [[ ! -e "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] || return 1
+      mv -T -- "${recorded}" "${INSTALL_ROOT}" || return 1
+    fi
+  fi
+  STAGED_INSTALL_ROOT=""
+}
+
 restore_transaction() {
-  restore_path "${CURRENT_LINK}" current
-  restore_path "${PREVIOUS_LINK}" previous
-  restore_path "${APP_COMMAND}" app-command
-  restore_path "${MAIN_DESKTOP}" main-desktop
-  restore_path "${URL_DESKTOP}" url-desktop
-  restore_path "${ICON_FILE}" icon
-  restore_path "${MIME_FILE}" mime
-  restore_path "${STATE_FILE}" state
-  restore_path "${LEGACY_MAIN_DESKTOP}" legacy-main
-  restore_path "${LEGACY_URL_DESKTOP}" legacy-url
-  restore_path "${LEGACY_ICON_FILE}" legacy-icon
-  restore_path "${LEGACY_MIME_FILE}" legacy-mime
-  restore_path "${CONFIG_HOME}/mimeapps.list" config-mimeapps
-  restore_path "${DATA_HOME}/applications/mimeapps.list" applications-mimeapps
-  restore_path "${DATA_HOME}/mimeapps.list" data-mimeapps
+  local failed=0
+
+  transaction_journal_is_valid || return 1
+  TRANSACTION_RESTORING=true
+  restore_staged_install_root || failed=1
+  restore_path "${CURRENT_LINK}" current || failed=1
+  restore_path "${PREVIOUS_LINK}" previous || failed=1
+  restore_path "${APP_COMMAND}" app-command || failed=1
+  restore_path "${MAIN_DESKTOP}" main-desktop || failed=1
+  restore_path "${URL_DESKTOP}" url-desktop || failed=1
+  restore_path "${ICON_FILE}" icon || failed=1
+  restore_path "${MIME_FILE}" mime || failed=1
+  restore_path "${STATE_DIR}/${OWNERSHIP_SENTINEL_NAME}" state-owner || failed=1
+  restore_path "${CACHE_ROOT}/${OWNERSHIP_SENTINEL_NAME}" cache-owner || failed=1
+  restore_path "${STATE_FILE}" state || failed=1
+  restore_path "${LEGACY_MAIN_DESKTOP}" legacy-main || failed=1
+  restore_path "${LEGACY_URL_DESKTOP}" legacy-url || failed=1
+  restore_path "${LEGACY_ICON_FILE}" legacy-icon || failed=1
+  restore_path "${LEGACY_MIME_FILE}" legacy-mime || failed=1
+  restore_path "${CONFIG_HOME}/mimeapps.list" config-mimeapps || failed=1
+  restore_path "${DATA_HOME}/applications/mimeapps.list" applications-mimeapps ||
+    failed=1
+  restore_path "${DATA_HOME}/mimeapps.list" data-mimeapps || failed=1
 
   if command -v update-desktop-database >/dev/null 2>&1 &&
     command -v update-mime-database >/dev/null 2>&1; then
     update-desktop-database "${DATA_HOME}/applications" >/dev/null 2>&1 || true
     update-mime-database "${DATA_HOME}/mime" >/dev/null 2>&1 || true
   fi
+  TRANSACTION_RESTORING=false
+  ((failed == 0)) || return 1
+  discard_transaction
 }
 
 discard_transaction() {
-  rm -rf -- "${TRANSACTION_BACKUP}"
+  if [[ -n "${TRANSACTION_BACKUP}" ]]; then
+    rm -rf -- "${TRANSACTION_BACKUP}" || return 1
+  fi
   TRANSACTION_BACKUP=""
-  rm -rf -- "${INTEGRATION_STAGE}"
+  if [[ -n "${INTEGRATION_STAGE}" ]]; then
+    rm -rf -- "${INTEGRATION_STAGE}" || return 1
+  fi
   INTEGRATION_STAGE=""
+}
+
+recover_pending_transaction() {
+  [[ ! -e "${TRANSACTION_JOURNAL}" && ! -L "${TRANSACTION_JOURNAL}" ]] ||
+    {
+      TRANSACTION_BACKUP="${TRANSACTION_JOURNAL}"
+      warn "recovering an unfinished manager transaction"
+      restore_transaction ||
+        die "unfinished transaction recovery failed; preserved at ${TRANSACTION_JOURNAL}"
+    }
+}
+
+release_directory_is_owned() {
+  local release_dir="$1"
+  local release_name
+
+  [[ -d "${release_dir}" && ! -L "${release_dir}" ]] || return 1
+  release_name="$(basename "${release_dir}")"
+  is_safe_release_identifier "${release_name}" || return 1
+  [[ -f "${release_dir}/release.json" &&
+    ! -L "${release_dir}/release.json" ]] || return 1
+  jq -e --arg manager_id "${MANAGER_ID}" '
+    .schemaVersion == 1 and
+    .managerId == $manager_id and
+    (.windsurfVersion | type == "string") and
+    (.build | type == "string") and
+    (.sha256 | test("^[0-9a-f]{64}$"))
+  ' "${release_dir}/release.json" >/dev/null 2>&1
+}
+
+validate_release_inventory_ownership() {
+  local release_dir
+
+  while IFS= read -r -d '' release_dir; do
+    release_directory_is_owned "${release_dir}" ||
+      die "unowned release directory requires manual review: ${release_dir}"
+  done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -print0)
 }
 
 prune_releases() {
@@ -1210,12 +1398,14 @@ prune_releases() {
   previous_target="$(release_target "${PREVIOUS_LINK}" || true)"
 
   while IFS= read -r -d '' release_dir; do
+    release_directory_is_owned "${release_dir}" ||
+      die "refusing to prune an unowned release directory: ${release_dir}"
     relative="releases/$(basename "${release_dir}")"
     if [[ "${relative}" != "${current_target}" && "${relative}" != "${previous_target}" ]]; then
       info "removing superseded release $(basename "${release_dir}")"
-      rm -rf -- "${release_dir}"
+      rm -rf -- "${release_dir}" || return 1
     fi
-  done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -type d -print0)
+  done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -print0)
 }
 
 activate_release() {
@@ -1354,6 +1544,7 @@ command_update() {
   ensure_user_namespaces
   acquire_lock
   require_app_stopped
+  validate_release_inventory_ownership
   manifest="$(fetch_manifest)"
 
   if manifest_matches_current "${manifest}"; then
@@ -1476,13 +1667,13 @@ command_doctor() {
   [[ "$(stat -c '%a' "${STATE_FILE}" 2>/dev/null || true)" == "600" ]] ||
     failures+=("manager state permissions are not 0600")
 
-  handler="$(query_default "${MIME_DEVIN}")"
+  handler="$(query_default "${MIME_DEVIN}")" || return 1
   [[ "${handler}" == "${URL_DESKTOP_ID}" ]] ||
     warnings+=("Devin URL default is ${handler:-unset}; run set-defaults to change it")
-  handler="$(query_default "${MIME_WINDSURF}")"
+  handler="$(query_default "${MIME_WINDSURF}")" || return 1
   [[ "${handler}" == "${URL_DESKTOP_ID}" ]] ||
     warnings+=("Windsurf URL default is ${handler:-unset}; run set-defaults to change it")
-  handler="$(query_default "${MIME_WORKSPACE}")"
+  handler="$(query_default "${MIME_WORKSPACE}")" || return 1
   [[ "${handler}" == "${MAIN_DESKTOP_ID}" ]] ||
     warnings+=("workspace default is ${handler:-unset}; run set-defaults to change it")
 
@@ -1534,8 +1725,8 @@ rewrite_mimeapps_without_handler() {
     }
     { print }
   ' "${file}" >"${temporary}" || return 1
-  chmod --reference="${file}" "${temporary}"
-  mv -Tf -- "${temporary}" "${file}"
+  chmod --reference="${file}" "${temporary}" || return 1
+  mv -Tf -- "${temporary}" "${file}" || return 1
 }
 
 remove_handler_from_user_defaults() {
@@ -1547,7 +1738,8 @@ remove_handler_from_user_defaults() {
     "${CONFIG_HOME}/mimeapps.list" \
     "${DATA_HOME}/applications/mimeapps.list" \
     "${DATA_HOME}/mimeapps.list"; do
-    rewrite_mimeapps_without_handler "${file}" "${mime_type}" "${desktop_id}"
+    rewrite_mimeapps_without_handler "${file}" "${mime_type}" "${desktop_id}" ||
+      return 1
   done
 }
 
@@ -1557,7 +1749,7 @@ restore_one_association() {
   local original="$3"
   local current
 
-  current="$(query_default "${mime_type}")"
+  current="$(query_default "${mime_type}")" || return 1
   if [[ "${current}" == "${desktop_id}" ]] ||
     legacy_desktop_id_owned "${current}"; then
     remove_handler_from_user_defaults "${mime_type}" "${desktop_id}" || return 1
@@ -1565,7 +1757,7 @@ restore_one_association() {
       remove_handler_from_user_defaults "${mime_type}" "${current}" || return 1
     fi
     if [[ -n "${original}" ]]; then
-      xdg-mime default "${original}" "${mime_type}"
+      xdg-mime default "${original}" "${mime_type}" || return 1
     fi
   else
     remove_handler_from_user_defaults "${mime_type}" "${desktop_id}" || return 1
@@ -1600,13 +1792,13 @@ remove_managed_regular_file() {
   [[ -e "${path}" || -L "${path}" ]] || return 0
   if state_is_valid; then
     if managed_file_matches_state "${key}" "${path}"; then
-      rm -f -- "${path}"
+      rm -f -- "${path}" || return 1
     else
       warn "leaving modified or non-manager-owned path in place: ${path}"
     fi
   elif [[ "${marker_allowed}" == "true" && -f "${path}" && ! -L "${path}" ]] &&
     grep -qx "${MANAGER_DESKTOP_MARKER}" "${path}"; then
-    rm -f -- "${path}"
+    rm -f -- "${path}" || return 1
   else
     warn "leaving modified or non-manager-owned path in place: ${path}"
   fi
@@ -1618,18 +1810,28 @@ remove_manager_command_if_owned() {
   if [[ -L "${MANAGER_COMMAND}" ]]; then
     case "$(readlink -f "${MANAGER_COMMAND}" 2>/dev/null || true)" in
       "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)")
-        rm -f -- "${MANAGER_COMMAND}"
-        return
+        rm -f -- "${MANAGER_COMMAND}" || return 1
+        return 0
         ;;
     esac
   elif [[ -f "${MANAGER_COMMAND}" ]] &&
     grep -Fqx "readonly MANAGER_ID=\"${MANAGER_ID}\"" \
       "${MANAGER_COMMAND}"; then
-    rm -f -- "${MANAGER_COMMAND}"
-    return
+    rm -f -- "${MANAGER_COMMAND}" || return 1
+    return 0
   fi
 
   warn "leaving non-manager-owned command in place: ${MANAGER_COMMAND}"
+}
+
+stage_install_root_for_uninstall() {
+  STAGED_INSTALL_ROOT="${INSTALL_ROOT}.uninstall-$$"
+  [[ ! -e "${STAGED_INSTALL_ROOT}" && ! -L "${STAGED_INSTALL_ROOT}" ]] ||
+    return 1
+  printf '%s\n' "${STAGED_INSTALL_ROOT}" \
+    >"${TRANSACTION_BACKUP}/staged-install-root" || return 1
+  chmod 0600 "${TRANSACTION_BACKUP}/staged-install-root" || return 1
+  mv -T -- "${INSTALL_ROOT}" "${STAGED_INSTALL_ROOT}" || return 1
 }
 
 perform_uninstall() {
@@ -1637,7 +1839,7 @@ perform_uninstall() {
 
   if [[ -L "${APP_COMMAND}" &&
     "$(readlink "${APP_COMMAND}")" == "${CURRENT_LINK}/app/bin/devin-desktop" ]]; then
-    rm -f -- "${APP_COMMAND}"
+    rm -f -- "${APP_COMMAND}" || return 1
   elif [[ -e "${APP_COMMAND}" || -L "${APP_COMMAND}" ]]; then
     warn "leaving non-manager-owned command in place: ${APP_COMMAND}"
   fi
@@ -1648,18 +1850,20 @@ perform_uninstall() {
   remove_managed_regular_file "${MIME_FILE}" mime false || return 1
   remove_legacy_integration || return 1
   refresh_desktop_caches || return 1
-  rm -rf -- "${CACHE_ROOT}" "${INSTALL_ROOT}" "${STATE_DIR}" || return 1
-  remove_manager_command_if_owned
+  stage_install_root_for_uninstall || return 1
+  rm -rf -- "${CACHE_ROOT}" "${STATE_DIR}" || return 1
+  remove_manager_command_if_owned || return 1
 }
 
 command_uninstall() {
   local answer="${1:-}"
 
-  require_commands jq sha256sum readlink flock awk mktemp
+  require_commands jq sha256sum readlink flock awk mktemp find
   require_integration_commands
   acquire_lock
   require_app_stopped
   validate_state_or_absent
+  validate_release_inventory_ownership
 
   if [[ "${answer}" != "--yes" ]]; then
     if [[ ! -t 0 ]]; then
@@ -1674,12 +1878,19 @@ command_uninstall() {
   fi
 
   backup_transaction
-  if ! (perform_uninstall); then
+  if ! perform_uninstall; then
     warn "uninstall failed; restoring manager-owned files and desktop defaults"
-    restore_transaction
+    restore_transaction ||
+      die "uninstall recovery failed; preserved at ${TRANSACTION_JOURNAL}"
     exit 1
   fi
-  discard_transaction
+  local staged_root="${STAGED_INSTALL_ROOT}"
+  discard_transaction ||
+    die "uninstall completed but transaction cleanup failed"
+  if [[ -n "${staged_root}" ]] && ! rm -rf -- "${staged_root}"; then
+    warn "uninstall completed, but old release data remains at ${staged_root}"
+  fi
+  STAGED_INSTALL_ROOT=""
   info "managed application removed; Devin CLI and user configuration were preserved"
 }
 
@@ -1688,7 +1899,7 @@ main() {
 
   case "${command_name}" in
     help|-h|--help)
-      (($# == 1)) || die "help does not accept arguments"
+      (($# <= 1)) || die "help does not accept arguments"
       usage
       return
       ;;

@@ -84,6 +84,7 @@ make set-defaults
 | `make doctor` | Validate the app, sandbox, state, and integration |
 | `make uninstall` | Interactively remove manager-owned files |
 | `make verify` | Run the complete offline lint and test gate |
+| `make coverage` | Run the suite with the enforced 90% line-coverage gate |
 
 `make link-dev` is only for contributors; public installs are independent
 copies and do not break when the clone is moved or deleted.
@@ -98,15 +99,20 @@ The manager:
   escaping archive links before activation;
 - validates the extracted application and its reported build;
 - never adds Electron's insecure `--no-sandbox` option;
-- snapshots release links, integration files, MIME defaults, and state before a
-  change, restoring them together on failure;
-- refuses to overwrite files it cannot prove it owns.
+- records a durable transaction journal before changing release links,
+  integration files, MIME defaults, or state, and recovers it after interruption;
+- marks manager roots and releases with versioned ownership metadata, refusing
+  to overwrite or recursively remove paths it cannot prove it owns.
 
 Releases live under `~/.local/opt/devin-desktop`. Manager state is stored with
 mode `0600` at
 `${XDG_STATE_HOME:-~/.local/state}/devin-desktop-manager/state.json`.
 Desktop, icon, and MIME files use manager-specific names under
 `${XDG_DATA_HOME:-~/.local/share}`.
+
+If a manager root already contains data but lacks its ownership marker, the
+manager stops without changing it. Move the conflicting directory aside and
+inspect it manually; the manager never adopts a non-empty unknown root.
 
 The separate official `devin` CLI and Devin/Windsurf user configuration are
 outside this project's ownership and are preserved by uninstall.
@@ -128,12 +134,14 @@ preserved. For automation, use `make uninstall-yes`.
 
 ```bash
 make verify
+make coverage
 make package
 ```
 
 Tests use deterministic miniature Debian-package fixtures and never download
 Devin Desktop. The separate scheduled canary checks the live official manifest.
-See [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/RELEASING.md](docs/RELEASING.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for Bashcov setup and the TDD workflow,
+and [docs/RELEASING.md](docs/RELEASING.md) for the release process.
 
 ## License
 
