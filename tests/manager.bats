@@ -2191,8 +2191,7 @@ EOF
   run install_fixture
 
   [ "${status}" -ne 0 ]
-  [[ "${output}" == *"uninstall cleanup root identity does not match"* ||
-    "${output}" == *"uninstall cleanup root is not manager-owned"* ]]
+  [[ "${output}" == *"unfinished uninstall cleanup root"* ]]
   [ "$(cat "${staged_root}/keep.txt")" = "replacement data" ]
   [ -f "${cleanup_record}" ]
 }
