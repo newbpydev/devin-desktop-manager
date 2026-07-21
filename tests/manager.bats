@@ -20,10 +20,41 @@ setup() {
   CURL_LOG="${BATS_TEST_TMPDIR}/curl.log"
   DEFAULTS_FILE="${TEST_HOME}/.config/mimeapps.list"
   FIXTURE="${BATS_FILE_TMPDIR}/devin.deb"
+  LOCK_HOLDER_PID=""
   export TEST_HOME MOCK_BIN CURL_LOG DEFAULTS_FILE
 
   mkdir -p "${TEST_HOME}" "${MOCK_BIN}"
   write_platform_mocks
+}
+
+stop_lock_holder() {
+  [[ -n "${LOCK_HOLDER_PID:-}" ]] || return 0
+  kill "${LOCK_HOLDER_PID}" 2>/dev/null || true
+  wait "${LOCK_HOLDER_PID}" 2>/dev/null || true
+  LOCK_HOLDER_PID=""
+}
+
+start_lock_holder() {
+  local lock_path="$1"
+  local ready_path="$2"
+  local attempt
+
+  env READY_FILE="${ready_path}" \
+    flock --no-fork -x "${lock_path}" bash -c '
+      printf "ready\n" >"${READY_FILE}"
+      exec sleep 30
+    ' &
+  LOCK_HOLDER_PID=$!
+  for attempt in {1..500}; do
+    [[ -e "${ready_path}" ]] && return 0
+    sleep 0.01
+  done
+  stop_lock_holder
+  return 1
+}
+
+teardown() {
+  stop_lock_holder
 }
 
 write_platform_mocks() {
@@ -148,6 +179,15 @@ if [[ -n "${MOCK_RM_FAIL_PATH:-}" ]]; then
     [[ "${argument}" != "${MOCK_RM_FAIL_PATH}" ]] || exit 73
   done
 fi
+if [[ -n "${MOCK_RM_PARTIAL_SIGNAL_PATH:-}" ]]; then
+  for argument in "$@"; do
+    if [[ "${argument}" == "${MOCK_RM_PARTIAL_SIGNAL_PATH}" ]]; then
+      "$(command -p -v rm)" -f -- "${argument}/release.json"
+      kill -TERM "${PPID}"
+      exit 143
+    fi
+  done
+fi
 if [[ -n "${MOCK_RM_SIGNAL_AFTER_PATH:-}" ]]; then
   for argument in "$@"; do
     if [[ "${argument}" == "${MOCK_RM_SIGNAL_AFTER_PATH}" ]]; then
@@ -226,6 +266,43 @@ manager_env() {
     XDG_STATE_HOME="${TEST_HOME}/.local/state" \
     PATH="${MOCK_BIN}:${PATH}" \
     "${MANAGER}" "$@"
+}
+
+record_prune_intent_for_release() {
+  local release_dir="$1"
+  local record="${TEST_HOME}/.local/state/devin-desktop-manager.prune"
+  local release_name identity device inode quarantine_name
+
+  release_name="$(basename "${release_dir}")"
+  identity="$(stat -c '%d %i' -- "${release_dir}")"
+  read -r device inode <<<"${identity}"
+  quarantine_name=".release-prune-${release_name}-${device}-${inode}"
+  [[ ! -e "${record}" && ! -L "${record}" ]]
+  jq -n \
+    --arg manager_id "io.github.newbpydev.devin-desktop-manager" \
+    --arg release_name "${release_name}" \
+    --arg quarantine_name "${quarantine_name}" \
+    --arg device "${device}" \
+    --arg inode "${inode}" '{
+      schemaVersion: 1,
+      managerId: $manager_id,
+      releaseName: $release_name,
+      quarantineName: $quarantine_name,
+      device: $device,
+      inode: $inode
+    }' >"${record}"
+  chmod 0600 "${record}"
+}
+
+prune_quarantine_path() {
+  local release_dir="$1"
+  local identity device inode
+
+  identity="$(stat -c '%d %i' -- "${release_dir}")"
+  read -r device inode <<<"${identity}"
+  printf '%s/.release-prune-%s-%s-%s\n' \
+    "${TEST_HOME}/.local/opt/devin-desktop" \
+    "$(basename "${release_dir}")" "${device}" "${inode}"
 }
 
 seed_defaults() {
@@ -455,6 +532,51 @@ JSON
     releases/3.4.28-*) ;;
     *) return 1 ;;
   esac
+}
+
+@test "migration waits for the public 0.1.0 lock without changing the legacy layout" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local legacy_lock="${install_root}/.manager.lock"
+  local ready="${BATS_TEST_TMPDIR}/legacy-lock.ready"
+  local release_metadata metadata_before
+
+  install_fixture
+  downgrade_to_public_0_1_layout
+  release_metadata="$(find "${install_root}/releases" -name release.json \
+    -type f -print -quit)"
+  metadata_before="$(sha256sum "${release_metadata}" | awk '{print $1}')"
+  printf 'legacy lock content\n' >"${legacy_lock}"
+
+  start_lock_holder "${legacy_lock}" "${ready}"
+
+  run install_fixture
+  stop_lock_holder
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"another Devin Desktop manager operation is running"* ]]
+  [ ! -e "${install_root}/.devin-desktop-manager-owned" ]
+  [ "$(sha256sum "${release_metadata}" | awk '{print $1}')" = \
+    "${metadata_before}" ]
+  [ "$(cat "${legacy_lock}")" = "legacy lock content" ]
+}
+
+@test "migration rejects an unsafe public 0.1.0 lock path" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local legacy_lock="${install_root}/.manager.lock"
+  local external="${BATS_TEST_TMPDIR}/missing-legacy-lock-target"
+
+  install_fixture
+  downgrade_to_public_0_1_layout
+  rm -f -- "${legacy_lock}"
+  ln -s "${external}" "${legacy_lock}"
+
+  run install_fixture
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"legacy manager lock must be a non-symbolic regular file"* ]]
+  [ ! -e "${install_root}/.devin-desktop-manager-owned" ]
+  [ -L "${legacy_lock}" ]
+  [ ! -e "${external}" ]
 }
 
 @test "migration rejects a near-miss legacy layout without claiming it" {
@@ -917,6 +1039,95 @@ EOF
   [ -f "${backup}/snapshot" ]
 }
 
+@test "transaction recovery rejects a slash-containing staged install path" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local staged_root="${install_root}.uninstall-123"
+  local tampered="${staged_root}/nested"
+  local journal="${BATS_TEST_TMPDIR}/tampered-transaction"
+
+  mkdir -p "${tampered}" "${journal}"
+  printf 'preserve\n' >"${tampered}/keep.txt"
+  printf '%s\n' "${tampered}" >"${journal}/staged-install-root"
+
+  run env HOME="${TEST_HOME}" XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      TRANSACTION_BACKUP="$2"
+      restore_staged_install_root
+    ' _ "${MANAGER}" "${journal}"
+
+  [ "${status}" -ne 0 ]
+  [ "$(cat "${tampered}/keep.txt")" = "preserve" ]
+  [ ! -e "${install_root}" ]
+}
+
+@test "cleanup record writers remove temporary files when publication fails" {
+  local writer failure
+
+  for writer in uninstall prune; do
+    for failure in jq chmod mv; do
+      run env HOME="${TEST_HOME}" \
+        XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+        PATH="${MOCK_BIN}:${PATH}" \
+        RECORD_WRITER="${writer}" RECORD_FAILURE="${failure}" bash -c '
+          source "$1"
+          mkdir -p "${STATE_HOME}"
+          case "${RECORD_FAILURE}" in
+            jq) jq() { return 1; } ;;
+            chmod) chmod() { return 1; } ;;
+            mv) mv() { return 1; } ;;
+          esac
+          case "${RECORD_WRITER}" in
+            uninstall)
+              record="${UNINSTALL_CLEANUP_RECORD}"
+              if write_uninstall_cleanup_record \
+                "${INSTALL_ROOT}.uninstall-123"; then
+                exit 1
+              fi
+              ;;
+            prune)
+              record="${RELEASE_PRUNE_CLEANUP_RECORD}"
+              if write_release_prune_cleanup_record \
+                "stale-release" "1" "2"; then
+                exit 1
+              fi
+              ;;
+          esac
+          temporary="${record}.new.$$"
+          [[ ! -e "${record}" && ! -L "${record}" &&
+            ! -e "${temporary}" && ! -L "${temporary}" ]]
+        ' _ "${MANAGER}"
+
+      [ "${status}" -eq 0 ] || {
+        printf '%s/%s failure left a temporary: %s\n' \
+          "${writer}" "${failure}" "${output}" >&3
+        return 1
+      }
+    done
+  done
+}
+
+@test "transaction backup clears its partial path when mkdir fails" {
+  run env HOME="${TEST_HOME}" XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      command mkdir -p "${STATE_HOME}"
+      partial="${TRANSACTION_JOURNAL}.new.$$"
+      saw_backup=false
+      mkdir() {
+        [[ "${TRANSACTION_BACKUP}" == "${partial}" ]] && saw_backup=true
+        return 1
+      }
+      if backup_transaction; then
+        exit 1
+      fi
+      [[ "${saw_backup}" == "true" && -z "${TRANSACTION_BACKUP}" &&
+        ! -e "${partial}" && ! -L "${partial}" ]]
+    ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
+}
+
 @test "the next mutation recovers an interrupted durable transaction" {
   local desktop="${TEST_HOME}/.local/share/applications/devin-desktop-manager.desktop"
 
@@ -1195,6 +1406,218 @@ EOF
   [[ "${output}" == *"Current:  3.4.28"* ]]
 }
 
+@test "the next mutation resumes an interrupted release prune before inventory validation" {
+  local second="${BATS_TEST_TMPDIR}/second.deb"
+  local third="${BATS_TEST_TMPDIR}/third.deb"
+  local second_build="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  local third_build="cccccccccccccccccccccccccccccccccccccccc"
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local cleanup_record="${TEST_HOME}/.local/state/devin-desktop-manager.prune"
+  local stale_target stale_dir stale_name quarantine_dir
+  local identity device inode quarantine_name
+
+  install_fixture
+  "${FIXTURE_BUILDER}" "${second}" safe "${second_build}" "3.4.28"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${second_build}/Devin-linux-x64-3.4.28.deb" \
+    "${second}" "3.4.28" "${second_build}" 1783378474000
+  manager_env update
+  stale_target="$(readlink "${install_root}/previous")"
+  stale_dir="${install_root}/${stale_target}"
+  stale_name="$(basename "${stale_dir}")"
+  identity="$(stat -c '%d %i' -- "${stale_dir}")"
+  read -r device inode <<<"${identity}"
+  quarantine_name=".release-prune-${stale_name}-${device}-${inode}"
+  quarantine_dir="${install_root}/${quarantine_name}"
+  "${FIXTURE_BUILDER}" "${third}" safe "${third_build}" "3.4.29"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${third_build}/Devin-linux-x64-3.4.29.deb" \
+    "${third}" "3.4.29" "${third_build}" 1783378475000
+
+  export MOCK_RM_PARTIAL_SIGNAL_PATH="${quarantine_dir}"
+  run manager_env update
+  unset MOCK_RM_PARTIAL_SIGNAL_PATH
+
+  [ "${status}" -eq 143 ]
+  [ -f "${cleanup_record}" ]
+  [ ! -e "${stale_dir}" ]
+  [ -d "${quarantine_dir}" ]
+  [ ! -e "${quarantine_dir}/release.json" ]
+  run jq -e \
+    --arg manager "io.github.newbpydev.devin-desktop-manager" \
+    --arg release_name "${stale_name}" \
+    --arg quarantine_name "${quarantine_name}" \
+    --arg device "${device}" \
+    --arg inode "${inode}" '
+      .schemaVersion == 1 and
+      .managerId == $manager and
+      .releaseName == $release_name and
+      .quarantineName == $quarantine_name and
+      .device == $device and
+      .inode == $inode
+    ' "${cleanup_record}"
+  [ "${status}" -eq 0 ]
+
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"finishing an interrupted release prune"* ]]
+  [ ! -e "${stale_dir}" ]
+  [ ! -e "${quarantine_dir}" ]
+  [ ! -e "${cleanup_record}" ]
+}
+
+@test "release prune recovery preserves a replacement at the original path" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local cleanup_record="${TEST_HOME}/.local/state/devin-desktop-manager.prune"
+  local source_dir stale_dir quarantine_dir
+
+  install_fixture
+  source_dir="${install_root}/$(readlink "${install_root}/current")"
+  stale_dir="${install_root}/releases/stale-replacement"
+  cp -a -- "${source_dir}" "${stale_dir}"
+  quarantine_dir="$(prune_quarantine_path "${stale_dir}")"
+  record_prune_intent_for_release "${stale_dir}"
+  mv -T -- "${stale_dir}" "${quarantine_dir}"
+  mkdir -p "${stale_dir}"
+  printf 'foreign replacement\n' >"${stale_dir}/keep.txt"
+
+  run manager_env update
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"finishing an interrupted release prune"* ]]
+  [[ "${output}" == *"unowned release directory"* ]]
+  [ "$(cat "${stale_dir}/keep.txt")" = "foreign replacement" ]
+  [ ! -e "${cleanup_record}" ]
+  [ ! -e "${quarantine_dir}" ]
+}
+
+@test "record-before-rename prune recovery rejects an original-path replacement" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local cleanup_record="${TEST_HOME}/.local/state/devin-desktop-manager.prune"
+  local source_dir stale_dir quarantine_dir parked
+
+  install_fixture
+  source_dir="${install_root}/$(readlink "${install_root}/current")"
+  stale_dir="${install_root}/releases/stale-before-replacement"
+  cp -a -- "${source_dir}" "${stale_dir}"
+  quarantine_dir="$(prune_quarantine_path "${stale_dir}")"
+  record_prune_intent_for_release "${stale_dir}"
+  parked="${BATS_TEST_TMPDIR}/parked-before-replacement"
+  mv -T -- "${stale_dir}" "${parked}"
+  mkdir -p "${stale_dir}"
+  printf 'foreign before rename\n' >"${stale_dir}/keep.txt"
+
+  run manager_env update
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"release prune directory identity does not match"* ]]
+  [ "$(cat "${stale_dir}/keep.txt")" = "foreign before rename" ]
+  [ -d "${parked}" ]
+  [ -f "${cleanup_record}" ]
+  [ ! -e "${quarantine_dir}" ]
+}
+
+@test "release prune recovery quarantines a matching record-before-rename directory" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local cleanup_record="${TEST_HOME}/.local/state/devin-desktop-manager.prune"
+  local source_dir stale_dir quarantine_dir
+
+  install_fixture
+  source_dir="${install_root}/$(readlink "${install_root}/current")"
+  stale_dir="${install_root}/releases/stale-before-rename"
+  cp -a -- "${source_dir}" "${stale_dir}"
+  quarantine_dir="$(prune_quarantine_path "${stale_dir}")"
+  record_prune_intent_for_release "${stale_dir}"
+
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"finishing an interrupted release prune"* ]]
+  [ ! -e "${stale_dir}" ]
+  [ ! -e "${quarantine_dir}" ]
+  [ ! -e "${cleanup_record}" ]
+}
+
+@test "release prune recovery preserves a mismatched quarantine object" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local cleanup_record="${TEST_HOME}/.local/state/devin-desktop-manager.prune"
+  local source_dir stale_dir quarantine_dir parked
+
+  install_fixture
+  source_dir="${install_root}/$(readlink "${install_root}/current")"
+  stale_dir="${install_root}/releases/stale-quarantine"
+  cp -a -- "${source_dir}" "${stale_dir}"
+  quarantine_dir="$(prune_quarantine_path "${stale_dir}")"
+  record_prune_intent_for_release "${stale_dir}"
+  parked="${BATS_TEST_TMPDIR}/parked-stale-quarantine"
+  mv -T -- "${stale_dir}" "${parked}"
+  mkdir -p "${quarantine_dir}"
+  printf 'foreign quarantine\n' >"${quarantine_dir}/keep.txt"
+
+  run manager_env update
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"quarantine identity does not match"* ]]
+  [ "$(cat "${quarantine_dir}/keep.txt")" = "foreign quarantine" ]
+  [ -f "${cleanup_record}" ]
+  [ ! -e "${stale_dir}" ]
+}
+
+@test "release prune recovery rejects a quarantine name unrelated to its identity" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local cleanup_record="${TEST_HOME}/.local/state/devin-desktop-manager.prune"
+  local source_dir stale_dir temporary
+
+  install_fixture
+  source_dir="${install_root}/$(readlink "${install_root}/current")"
+  stale_dir="${install_root}/releases/stale-record"
+  cp -a -- "${source_dir}" "${stale_dir}"
+  record_prune_intent_for_release "${stale_dir}"
+  temporary="${cleanup_record}.tampered"
+  jq '.quarantineName = ".release-prune-unrelated-1-2"' \
+    "${cleanup_record}" >"${temporary}"
+  mv -Tf -- "${temporary}" "${cleanup_record}"
+
+  run manager_env update
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"release prune quarantine is invalid"* ]]
+  [ -d "${stale_dir}" ]
+  [ -f "${cleanup_record}" ]
+}
+
+@test "release prune records cannot target current or previous releases" {
+  local second="${BATS_TEST_TMPDIR}/second.deb"
+  local second_build="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local cleanup_record="${TEST_HOME}/.local/state/devin-desktop-manager.prune"
+  local link target release_dir quarantine_dir
+
+  install_fixture
+  "${FIXTURE_BUILDER}" "${second}" safe "${second_build}" "3.4.28"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${second_build}/Devin-linux-x64-3.4.28.deb" \
+    "${second}" "3.4.28" "${second_build}" 1783378474000
+  manager_env update
+
+  for link in current previous; do
+    target="$(readlink "${install_root}/${link}")"
+    release_dir="${install_root}/${target}"
+    quarantine_dir="$(prune_quarantine_path "${release_dir}")"
+    record_prune_intent_for_release "${release_dir}"
+
+    run manager_env update
+
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"release prune targets an active release"* ]]
+    [ -d "${release_dir}" ]
+    [ ! -e "${quarantine_dir}" ]
+    [ -f "${cleanup_record}" ]
+    rm -f -- "${cleanup_record}"
+  done
+}
+
 @test "doctor reports a damaged command link" {
   install_fixture
   rm "${TEST_HOME}/.local/bin/devin-desktop"
@@ -1263,6 +1686,24 @@ EOF
   [ "$(readlink "${install_root}/current")" = "${current_before}" ]
   [ -x "${install_root}/${current_before}/app/bin/devin-desktop" ]
   [ -L "${manager_command}" ]
+}
+
+@test "uninstall transaction cleanup failure reports deferred recovery" {
+  local journal="${TEST_HOME}/.local/state/devin-desktop-manager.transaction"
+
+  install_fixture
+
+  export MOCK_RM_FAIL_PATH="${journal}"
+  run manager_env uninstall --yes
+  unset MOCK_RM_FAIL_PATH
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"uninstall was not durably committed"* ]]
+  [[ "${output}" == *"transaction journal preserved at ${journal}"* ]]
+  [[ "${output}" == *"recovery is required before another installation change"* ]]
+  [[ "${output}" != *"will be attempted"* ]]
+  [[ "${output}" != *"uninstall completed"* ]]
+  [ -d "${journal}" ]
 }
 
 @test "termination after manager command removal restores the full installation" {

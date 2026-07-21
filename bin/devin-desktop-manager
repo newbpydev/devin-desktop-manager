@@ -33,6 +33,7 @@ readonly STATE_FILE="${STATE_DIR}/state.json"
 readonly LOCK_FILE="${STATE_HOME}/devin-desktop-manager.lock"
 readonly TRANSACTION_JOURNAL="${STATE_HOME}/devin-desktop-manager.transaction"
 readonly UNINSTALL_CLEANUP_RECORD="${STATE_HOME}/devin-desktop-manager.cleanup"
+readonly RELEASE_PRUNE_CLEANUP_RECORD="${STATE_HOME}/devin-desktop-manager.prune"
 readonly BIN_DIR="${HOME_DIR}/.local/bin"
 readonly APP_COMMAND="${BIN_DIR}/devin-desktop"
 readonly MANAGER_COMMAND="${BIN_DIR}/devin-desktop-manager"
@@ -650,18 +651,43 @@ ensure_layout() {
   chmod 0700 "${RELEASES_DIR}"
 }
 
+acquire_legacy_lock_if_needed() {
+  local legacy_lock="${INSTALL_ROOT}/.manager.lock"
+  local sentinel="${INSTALL_ROOT}/${OWNERSHIP_SENTINEL_NAME}"
+
+  [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] || return 0
+  [[ ! -e "${sentinel}" && ! -L "${sentinel}" ]] || return 0
+  [[ -e "${legacy_lock}" || -L "${legacy_lock}" ]] || return 0
+  [[ -f "${legacy_lock}" && ! -L "${legacy_lock}" ]] ||
+    die "legacy manager lock must be a non-symbolic regular file: ${legacy_lock}"
+
+  if ! exec 8<"${legacy_lock}"; then
+    die "could not open the legacy manager lock safely: ${legacy_lock}"
+  fi
+  [[ -f "${legacy_lock}" && ! -L "${legacy_lock}" &&
+    "${legacy_lock}" -ef /proc/self/fd/8 ]] ||
+    die "legacy manager lock changed while it was being opened: ${legacy_lock}"
+  flock -n 8 || die "another Devin Desktop manager operation is running"
+  [[ -f "${legacy_lock}" && ! -L "${legacy_lock}" &&
+    "${legacy_lock}" -ef /proc/self/fd/8 ]] ||
+    die "legacy manager lock changed while it was being acquired: ${legacy_lock}"
+}
+
 acquire_lock() {
+  require_commands stat
   mkdir -p -- "${STATE_HOME}"
   [[ ! -L "${LOCK_FILE}" ]] ||
     die "manager lock must not be a symbolic link: ${LOCK_FILE}"
   exec 9>"${LOCK_FILE}"
   flock -n 9 || die "another Devin Desktop manager operation is running"
+  acquire_legacy_lock_if_needed
   recover_pending_transaction
   recover_pending_uninstall_cleanup
+  recover_pending_release_prune
   ensure_layout
 }
 
-release_target() {
+release_link_target() {
   local link_path="$1"
   local target release_name
 
@@ -670,6 +696,14 @@ release_target() {
   [[ "${target}" == releases/* && "${target}" != *"/"*"/"* ]] || return 1
   release_name="${target#releases/}"
   is_safe_release_identifier "${release_name}" || return 1
+  printf '%s\n' "${target}"
+}
+
+release_target() {
+  local link_path="$1"
+  local target
+
+  target="$(release_link_target "${link_path}")" || return 1
   [[ -d "${INSTALL_ROOT}/${target}" ]] || return 1
   printf '%s\n' "${target}"
 }
@@ -1600,8 +1634,11 @@ backup_transaction() {
     die "an unfinished manager transaction requires recovery"
   [[ ! -e "${partial}" && ! -L "${partial}" ]] ||
     die "temporary transaction path already exists: ${partial}"
-  mkdir -p -- "${partial}"
   TRANSACTION_BACKUP="${partial}"
+  if ! mkdir -p -- "${partial}"; then
+    TRANSACTION_BACKUP=""
+    return 1
+  fi
   chmod 0700 "${TRANSACTION_BACKUP}"
 
   snapshot_path "${CURRENT_LINK}" current || return 1
@@ -1663,10 +1700,7 @@ restore_staged_install_root() {
 
   if [[ -f "${TRANSACTION_BACKUP}/staged-install-root" ]]; then
     recorded="$(cat "${TRANSACTION_BACKUP}/staged-install-root")"
-    case "${recorded}" in
-      "${INSTALL_ROOT}".uninstall-*) ;;
-      *) return 1 ;;
-    esac
+    validate_staged_install_root_path "${recorded}" || return 1
     if [[ -e "${recorded}" || -L "${recorded}" ]]; then
       [[ ! -e "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] || return 1
       mv -T -- "${recorded}" "${INSTALL_ROOT}" || return 1
@@ -1760,16 +1794,20 @@ write_uninstall_cleanup_record() {
   validate_staged_install_root_path "${staged_root}" || return 1
   [[ ! -e "${UNINSTALL_CLEANUP_RECORD}" &&
     ! -L "${UNINSTALL_CLEANUP_RECORD}" ]] || return 1
-  jq -n \
+  [[ ! -e "${temporary}" && ! -L "${temporary}" ]] || return 1
+  if ! jq -n \
     --arg manager_id "${MANAGER_ID}" \
     --argjson schema_version "${OWNERSHIP_SCHEMA_VERSION}" \
     --arg staged_root "${staged_root}" '{
       schemaVersion: $schema_version,
       managerId: $manager_id,
       stagedInstallRoot: $staged_root
-    }' >"${temporary}" || return 1
-  chmod 0600 "${temporary}" || return 1
-  mv -Tf -- "${temporary}" "${UNINSTALL_CLEANUP_RECORD}"
+    }' >"${temporary}" ||
+    ! chmod 0600 "${temporary}" ||
+    ! mv -Tf -- "${temporary}" "${UNINSTALL_CLEANUP_RECORD}"; then
+    rm -f -- "${temporary}" || true
+    return 1
+  fi
 }
 
 recover_pending_uninstall_cleanup() {
@@ -1794,6 +1832,169 @@ recover_pending_uninstall_cleanup() {
   fi
   rm -f -- "${UNINSTALL_CLEANUP_RECORD}" ||
     die "could not remove uninstall cleanup record"
+}
+
+release_directory_identity() {
+  local release_dir="$1"
+  local identity
+
+  [[ -d "${release_dir}" && ! -L "${release_dir}" ]] || return 1
+  identity="$(stat -c '%d %i' -- "${release_dir}" 2>/dev/null)" || return 1
+  [[ "${identity}" =~ ^[0-9]+\ [0-9]+$ ]] || return 1
+  printf '%s\n' "${identity}"
+}
+
+release_directory_identity_matches() {
+  local release_dir="$1"
+  local device="$2"
+  local inode="$3"
+  local identity
+
+  identity="$(release_directory_identity "${release_dir}")" || return 1
+  [[ "${identity}" == "${device} ${inode}" ]]
+}
+
+release_prune_quarantine_name() {
+  local release_name="$1"
+  local device="$2"
+  local inode="$3"
+
+  is_safe_release_identifier "${release_name}" || return 1
+  [[ "${device}" =~ ^[0-9]+$ && "${inode}" =~ ^[0-9]+$ ]] || return 1
+  printf '.release-prune-%s-%s-%s\n' "${release_name}" "${device}" "${inode}"
+}
+
+release_prune_cleanup_record_fields() {
+  jq -er \
+    --arg manager_id "${MANAGER_ID}" \
+    --argjson schema_version "${OWNERSHIP_SCHEMA_VERSION}" '
+      select(
+        type == "object" and
+        (keys | sort) == [
+          "device",
+          "inode",
+          "managerId",
+          "quarantineName",
+          "releaseName",
+          "schemaVersion"
+        ] and
+        .schemaVersion == $schema_version and
+        .managerId == $manager_id and
+        (.releaseName | type == "string") and
+        (.quarantineName | type == "string") and
+        (.device | type == "string") and
+        (.device | test("^[0-9]+$")) and
+        (.inode | type == "string") and
+        (.inode | test("^[0-9]+$"))
+      )
+      | [.releaseName, .quarantineName, .device, .inode]
+      | @tsv
+    ' "${RELEASE_PRUNE_CLEANUP_RECORD}" 2>/dev/null
+}
+
+write_release_prune_cleanup_record() {
+  local release_name="$1"
+  local device="$2"
+  local inode="$3"
+  local quarantine_name
+  local temporary="${RELEASE_PRUNE_CLEANUP_RECORD}.new.$$"
+
+  quarantine_name="$(
+    release_prune_quarantine_name "${release_name}" "${device}" "${inode}"
+  )" || return 1
+  [[ ! -e "${RELEASE_PRUNE_CLEANUP_RECORD}" &&
+    ! -L "${RELEASE_PRUNE_CLEANUP_RECORD}" ]] || return 1
+  [[ ! -e "${temporary}" && ! -L "${temporary}" ]] || return 1
+  if ! jq -n \
+    --arg manager_id "${MANAGER_ID}" \
+    --argjson schema_version "${OWNERSHIP_SCHEMA_VERSION}" \
+    --arg release_name "${release_name}" \
+    --arg quarantine_name "${quarantine_name}" \
+    --arg device "${device}" \
+    --arg inode "${inode}" '{
+      schemaVersion: $schema_version,
+      managerId: $manager_id,
+      releaseName: $release_name,
+      quarantineName: $quarantine_name,
+      device: $device,
+      inode: $inode
+    }' >"${temporary}" ||
+    ! chmod 0600 "${temporary}" ||
+    ! mv -Tf -- "${temporary}" "${RELEASE_PRUNE_CLEANUP_RECORD}"; then
+    rm -f -- "${temporary}" || true
+    return 1
+  fi
+}
+
+finish_recorded_release_prune() {
+  local interrupted="$1"
+  local fields release_name quarantine_name device inode expected_quarantine
+  local release_dir quarantine_dir relative current_target previous_target
+
+  [[ -f "${RELEASE_PRUNE_CLEANUP_RECORD}" &&
+    ! -L "${RELEASE_PRUNE_CLEANUP_RECORD}" ]] ||
+    die "unfinished release prune record is invalid: ${RELEASE_PRUNE_CLEANUP_RECORD}"
+  fields="$(release_prune_cleanup_record_fields)" ||
+    die "unfinished release prune record is invalid: ${RELEASE_PRUNE_CLEANUP_RECORD}"
+  IFS=$'\t' read -r release_name quarantine_name device inode <<<"${fields}"
+  is_safe_release_identifier "${release_name}" ||
+    die "unfinished release prune path is unsafe: ${release_name}"
+  expected_quarantine="$(
+    release_prune_quarantine_name "${release_name}" "${device}" "${inode}"
+  )" || die "unfinished release prune identity is invalid"
+  [[ "${quarantine_name}" == "${expected_quarantine}" ]] ||
+    die "unfinished release prune quarantine is invalid: ${quarantine_name}"
+  owned_root_is_valid "${INSTALL_ROOT}" ||
+    die "unfinished release prune installation root is not manager-owned: ${INSTALL_ROOT}"
+  [[ -d "${RELEASES_DIR}" && ! -L "${RELEASES_DIR}" ]] ||
+    die "unfinished release prune directory is unsafe: ${RELEASES_DIR}"
+
+  release_dir="${RELEASES_DIR}/${release_name}"
+  quarantine_dir="${INSTALL_ROOT}/${quarantine_name}"
+  relative="releases/${release_name}"
+  current_target="$(release_link_target "${CURRENT_LINK}" || true)"
+  previous_target="$(release_link_target "${PREVIOUS_LINK}" || true)"
+  [[ "${relative}" != "${current_target}" &&
+    "${relative}" != "${previous_target}" ]] ||
+    die "unfinished release prune targets an active release: ${release_dir}"
+
+  if [[ -e "${quarantine_dir}" || -L "${quarantine_dir}" ]]; then
+    release_directory_identity_matches \
+      "${quarantine_dir}" "${device}" "${inode}" ||
+      die "unfinished release prune quarantine identity does not match: ${quarantine_dir}"
+  elif [[ -e "${release_dir}" || -L "${release_dir}" ]]; then
+    release_directory_identity_matches \
+      "${release_dir}" "${device}" "${inode}" ||
+      die "unfinished release prune directory identity does not match: ${release_dir}"
+    mv -Tn -- "${release_dir}" "${quarantine_dir}" ||
+      die "could not quarantine release for pruning: ${release_dir}"
+    [[ ! -e "${release_dir}" && ! -L "${release_dir}" ]] ||
+      die "could not quarantine release for pruning: ${release_dir}"
+    release_directory_identity_matches \
+      "${quarantine_dir}" "${device}" "${inode}" ||
+      die "quarantined release identity does not match: ${quarantine_dir}"
+  else
+    rm -f -- "${RELEASE_PRUNE_CLEANUP_RECORD}" ||
+      die "could not remove release prune cleanup record"
+    return 0
+  fi
+
+  release_directory_identity_matches \
+    "${quarantine_dir}" "${device}" "${inode}" ||
+    die "unfinished release prune quarantine identity does not match: ${quarantine_dir}"
+  if [[ "${interrupted}" == "true" ]]; then
+    info "finishing an interrupted release prune"
+  fi
+  rm -rf -- "${quarantine_dir}" ||
+    die "could not finish release prune: ${quarantine_dir}"
+  rm -f -- "${RELEASE_PRUNE_CLEANUP_RECORD}" ||
+    die "could not remove release prune cleanup record"
+}
+
+recover_pending_release_prune() {
+  [[ ! -e "${RELEASE_PRUNE_CLEANUP_RECORD}" &&
+    ! -L "${RELEASE_PRUNE_CLEANUP_RECORD}" ]] && return 0
+  finish_recorded_release_prune true
 }
 
 release_directory_is_owned() {
@@ -1826,18 +2027,30 @@ validate_release_inventory_ownership() {
 }
 
 prune_releases() {
-  local current_target previous_target release_dir relative
+  local current_target previous_target release_dir release_name relative
+  local identity device inode quarantine_name quarantine_dir
 
-  current_target="$(release_target "${CURRENT_LINK}" || true)"
-  previous_target="$(release_target "${PREVIOUS_LINK}" || true)"
+  current_target="$(release_link_target "${CURRENT_LINK}" || true)"
+  previous_target="$(release_link_target "${PREVIOUS_LINK}" || true)"
 
   while IFS= read -r -d '' release_dir; do
     release_directory_is_owned "${release_dir}" ||
       die "refusing to prune an unowned release directory: ${release_dir}"
-    relative="releases/$(basename "${release_dir}")"
+    release_name="$(basename "${release_dir}")"
+    relative="releases/${release_name}"
     if [[ "${relative}" != "${current_target}" && "${relative}" != "${previous_target}" ]]; then
-      info "removing superseded release $(basename "${release_dir}")"
-      rm -rf -- "${release_dir}" || return 1
+      info "removing superseded release ${release_name}"
+      identity="$(release_directory_identity "${release_dir}")" || return 1
+      read -r device inode <<<"${identity}"
+      quarantine_name="$(
+        release_prune_quarantine_name "${release_name}" "${device}" "${inode}"
+      )" || return 1
+      quarantine_dir="${INSTALL_ROOT}/${quarantine_name}"
+      [[ ! -e "${quarantine_dir}" && ! -L "${quarantine_dir}" ]] ||
+        die "release prune quarantine already exists: ${quarantine_dir}"
+      write_release_prune_cleanup_record \
+        "${release_name}" "${device}" "${inode}" || return 1
+      finish_recorded_release_prune false
     fi
   done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -print0)
 }
@@ -2326,7 +2539,7 @@ command_uninstall() {
     exit 1
   fi
   discard_transaction ||
-    die "uninstall completed but transaction cleanup failed"
+    die "uninstall was not durably committed; transaction journal preserved at ${TRANSACTION_JOURNAL}; recovery is required before another installation change"
   if [[ -n "${staged_root}" ]] && ! rm -rf -- "${staged_root}"; then
     warn "uninstall completed, but old release data remains at ${staged_root}"
   elif ! rm -f -- "${UNINSTALL_CLEANUP_RECORD}"; then
