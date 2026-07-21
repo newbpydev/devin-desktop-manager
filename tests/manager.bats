@@ -99,6 +99,11 @@ case "${1:-}" in
   query)
     [[ "${2:-}" == "default" && $# -eq 3 ]] || exit 2
     [[ "${MOCK_XDG_QUERY_FAIL:-0}" != "1" ]] || exit 70
+    if [[ "${MOCK_XDG_KDE_UNSET_FAIL:-0}" == "1" &&
+      "${XDG_CURRENT_DESKTOP:-}" == "KDE" &&
+      "${KDE_SESSION_VERSION:-}" == "5" ]]; then
+      exit 4
+    fi
     [[ -f "${database}" ]] || exit 0
     awk -F= -v key="$3" '
       $0 == "[Default Applications]" { defaults = 1; next }
@@ -504,6 +509,36 @@ JSON
   [ "$(cat "${foreign}")" = "user data" ]
 }
 
+@test "update recovers an interrupted ownership sentinel write" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local temporary="${install_root}/.devin-desktop-manager-owned.new.12345"
+
+  mkdir -p "${install_root}"
+  printf 'partial ownership marker\n' >"${temporary}"
+
+  run install_fixture
+
+  [ "${status}" -eq 0 ]
+  [ -f "${install_root}/.devin-desktop-manager-owned" ]
+  [ ! -e "${temporary}" ]
+}
+
+@test "ownership recovery preserves manager-looking files in a foreign root" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local temporary="${install_root}/.devin-desktop-manager-owned.new.12345"
+  local foreign="${install_root}/keep.txt"
+
+  mkdir -p "${install_root}"
+  printf 'not manager state\n' >"${temporary}"
+  printf 'user data\n' >"${foreign}"
+
+  run install_fixture
+
+  [ "${status}" -ne 0 ]
+  [ "$(cat "${temporary}")" = "not manager state" ]
+  [ "$(cat "${foreign}")" = "user data" ]
+}
+
 @test "update safely migrates the public 0.1.0 installation layout" {
   local second="${BATS_TEST_TMPDIR}/second.deb"
   local second_build="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -620,6 +655,70 @@ JSON
   run find "${install_root}" "${cache_root}" "${state_root}" \
     -name '*.new.12345' -print
   [ -z "${output}" ]
+}
+
+@test "migration removes interrupted legacy staging and link temporaries" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local current_target release_name staging integration
+
+  install_fixture
+  downgrade_to_public_0_1_layout
+  current_target="$(readlink "${install_root}/current")"
+  release_name="${current_target#releases/}"
+  staging="${install_root}/.staging-${release_name}-12345"
+  integration="${install_root}/.integration-12345"
+  mkdir -p "${staging}/root"
+  mkdir -p "${integration}"
+  printf 'partial extraction\n' >"${staging}/root/partial"
+  printf 'partial desktop integration\n' >"${integration}/partial"
+  ln -s "${current_target}" "${install_root}/.current.new.12345"
+  ln -s "${current_target}" "${install_root}/.previous.new.12345"
+
+  run install_fixture
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"migrating verified public 0.1.0 installation"* ]]
+  [ ! -e "${staging}" ]
+  [ ! -e "${integration}" ]
+  [ ! -L "${install_root}/.current.new.12345" ]
+  [ ! -L "${install_root}/.previous.new.12345" ]
+}
+
+@test "migration prunes a fully valid legacy release left before activation" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local current_target current_release extra_version extra_build extra_sha
+  local extra_id extra_release temporary
+
+  install_fixture
+  downgrade_to_public_0_1_layout
+  current_target="$(readlink "${install_root}/current")"
+  current_release="${install_root}/${current_target}"
+  extra_version="3.4.26"
+  extra_build="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  extra_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  extra_id="${extra_version}-${extra_build:0:12}-${extra_sha:0:12}"
+  extra_release="${install_root}/releases/${extra_id}"
+  cp -a -- "${current_release}" "${extra_release}"
+  temporary="${extra_release}/release.json.test"
+  jq \
+    --arg version "${extra_version}" \
+    --arg build "${extra_build}" \
+    --arg sha "${extra_sha}" \
+    --arg url "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${extra_build}/Devin-linux-x64-${extra_version}.deb" '
+      .windsurfVersion = $version |
+      .productVersion = $version |
+      .build = $build |
+      .artifactUrl = $url |
+      .sha256 = $sha
+    ' "${extra_release}/release.json" >"${temporary}"
+  mv -Tf -- "${temporary}" "${extra_release}/release.json"
+
+  run install_fixture
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"migrating verified public 0.1.0 installation"* ]]
+  [[ "${output}" == *"removing superseded release ${extra_id}"* ]]
+  [ ! -e "${extra_release}" ]
 }
 
 @test "migration rejects a symlinked manager temporary without changing its target" {
@@ -985,6 +1084,20 @@ EOF
   [ "${status}" -eq 0 ]
   [[ "${output}" == *"KDE cache refresh failed"* ]]
   [ -L "${TEST_HOME}/.local/opt/devin-desktop/current" ]
+}
+
+@test "KDE Plasma 5 treats a missing default as unset" {
+  export XDG_CURRENT_DESKTOP=KDE
+  export KDE_SESSION_VERSION=5
+  export MOCK_XDG_KDE_UNSET_FAIL=1
+
+  run install_fixture
+
+  [ "${status}" -eq 0 ]
+  [ -L "${TEST_HOME}/.local/opt/devin-desktop/current" ]
+  run jq -e '.originalDefaults | all(. == "")' \
+    "${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
+  [ "${status}" -eq 0 ]
 }
 
 @test "integration failure restores release links files and defaults" {

@@ -264,9 +264,13 @@ write_ownership_sentinel() {
     owned_root_is_valid "${root}" || return 1
     return
   fi
-  printf '%s' "$(ownership_sentinel_content)" >"${temporary}" || return 1
-  chmod 0600 "${temporary}" || return 1
-  mv -Tf -- "${temporary}" "${sentinel}"
+  [[ ! -e "${temporary}" && ! -L "${temporary}" ]] || return 1
+  if ! printf '%s' "$(ownership_sentinel_content)" >"${temporary}" ||
+    ! chmod 0600 "${temporary}" ||
+    ! mv -Tf -- "${temporary}" "${sentinel}"; then
+    rm -f -- "${temporary}" || true
+    return 1
+  fi
 }
 
 ensure_owned_root() {
@@ -276,6 +280,11 @@ ensure_owned_root() {
   [[ ! -L "${root}" ]] || die "${label} must not be a symbolic link: ${root}"
   if [[ -e "${root}" ]]; then
     [[ -d "${root}" ]] || die "${label} is not a directory: ${root}"
+    if owned_root_is_valid "${root}" ||
+      root_contains_only_ownership_sentinel_temporaries "${root}"; then
+      cleanup_ownership_sentinel_temporaries "${root}" ||
+        die "could not safely recover an interrupted ${label} ownership marker: ${root}"
+    fi
     if ! owned_root_is_valid "${root}"; then
       directory_is_empty "${root}" ||
         die "${label} is not owned by Devin Desktop Manager: ${root}"
@@ -309,6 +318,69 @@ migration_temporary_is_valid() {
   [[ "${name}" == "${expected_prefix}"* ]] || return 1
   suffix="${name#"${expected_prefix}"}"
   [[ "${suffix}" =~ ^[0-9]+$ && -f "${path}" && ! -L "${path}" ]]
+}
+
+cleanup_ownership_sentinel_temporaries() {
+  local root="$1"
+  local path
+
+  for path in "${root}/${OWNERSHIP_SENTINEL_NAME}.new."*; do
+    [[ -e "${path}" || -L "${path}" ]] || continue
+    migration_temporary_is_valid \
+      "${path}" "${OWNERSHIP_SENTINEL_NAME}.new" || return 1
+    rm -f -- "${path}" || return 1
+  done
+}
+
+root_contains_only_ownership_sentinel_temporaries() {
+  local root="$1"
+  local path
+  local saw_temporary=false
+
+  while IFS= read -r -d '' path; do
+    migration_temporary_is_valid \
+      "${path}" "${OWNERSHIP_SENTINEL_NAME}.new" || return 1
+    saw_temporary=true
+  done < <(find "${root}" -mindepth 1 -maxdepth 1 -print0)
+  [[ "${saw_temporary}" == "true" ]]
+}
+
+legacy_staging_temporary_is_valid() {
+  local path="$1"
+  local name="${path##*/}"
+  local remainder release_name pid
+
+  [[ "${name}" == .staging-* ]] || return 1
+  remainder="${name#.staging-}"
+  [[ "${remainder}" == *-* ]] || return 1
+  pid="${remainder##*-}"
+  release_name="${remainder%-*}"
+  [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
+  is_safe_release_identifier "${release_name}" || return 1
+  [[ -d "${path}" && ! -L "${path}" ]]
+}
+
+legacy_integration_temporary_is_valid() {
+  local path="$1"
+  local name="${path##*/}"
+  local pid
+
+  [[ "${name}" == .integration-* ]] || return 1
+  pid="${name#.integration-}"
+  [[ "${pid}" =~ ^[0-9]+$ && -d "${path}" && ! -L "${path}" ]]
+}
+
+legacy_release_link_temporary_is_valid() {
+  local path="$1"
+  local prefix="$2"
+  local name="${path##*/}"
+  local expected_prefix="${prefix}."
+  local pid
+
+  [[ "${name}" == "${expected_prefix}"* ]] || return 1
+  pid="${name#"${expected_prefix}"}"
+  [[ "${pid}" =~ ^[0-9]+$ && -L "${path}" ]] || return 1
+  release_target "${path}" >/dev/null
 }
 
 legacy_release_metadata_is_valid() {
@@ -400,20 +472,16 @@ legacy_release_metadata_is_valid() {
 }
 
 legacy_release_inventory_is_valid() {
-  local current_target previous_target release_entry relative
+  local release_entry
 
   [[ -d "${RELEASES_DIR}" && ! -L "${RELEASES_DIR}" ]] || return 1
-  current_target="$(release_target "${CURRENT_LINK}")" || return 1
-  previous_target=""
+  release_target "${CURRENT_LINK}" >/dev/null || return 1
   if [[ -e "${PREVIOUS_LINK}" || -L "${PREVIOUS_LINK}" ]]; then
-    previous_target="$(release_target "${PREVIOUS_LINK}")" || return 1
+    release_target "${PREVIOUS_LINK}" >/dev/null || return 1
   fi
 
   while IFS= read -r -d '' release_entry; do
     [[ -d "${release_entry}" && ! -L "${release_entry}" ]] || return 1
-    relative="releases/$(basename "${release_entry}")"
-    [[ "${relative}" == "${current_target}" ||
-      "${relative}" == "${previous_target}" ]] || return 1
     legacy_release_metadata_is_valid "${release_entry}" || return 1
   done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -print0)
 }
@@ -499,6 +567,20 @@ legacy_install_root_is_valid() {
         migration_temporary_is_valid \
           "${entry}" "${OWNERSHIP_SENTINEL_NAME}.new" || return 1
         ;;
+      .staging-*)
+        legacy_staging_temporary_is_valid "${entry}" || return 1
+        ;;
+      .integration-*)
+        legacy_integration_temporary_is_valid "${entry}" || return 1
+        ;;
+      .current.new.*)
+        legacy_release_link_temporary_is_valid \
+          "${entry}" ".current.new" || return 1
+        ;;
+      .previous.new.*)
+        legacy_release_link_temporary_is_valid \
+          "${entry}" ".previous.new" || return 1
+        ;;
       *)
         return 1
         ;;
@@ -576,27 +658,42 @@ upgrade_legacy_release_metadata() {
 }
 
 cleanup_legacy_migration_temporaries() {
-  local path name prefix
+  local path
 
-  for path in \
-    "${INSTALL_ROOT}/${OWNERSHIP_SENTINEL_NAME}.new."* \
-    "${CACHE_ROOT}/${OWNERSHIP_SENTINEL_NAME}.new."* \
-    "${STATE_DIR}/${OWNERSHIP_SENTINEL_NAME}.new."* \
-    "${RELEASES_DIR}"/*/release.json.new.*; do
+  cleanup_ownership_sentinel_temporaries "${INSTALL_ROOT}" || return 1
+  cleanup_ownership_sentinel_temporaries "${CACHE_ROOT}" || return 1
+  cleanup_ownership_sentinel_temporaries "${STATE_DIR}" || return 1
+
+  for path in "${RELEASES_DIR}"/*/release.json.new.*; do
     [[ -e "${path}" || -L "${path}" ]] || continue
-    name="$(basename "${path}")"
-    case "${name}" in
-      "${OWNERSHIP_SENTINEL_NAME}".new.*)
-        prefix="${OWNERSHIP_SENTINEL_NAME}.new"
+    migration_temporary_is_valid "${path}" "release.json.new" || return 1
+    rm -f -- "${path}" || return 1
+  done
+
+  for path in "${INSTALL_ROOT}"/.staging-*; do
+    [[ -e "${path}" || -L "${path}" ]] || continue
+    legacy_staging_temporary_is_valid "${path}" || return 1
+    rm -rf -- "${path}" || return 1
+  done
+  for path in "${INSTALL_ROOT}"/.integration-*; do
+    [[ -e "${path}" || -L "${path}" ]] || continue
+    legacy_integration_temporary_is_valid "${path}" || return 1
+    rm -rf -- "${path}" || return 1
+  done
+  for path in \
+    "${INSTALL_ROOT}"/.current.new.* \
+    "${INSTALL_ROOT}"/.previous.new.*; do
+    [[ -e "${path}" || -L "${path}" ]] || continue
+    case "$(basename "${path}")" in
+      .current.new.*)
+        legacy_release_link_temporary_is_valid \
+          "${path}" ".current.new" || return 1
         ;;
-      release.json.new.*)
-        prefix="release.json.new"
-        ;;
-      *)
-        return 1
+      .previous.new.*)
+        legacy_release_link_temporary_is_valid \
+          "${path}" ".previous.new" || return 1
         ;;
     esac
-    migration_temporary_is_valid "${path}" "${prefix}" || return 1
     rm -f -- "${path}" || return 1
   done
 }
@@ -606,6 +703,10 @@ migrate_legacy_layout_if_needed() {
   local release_dir
 
   [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] || return 0
+  if root_contains_only_ownership_sentinel_temporaries "${INSTALL_ROOT}"; then
+    cleanup_ownership_sentinel_temporaries "${INSTALL_ROOT}" ||
+      die "could not safely recover an interrupted installation root ownership marker: ${INSTALL_ROOT}"
+  fi
   if [[ -e "${sentinel}" || -L "${sentinel}" ]] ||
     directory_is_empty "${INSTALL_ROOT}"; then
     return 0
@@ -636,6 +737,8 @@ migrate_legacy_layout_if_needed() {
     die "could not mark the legacy state as manager-owned"
   write_ownership_sentinel "${INSTALL_ROOT}" ||
     die "could not mark the legacy installation as manager-owned"
+  prune_releases ||
+    die "could not prune superseded releases after ownership migration"
 }
 
 ensure_layout() {
@@ -1378,7 +1481,22 @@ atomic_app_link() {
 }
 
 query_default() {
-  xdg-mime query default "$1" 2>/dev/null
+  local current status
+
+  if current="$(xdg-mime query default "$1" 2>/dev/null)"; then
+    printf '%s\n' "${current}"
+    return 0
+  else
+    status=$?
+  fi
+  if [[ "${status}" -eq 4 && -z "${current}" &&
+    "${KDE_SESSION_VERSION:-}" =~ ^[1-5]$ &&
+    ("${XDG_CURRENT_DESKTOP:-}" == "KDE" ||
+      -n "${KDE_FULL_SESSION:-}") ]]; then
+    printf '\n'
+    return 0
+  fi
+  return "${status}"
 }
 
 normalize_original_default() {
