@@ -85,7 +85,7 @@ verify: lint test
 package:
 	@./scripts/package-release "$(VERSION)" "$(DIST_DIR)"
 
-release-check: verify coverage
+release-check: lint coverage
 	@./scripts/release-check "$(VERSION)"
 	@./scripts/package-release "$(VERSION)" "$(DIST_DIR)"
 

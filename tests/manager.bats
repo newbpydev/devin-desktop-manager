@@ -2,6 +2,15 @@
 
 set -e
 
+setup_file() {
+  local project_root fixture_builder
+
+  project_root="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
+  fixture_builder="${project_root}/tests/fixtures/build-mini-deb"
+  "${fixture_builder}" "${BATS_FILE_TMPDIR}/devin.deb"
+  chmod 0444 "${BATS_FILE_TMPDIR}/devin.deb"
+}
+
 setup() {
   PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
   MANAGER="${PROJECT_ROOT}/bin/devin-desktop-manager"
@@ -10,11 +19,10 @@ setup() {
   MOCK_BIN="${BATS_TEST_TMPDIR}/bin"
   CURL_LOG="${BATS_TEST_TMPDIR}/curl.log"
   DEFAULTS_FILE="${TEST_HOME}/.config/mimeapps.list"
-  FIXTURE="${BATS_TEST_TMPDIR}/devin.deb"
+  FIXTURE="${BATS_FILE_TMPDIR}/devin.deb"
   export TEST_HOME MOCK_BIN CURL_LOG DEFAULTS_FILE
 
   mkdir -p "${TEST_HOME}" "${MOCK_BIN}"
-  "${FIXTURE_BUILDER}" "${FIXTURE}"
   write_platform_mocks
 }
 
@@ -301,14 +309,8 @@ downgrade_to_public_0_1_layout() {
   write_manifest_curl \
     "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
 
-  run env MOCK_UNSHARE_FAIL=1 \
-    HOME="${TEST_HOME}" \
-    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
-    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
-    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
-    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
-    PATH="${MOCK_BIN}:${PATH}" \
-    "${MANAGER}" check
+  export MOCK_UNSHARE_FAIL=1
+  run manager_env check
 
   [ "${status}" -eq 0 ]
   [ ! -e "${TEST_HOME}/.local/opt/devin-desktop" ]
@@ -496,6 +498,25 @@ JSON
   run find "${install_root}" "${cache_root}" "${state_root}" \
     -name '*.new.12345' -print
   [ -z "${output}" ]
+}
+
+@test "migration rejects a symlinked manager temporary without changing its target" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local external="${BATS_TEST_TMPDIR}/external-temporary"
+  local temporary="${install_root}/.devin-desktop-manager-owned.new.12345"
+
+  install_fixture
+  downgrade_to_public_0_1_layout
+  printf 'user data\n' >"${external}"
+  ln -s "${external}" "${temporary}"
+
+  run install_fixture
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"could not be safely verified"* ]]
+  [ ! -e "${install_root}/.devin-desktop-manager-owned" ]
+  [ -L "${temporary}" ]
+  grep -Fqx 'user data' "${external}"
 }
 
 @test "migration accepts a valid legacy installation after cache eviction" {
@@ -765,14 +786,8 @@ EOF
   write_manifest_curl \
     "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
 
-  run env MOCK_ARTIFACT_DOWNLOAD_FAIL=1 \
-    HOME="${TEST_HOME}" \
-    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
-    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
-    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
-    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
-    PATH="${MOCK_BIN}:${PATH}" \
-    "${MANAGER}" update
+  export MOCK_ARTIFACT_DOWNLOAD_FAIL=1
+  run manager_env update
 
   [ "${status}" -ne 0 ]
   [[ "${output}" == *"partial file was kept for retry"* ]]
@@ -842,14 +857,8 @@ EOF
   write_manifest_curl \
     "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
 
-  run env MOCK_KDE_FAIL=1 \
-    HOME="${TEST_HOME}" \
-    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
-    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
-    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
-    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
-    PATH="${MOCK_BIN}:${PATH}" \
-    "${MANAGER}" update
+  export MOCK_KDE_FAIL=1
+  run manager_env update
 
   [ "${status}" -eq 0 ]
   [[ "${output}" == *"KDE cache refresh failed"* ]]
@@ -861,14 +870,8 @@ EOF
   write_manifest_curl \
     "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
 
-  run env MOCK_DESKTOP_CACHE_FAIL=1 \
-    HOME="${TEST_HOME}" \
-    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
-    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
-    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
-    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
-    PATH="${MOCK_BIN}:${PATH}" \
-    "${MANAGER}" update
+  export MOCK_DESKTOP_CACHE_FAIL=1
+  run manager_env update
 
   [ "${status}" -ne 0 ]
   [[ "${output}" == *"restoring the previous release and desktop state"* ]]
@@ -886,14 +889,8 @@ EOF
   write_manifest_curl \
     "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
 
-  run env MOCK_XDG_QUERY_FAIL=1 \
-    HOME="${TEST_HOME}" \
-    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
-    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
-    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
-    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
-    PATH="${MOCK_BIN}:${PATH}" \
-    "${MANAGER}" update
+  export MOCK_XDG_QUERY_FAIL=1
+  run manager_env update
 
   [ "${status}" -ne 0 ]
   cmp "${defaults_before}" "${DEFAULTS_FILE}"
@@ -1242,14 +1239,8 @@ EOF
   install_fixture
   current_before="$(readlink "${install_root}/current")"
 
-  run env MOCK_CHMOD_FAIL_PATTERN="mimeapps.list.new." \
-    HOME="${TEST_HOME}" \
-    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
-    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
-    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
-    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
-    PATH="${MOCK_BIN}:${PATH}" \
-    "${MANAGER}" uninstall --yes
+  export MOCK_CHMOD_FAIL_PATTERN="mimeapps.list.new."
+  run manager_env uninstall --yes
 
   [ "${status}" -ne 0 ]
   [ "$(readlink "${install_root}/current")" = "${current_before}" ]
@@ -1265,14 +1256,8 @@ EOF
   ln -s "${MANAGER}" "${manager_command}"
   current_before="$(readlink "${install_root}/current")"
 
-  run env MOCK_RM_FAIL_PATH="${manager_command}" \
-    HOME="${TEST_HOME}" \
-    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
-    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
-    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
-    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
-    PATH="${MOCK_BIN}:${PATH}" \
-    "${MANAGER}" uninstall --yes
+  export MOCK_RM_FAIL_PATH="${manager_command}"
+  run manager_env uninstall --yes
 
   [ "${status}" -ne 0 ]
   [ "$(readlink "${install_root}/current")" = "${current_before}" ]
@@ -1289,14 +1274,8 @@ EOF
   ln -s "${MANAGER}" "${manager_command}"
   current_before="$(readlink "${install_root}/current")"
 
-  run env MOCK_RM_SIGNAL_AFTER_PATH="${manager_command}" \
-    HOME="${TEST_HOME}" \
-    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
-    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
-    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
-    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
-    PATH="${MOCK_BIN}:${PATH}" \
-    "${MANAGER}" uninstall --yes
+  export MOCK_RM_SIGNAL_AFTER_PATH="${manager_command}"
+  run manager_env uninstall --yes
 
   [ "${status}" -eq 143 ]
   [ -L "${manager_command}" ]
@@ -1310,14 +1289,9 @@ EOF
 
   install_fixture
 
-  run env MOCK_RM_SIGNAL_BEFORE_PATTERN=".uninstall-" \
-    HOME="${TEST_HOME}" \
-    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
-    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
-    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
-    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
-    PATH="${MOCK_BIN}:${PATH}" \
-    "${MANAGER}" uninstall --yes
+  export MOCK_RM_SIGNAL_BEFORE_PATTERN=".uninstall-"
+  run manager_env uninstall --yes
+  unset MOCK_RM_SIGNAL_BEFORE_PATTERN
 
   [ "${status}" -eq 143 ]
   [ -f "${cleanup_record}" ]

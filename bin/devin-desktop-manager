@@ -11,7 +11,10 @@ umask 077
 readonly MANAGER_VERSION="0.1.0"
 readonly MANAGER_ID="io.github.newbpydev.devin-desktop-manager"
 readonly MANAGER_DESKTOP_MARKER="X-Devin-Desktop-Manager=true"
+readonly LEGACY_MANAGER_VERSION="0.1.0"
 readonly OWNERSHIP_SCHEMA_VERSION=1
+readonly RELEASE_METADATA_SCHEMA_VERSION=1
+readonly STATE_SCHEMA_VERSION=1
 readonly OWNERSHIP_SENTINEL_NAME=".devin-desktop-manager-owned"
 readonly MANIFEST_URL="https://windsurf-stable.codeium.com/api/update/linux-x64-deb/stable/latest"
 readonly MANIFEST_MAX_BYTES=1048576
@@ -295,6 +298,18 @@ legacy_root_marker_is_compatible() {
   fi
 }
 
+migration_temporary_is_valid() {
+  local path="$1"
+  local prefix="$2"
+  local name="${path##*/}"
+  local expected_prefix="${prefix}."
+  local suffix
+
+  [[ "${name}" == "${expected_prefix}"* ]] || return 1
+  suffix="${name#"${expected_prefix}"}"
+  [[ "${suffix}" =~ ^[0-9]+$ && -f "${path}" && ! -L "${path}" ]]
+}
+
 legacy_release_metadata_is_valid() {
   local release_dir="$1"
   local metadata="${release_dir}/release.json"
@@ -304,7 +319,9 @@ legacy_release_metadata_is_valid() {
 
   [[ -d "${release_dir}" && ! -L "${release_dir}" ]] || return 1
   [[ -f "${metadata}" && ! -L "${metadata}" ]] || return 1
-  jq -e --arg manager_id "${MANAGER_ID}" '
+  jq -e \
+    --arg manager_id "${MANAGER_ID}" \
+    --argjson schema_version "${RELEASE_METADATA_SCHEMA_VERSION}" '
     type == "object" and
     (
       del(.schemaVersion, .managerId) | keys | sort
@@ -322,7 +339,7 @@ legacy_release_metadata_is_valid() {
         (has("schemaVersion") | not) and
         (has("managerId") | not)
       ) or (
-        .schemaVersion == 1 and
+        .schemaVersion == $schema_version and
         .managerId == $manager_id
       )
     ) and
@@ -372,8 +389,7 @@ legacy_release_metadata_is_valid() {
         [[ -f "${entry}" && ! -L "${entry}" ]] || return 1
         ;;
       release.json.new.*)
-        [[ "${name#release.json.new.}" =~ ^[0-9]+$ &&
-          -f "${entry}" && ! -L "${entry}" ]] || return 1
+        migration_temporary_is_valid "${entry}" "release.json.new" || return 1
         ;;
       *)
         return 1
@@ -406,7 +422,8 @@ legacy_state_is_valid() {
 
   state_is_valid || return 1
   jq -e \
-    --arg manager_version "0.1.0" \
+    --arg manager_version "${LEGACY_MANAGER_VERSION}" \
+    --argjson schema_version "${STATE_SCHEMA_VERSION}" \
     --arg mime_devin "${MIME_DEVIN}" \
     --arg mime_windsurf "${MIME_WINDSURF}" \
     --arg mime_workspace "${MIME_WORKSPACE}" \
@@ -423,7 +440,7 @@ legacy_state_is_valid() {
         "originalDefaults",
         "schemaVersion"
       ] and
-      .schemaVersion == 1 and
+      .schemaVersion == $schema_version and
       .managerVersion == $manager_version and
       (.originalDefaults | keys | sort) ==
         ([$mime_devin, $mime_windsurf, $mime_workspace] | sort) and
@@ -478,8 +495,8 @@ legacy_install_root_is_valid() {
         owned_root_is_valid "${INSTALL_ROOT}" || return 1
         ;;
       "${OWNERSHIP_SENTINEL_NAME}".new.*)
-        [[ "${name#"${OWNERSHIP_SENTINEL_NAME}.new."}" =~ ^[0-9]+$ &&
-          -f "${entry}" && ! -L "${entry}" ]] || return 1
+        migration_temporary_is_valid \
+          "${entry}" "${OWNERSHIP_SENTINEL_NAME}.new" || return 1
         ;;
       *)
         return 1
@@ -504,8 +521,8 @@ legacy_cache_root_is_valid() {
       "${OWNERSHIP_SENTINEL_NAME}")
         ;;
       "${OWNERSHIP_SENTINEL_NAME}".new.*)
-        [[ "${name#"${OWNERSHIP_SENTINEL_NAME}.new."}" =~ ^[0-9]+$ &&
-          -f "${entry}" && ! -L "${entry}" ]] || return 1
+        migration_temporary_is_valid \
+          "${entry}" "${OWNERSHIP_SENTINEL_NAME}.new" || return 1
         ;;
       Devin-linux-x64-*.deb|Devin-linux-x64-*.deb.part)
         [[ -f "${entry}" && ! -L "${entry}" ]] || return 1
@@ -531,8 +548,8 @@ legacy_state_root_is_valid() {
     case "${name}" in
       state.json|"${OWNERSHIP_SENTINEL_NAME}") ;;
       "${OWNERSHIP_SENTINEL_NAME}".new.*)
-        [[ "${name#"${OWNERSHIP_SENTINEL_NAME}.new."}" =~ ^[0-9]+$ &&
-          -f "${entry}" && ! -L "${entry}" ]] || return 1
+        migration_temporary_is_valid \
+          "${entry}" "${OWNERSHIP_SENTINEL_NAME}.new" || return 1
         ;;
       *) return 1 ;;
     esac
@@ -545,9 +562,11 @@ upgrade_legacy_release_metadata() {
   local metadata="${release_dir}/release.json"
   local temporary="${metadata}.new.$$"
 
-  jq --arg manager_id "${MANAGER_ID}" '
+  jq \
+    --arg manager_id "${MANAGER_ID}" \
+    --argjson schema_version "${RELEASE_METADATA_SCHEMA_VERSION}" '
     . + {
-      schemaVersion: 1,
+      schemaVersion: $schema_version,
       managerId: $manager_id
     }
   ' "${metadata}" >"${temporary}" || return 1
@@ -556,7 +575,7 @@ upgrade_legacy_release_metadata() {
 }
 
 cleanup_legacy_migration_temporaries() {
-  local path name
+  local path name prefix
 
   for path in \
     "${INSTALL_ROOT}/${OWNERSHIP_SENTINEL_NAME}.new."* \
@@ -567,17 +586,16 @@ cleanup_legacy_migration_temporaries() {
     name="$(basename "${path}")"
     case "${name}" in
       "${OWNERSHIP_SENTINEL_NAME}".new.*)
-        [[ "${name#"${OWNERSHIP_SENTINEL_NAME}.new."}" =~ ^[0-9]+$ ]] ||
-          return 1
+        prefix="${OWNERSHIP_SENTINEL_NAME}.new"
         ;;
       release.json.new.*)
-        [[ "${name#release.json.new.}" =~ ^[0-9]+$ ]] || return 1
+        prefix="release.json.new"
         ;;
       *)
         return 1
         ;;
     esac
-    [[ -f "${path}" && ! -L "${path}" ]] || return 1
+    migration_temporary_is_valid "${path}" "${prefix}" || return 1
     rm -f -- "${path}" || return 1
   done
 }
@@ -595,10 +613,10 @@ migrate_legacy_layout_if_needed() {
   if ! legacy_install_root_is_valid ||
     ! legacy_cache_root_is_valid ||
     ! legacy_state_root_is_valid; then
-    die "public 0.1.0 installation could not be safely verified; refusing ownership migration"
+    die "public ${LEGACY_MANAGER_VERSION} installation could not be safely verified; refusing ownership migration"
   fi
 
-  info "migrating verified public 0.1.0 installation to ownership schema 1"
+  info "migrating verified public ${LEGACY_MANAGER_VERSION} installation to ownership schema ${OWNERSHIP_SCHEMA_VERSION}"
   cleanup_legacy_migration_temporaries ||
     die "could not clean an interrupted ownership migration"
   while IFS= read -r -d '' release_dir; do
@@ -1078,6 +1096,7 @@ write_release_metadata() {
   installed_at="$(date --utc +'%Y-%m-%dT%H:%M:%SZ')"
   jq -n \
     --arg managerId "${MANAGER_ID}" \
+    --argjson schemaVersion "${RELEASE_METADATA_SCHEMA_VERSION}" \
     --arg windsurfVersion "$(jq -r '.windsurfVersion' <<<"${manifest}")" \
     --arg productVersion "$(jq -r '.productVersion' <<<"${manifest}")" \
     --arg build "$(jq -r '.version' <<<"${manifest}")" \
@@ -1086,7 +1105,7 @@ write_release_metadata() {
     --argjson releaseTimestamp "$(jq -r '.timestamp' <<<"${manifest}")" \
     --arg installedAt "${installed_at}" \
     '{
-      schemaVersion: 1,
+      schemaVersion: $schemaVersion,
       managerId: $managerId,
       windsurfVersion: $windsurfVersion,
       productVersion: $productVersion,
@@ -1155,8 +1174,8 @@ set_managed_link() {
 
 state_is_valid() {
   [[ -f "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || return 1
-  jq -e '
-    .schemaVersion == 1 and
+  jq -e --argjson schema_version "${STATE_SCHEMA_VERSION}" '
+    .schemaVersion == $schema_version and
     (.managerVersion | type == "string") and
     (.originalDefaults | type == "object") and
     (.managedFiles | type == "object")
@@ -1497,6 +1516,7 @@ write_state() {
   mkdir -p "${STATE_DIR}"
   jq -n \
     --arg managerVersion "${MANAGER_VERSION}" \
+    --argjson schemaVersion "${STATE_SCHEMA_VERSION}" \
     --arg devin "${original_devin}" \
     --arg windsurf "${original_windsurf}" \
     --arg workspace "${original_workspace}" \
@@ -1514,7 +1534,7 @@ write_state() {
     --arg mimeWindsurf "${MIME_WINDSURF}" \
     --arg mimeWorkspace "${MIME_WORKSPACE}" \
     '{
-      schemaVersion: 1,
+      schemaVersion: $schemaVersion,
       managerVersion: $managerVersion,
       originalDefaults: {
         ($mimeDevin): $devin,
@@ -1785,8 +1805,10 @@ release_directory_is_owned() {
   is_safe_release_identifier "${release_name}" || return 1
   [[ -f "${release_dir}/release.json" &&
     ! -L "${release_dir}/release.json" ]] || return 1
-  jq -e --arg manager_id "${MANAGER_ID}" '
-    .schemaVersion == 1 and
+  jq -e \
+    --arg manager_id "${MANAGER_ID}" \
+    --argjson schema_version "${RELEASE_METADATA_SCHEMA_VERSION}" '
+    .schemaVersion == $schema_version and
     .managerId == $manager_id and
     (.windsurfVersion | type == "string") and
     (.build | type == "string") and

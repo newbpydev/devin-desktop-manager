@@ -80,7 +80,7 @@ setup() {
   local canary="${PROJECT_ROOT}/.github/workflows/manifest-canary.yml"
 
   grep -Fq 'ubuntu-24.04' "${ci}"
-  grep -Fq 'make verify' "${ci}"
+  grep -Fq 'make lint' "${ci}"
   grep -Fq 'bundle exec make coverage' "${ci}"
   grep -Fq 'bundle config set --local deployment true' "${ci}"
   grep -Fq 'bundle install' "${ci}"

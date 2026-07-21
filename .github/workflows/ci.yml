@@ -41,5 +41,5 @@ jobs:
 
       - name: Run offline quality gate
         run: |
-          make verify
+          make lint
           bundle exec make coverage
