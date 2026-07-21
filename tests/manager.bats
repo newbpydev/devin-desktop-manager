@@ -509,6 +509,22 @@ JSON
   [ "$(cat "${foreign}")" = "user data" ]
 }
 
+@test "update treats an unreadable installation root as non-empty" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local foreign="${install_root}/keep.txt"
+
+  mkdir -p "${install_root}"
+  printf 'user data\n' >"${foreign}"
+  chmod 0300 "${install_root}"
+
+  run install_fixture
+  chmod 0700 "${install_root}"
+
+  [ "${status}" -ne 0 ]
+  [ ! -e "${install_root}/.devin-desktop-manager-owned" ]
+  [ "$(cat "${foreign}")" = "user data" ]
+}
+
 @test "update recovers an interrupted ownership sentinel write" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
   local temporary="${install_root}/.devin-desktop-manager-owned.new.12345"
@@ -612,6 +628,26 @@ JSON
   [ ! -e "${install_root}/.devin-desktop-manager-owned" ]
   [ -L "${legacy_lock}" ]
   [ ! -e "${external}" ]
+}
+
+@test "fresh mutations create and hold the public manager lock before ownership" {
+  run env HOME="${TEST_HOME}" XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      mkdir -p "${STATE_HOME}"
+      acquire_legacy_lock_if_needed
+      [[ "${LEGACY_LOCK_HELD:-false}" == "true" ]]
+      [[ -f "${INSTALL_ROOT}/.manager.lock" &&
+        "${INSTALL_ROOT}/.manager.lock" -ef /proc/self/fd/8 ]]
+      if bash -c '\''exec 8>&-; flock -n "$1" true'\'' \
+        _ "${INSTALL_ROOT}/.manager.lock"; then
+        exit 1
+      fi
+      migrate_legacy_layout_if_needed
+      owned_root_is_valid "${INSTALL_ROOT}"
+    ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
 }
 
 @test "migration rejects a near-miss legacy layout without claiming it" {
@@ -719,6 +755,34 @@ JSON
   [[ "${output}" == *"migrating verified public 0.1.0 installation"* ]]
   [[ "${output}" == *"removing superseded release ${extra_id}"* ]]
   [ ! -e "${extra_release}" ]
+}
+
+@test "migration resumes a validated public download left before first activation" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local release_before
+
+  install_fixture
+  downgrade_to_public_0_1_layout
+  release_before="$(find "${install_root}/releases" -mindepth 1 -maxdepth 1 \
+    -type d -print -quit)"
+  rm -f -- \
+    "${install_root}/current" \
+    "${TEST_HOME}/.local/bin/devin-desktop" \
+    "${TEST_HOME}/.local/state/devin-desktop-manager/state.json" \
+    "${TEST_HOME}/.local/share/applications/devin-desktop-manager.desktop" \
+    "${TEST_HOME}/.local/share/applications/devin-desktop-manager-url-handler.desktop" \
+    "${TEST_HOME}/.local/share/icons/hicolor/512x512/apps/devin-desktop-manager.png" \
+    "${TEST_HOME}/.local/share/mime/packages/devin-desktop-manager-workspace.xml" \
+    "${DEFAULTS_FILE}"
+
+  run install_fixture
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"migrating verified public 0.1.0 installation"* ]]
+  [ -L "${install_root}/current" ]
+  [ -d "${release_before}" ]
+  run find "${install_root}/releases" -mindepth 1 -maxdepth 1 -type d -print
+  [ "$(printf '%s\n' "${output}" | sed '/^$/d' | wc -l)" -eq 1 ]
 }
 
 @test "migration rejects a symlinked manager temporary without changing its target" {
@@ -1185,6 +1249,10 @@ EOF
         RECORD_WRITER="${writer}" RECORD_FAILURE="${failure}" bash -c '
           source "$1"
           mkdir -p "${STATE_HOME}"
+          staged_root="${INSTALL_ROOT}.uninstall-123"
+          mkdir -p "${staged_root}"
+          printf "%s" "$(ownership_sentinel_content)" \
+            >"${staged_root}/${OWNERSHIP_SENTINEL_NAME}"
           case "${RECORD_FAILURE}" in
             jq) jq() { return 1; } ;;
             chmod) chmod() { return 1; } ;;
@@ -1193,8 +1261,7 @@ EOF
           case "${RECORD_WRITER}" in
             uninstall)
               record="${UNINSTALL_CLEANUP_RECORD}"
-              if write_uninstall_cleanup_record \
-                "${INSTALL_ROOT}.uninstall-123"; then
+              if write_uninstall_cleanup_record "${staged_root}"; then
                 exit 1
               fi
               ;;
@@ -1864,6 +1931,33 @@ EOF
     -type d -name 'devin-desktop.uninstall-*' -print
   [ -z "${output}" ]
   [ -L "${TEST_HOME}/.local/opt/devin-desktop/current" ]
+}
+
+@test "uninstall cleanup recovery preserves a replacement staged root" {
+  local cleanup_record="${TEST_HOME}/.local/state/devin-desktop-manager.cleanup"
+  local staged_root
+
+  install_fixture
+
+  export MOCK_RM_SIGNAL_BEFORE_PATTERN=".uninstall-"
+  run manager_env uninstall --yes
+  unset MOCK_RM_SIGNAL_BEFORE_PATTERN
+
+  [ "${status}" -eq 143 ]
+  [ -f "${cleanup_record}" ]
+  staged_root="$(find "${TEST_HOME}/.local/opt" -maxdepth 1 \
+    -type d -name 'devin-desktop.uninstall-*' -print -quit)"
+  [ -n "${staged_root}" ]
+  rm -rf -- "${staged_root}"
+  mkdir -p "${staged_root}"
+  printf 'replacement data\n' >"${staged_root}/keep.txt"
+
+  run install_fixture
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"uninstall cleanup root identity does not match"* ]]
+  [ "$(cat "${staged_root}/keep.txt")" = "replacement data" ]
+  [ -f "${cleanup_record}" ]
 }
 
 @test "relative XDG paths are rejected before any mutation" {

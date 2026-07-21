@@ -73,6 +73,7 @@ INTEGRATION_STAGE=""
 TRANSACTION_BACKUP=""
 STAGED_INSTALL_ROOT=""
 TRANSACTION_RESTORING=false
+LEGACY_LOCK_HELD=false
 
 info() {
   printf 'devin-desktop-manager: %s\n' "$*" >&2
@@ -242,8 +243,11 @@ ownership_sentinel_content() {
 
 directory_is_empty() {
   local path="$1"
+  local first_entry
 
-  [[ -z "$(find "${path}" -mindepth 1 -maxdepth 1 -print -quit)" ]]
+  first_entry="$(find "${path}" -mindepth 1 -maxdepth 1 -print -quit)" ||
+    return 1
+  [[ -z "${first_entry}" ]]
 }
 
 owned_root_is_valid() {
@@ -472,10 +476,17 @@ legacy_release_metadata_is_valid() {
 }
 
 legacy_release_inventory_is_valid() {
+  local require_current="${1:-true}"
   local release_entry
+  local saw_release=false
 
   [[ -d "${RELEASES_DIR}" && ! -L "${RELEASES_DIR}" ]] || return 1
-  release_target "${CURRENT_LINK}" >/dev/null || return 1
+  if [[ -e "${CURRENT_LINK}" || -L "${CURRENT_LINK}" ]]; then
+    release_target "${CURRENT_LINK}" >/dev/null || return 1
+  else
+    [[ "${require_current}" == "false" ]] || return 1
+    [[ ! -e "${PREVIOUS_LINK}" && ! -L "${PREVIOUS_LINK}" ]] || return 1
+  fi
   if [[ -e "${PREVIOUS_LINK}" || -L "${PREVIOUS_LINK}" ]]; then
     release_target "${PREVIOUS_LINK}" >/dev/null || return 1
   fi
@@ -483,7 +494,9 @@ legacy_release_inventory_is_valid() {
   while IFS= read -r -d '' release_entry; do
     [[ -d "${release_entry}" && ! -L "${release_entry}" ]] || return 1
     legacy_release_metadata_is_valid "${release_entry}" || return 1
+    saw_release=true
   done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -print0)
+  [[ "${saw_release}" == "true" ]]
 }
 
 legacy_state_is_valid() {
@@ -542,6 +555,7 @@ legacy_state_is_valid() {
 }
 
 legacy_install_root_is_valid() {
+  local require_current="${1:-true}"
   local entry name
   local saw_lock=false saw_releases=false
 
@@ -587,7 +601,7 @@ legacy_install_root_is_valid() {
     esac
   done < <(find "${INSTALL_ROOT}" -mindepth 1 -maxdepth 1 -print0)
   [[ "${saw_releases}" == "true" && "${saw_lock}" == "true" ]] || return 1
-  legacy_release_inventory_is_valid
+  legacy_release_inventory_is_valid "${require_current}"
 }
 
 legacy_cache_root_is_valid() {
@@ -638,6 +652,44 @@ legacy_state_root_is_valid() {
     esac
   done < <(find "${STATE_DIR}" -mindepth 1 -maxdepth 1 -print0)
   legacy_state_is_valid
+}
+
+legacy_pre_activation_state_root_is_valid() {
+  local entry name
+
+  if [[ ! -e "${STATE_DIR}" && ! -L "${STATE_DIR}" ]]; then
+    return 0
+  fi
+  [[ -d "${STATE_DIR}" && ! -L "${STATE_DIR}" ]] || return 1
+  legacy_root_marker_is_compatible "${STATE_DIR}" || return 1
+  while IFS= read -r -d '' entry; do
+    name="$(basename "${entry}")"
+    case "${name}" in
+      "${OWNERSHIP_SENTINEL_NAME}") ;;
+      "${OWNERSHIP_SENTINEL_NAME}".new.*)
+        migration_temporary_is_valid \
+          "${entry}" "${OWNERSHIP_SENTINEL_NAME}.new" || return 1
+        ;;
+      *) return 1 ;;
+    esac
+  done < <(find "${STATE_DIR}" -mindepth 1 -maxdepth 1 -print0)
+}
+
+legacy_pre_activation_integration_is_absent() {
+  local path
+
+  for path in \
+    "${APP_COMMAND}" \
+    "${MAIN_DESKTOP}" \
+    "${URL_DESKTOP}" \
+    "${ICON_FILE}" \
+    "${MIME_FILE}" \
+    "${LEGACY_MAIN_DESKTOP}" \
+    "${LEGACY_URL_DESKTOP}" \
+    "${LEGACY_ICON_FILE}" \
+    "${LEGACY_MIME_FILE}"; do
+    [[ ! -e "${path}" && ! -L "${path}" ]] || return 1
+  done
 }
 
 upgrade_legacy_release_metadata() {
@@ -698,11 +750,36 @@ cleanup_legacy_migration_temporaries() {
   done
 }
 
+fresh_markerless_install_root_is_valid() {
+  local legacy_lock="${INSTALL_ROOT}/.manager.lock"
+  local unexpected
+
+  [[ "${LEGACY_LOCK_HELD}" == "true" ]] || return 1
+  [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" &&
+    -f "${legacy_lock}" && ! -L "${legacy_lock}" &&
+    "${legacy_lock}" -ef /proc/self/fd/8 ]] || return 1
+  unexpected="$({
+    find "${INSTALL_ROOT}" -mindepth 1 -maxdepth 1 \
+      ! -name '.manager.lock' \
+      ! -name "${OWNERSHIP_SENTINEL_NAME}.new.*" \
+      -print -quit
+  })" || return 1
+  [[ -z "${unexpected}" ]]
+}
+
 migrate_legacy_layout_if_needed() {
   local sentinel="${INSTALL_ROOT}/${OWNERSHIP_SENTINEL_NAME}"
   local release_dir
+  local pre_activation=false
 
   [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] || return 0
+  if fresh_markerless_install_root_is_valid; then
+    cleanup_ownership_sentinel_temporaries "${INSTALL_ROOT}" ||
+      die "could not safely recover an interrupted installation root ownership marker: ${INSTALL_ROOT}"
+    write_ownership_sentinel "${INSTALL_ROOT}" ||
+      die "could not mark the fresh installation root as manager-owned: ${INSTALL_ROOT}"
+    return 0
+  fi
   if root_contains_only_ownership_sentinel_temporaries "${INSTALL_ROOT}"; then
     cleanup_ownership_sentinel_temporaries "${INSTALL_ROOT}" ||
       die "could not safely recover an interrupted installation root ownership marker: ${INSTALL_ROOT}"
@@ -712,7 +789,16 @@ migrate_legacy_layout_if_needed() {
     return 0
   fi
 
-  if ! legacy_install_root_is_valid ||
+  if [[ ! -e "${CURRENT_LINK}" && ! -L "${CURRENT_LINK}" &&
+    ! -e "${PREVIOUS_LINK}" && ! -L "${PREVIOUS_LINK}" ]]; then
+    pre_activation=true
+    if ! legacy_install_root_is_valid false ||
+      ! legacy_cache_root_is_valid ||
+      ! legacy_pre_activation_state_root_is_valid ||
+      ! legacy_pre_activation_integration_is_absent; then
+      die "public ${LEGACY_MANAGER_VERSION} pre-activation installation could not be safely verified; refusing ownership migration"
+    fi
+  elif ! legacy_install_root_is_valid ||
     ! legacy_cache_root_is_valid ||
     ! legacy_state_root_is_valid; then
     die "public ${LEGACY_MANAGER_VERSION} installation could not be safely verified; refusing ownership migration"
@@ -731,14 +817,22 @@ migrate_legacy_layout_if_needed() {
     chmod 0700 "${CACHE_ROOT}" ||
       die "could not secure the legacy cache root"
   fi
+  if [[ ! -e "${STATE_DIR}" && ! -L "${STATE_DIR}" ]]; then
+    mkdir -p -- "${STATE_DIR}" ||
+      die "could not recreate the legacy state root"
+    chmod 0700 "${STATE_DIR}" ||
+      die "could not secure the legacy state root"
+  fi
   write_ownership_sentinel "${CACHE_ROOT}" ||
     die "could not mark the legacy cache as manager-owned"
   write_ownership_sentinel "${STATE_DIR}" ||
     die "could not mark the legacy state as manager-owned"
   write_ownership_sentinel "${INSTALL_ROOT}" ||
     die "could not mark the legacy installation as manager-owned"
-  prune_releases ||
-    die "could not prune superseded releases after ownership migration"
+  if [[ "${pre_activation}" == "false" ]]; then
+    prune_releases ||
+      die "could not prune superseded releases after ownership migration"
+  fi
 }
 
 ensure_layout() {
@@ -757,10 +851,23 @@ ensure_layout() {
 acquire_legacy_lock_if_needed() {
   local legacy_lock="${INSTALL_ROOT}/.manager.lock"
   local sentinel="${INSTALL_ROOT}/${OWNERSHIP_SENTINEL_NAME}"
+  local install_parent
 
+  install_parent="$(dirname "${INSTALL_ROOT}")"
+
+  if [[ ! -e "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]]; then
+    mkdir -p -- "${install_parent}"
+    mkdir -- "${INSTALL_ROOT}" 2>/dev/null || true
+  fi
   [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] || return 0
   [[ ! -e "${sentinel}" && ! -L "${sentinel}" ]] || return 0
-  [[ -e "${legacy_lock}" || -L "${legacy_lock}" ]] || return 0
+  if [[ ! -e "${legacy_lock}" && ! -L "${legacy_lock}" ]]; then
+    directory_is_empty "${INSTALL_ROOT}" || return 0
+    if ! (set -o noclobber; : >"${legacy_lock}") 2>/dev/null; then
+      [[ -e "${legacy_lock}" || -L "${legacy_lock}" ]] ||
+        die "could not create the public manager lock safely: ${legacy_lock}"
+    fi
+  fi
   [[ -f "${legacy_lock}" && ! -L "${legacy_lock}" ]] ||
     die "legacy manager lock must be a non-symbolic regular file: ${legacy_lock}"
 
@@ -774,6 +881,7 @@ acquire_legacy_lock_if_needed() {
   [[ -f "${legacy_lock}" && ! -L "${legacy_lock}" &&
     "${legacy_lock}" -ef /proc/self/fd/8 ]] ||
     die "legacy manager lock changed while it was being acquired: ${legacy_lock}"
+  LEGACY_LOCK_HELD=true
 }
 
 acquire_lock() {
@@ -1884,15 +1992,20 @@ recover_pending_transaction() {
     }
 }
 
-uninstall_cleanup_record_path() {
+uninstall_cleanup_record_fields() {
   jq -er --arg manager_id "${MANAGER_ID}" \
     --argjson schema_version "${OWNERSHIP_SCHEMA_VERSION}" '
       select(
         .schemaVersion == $schema_version and
         .managerId == $manager_id and
-        (.stagedInstallRoot | type == "string")
+        (.stagedInstallRoot | type == "string") and
+        (.device | type == "string") and
+        (.device | test("^[0-9]+$")) and
+        (.inode | type == "string") and
+        (.inode | test("^[0-9]+$"))
       )
-      | .stagedInstallRoot
+      | [.stagedInstallRoot, .device, .inode]
+      | @tsv
     ' "${UNINSTALL_CLEANUP_RECORD}" 2>/dev/null
 }
 
@@ -1905,21 +2018,61 @@ validate_staged_install_root_path() {
   [[ "${suffix}" =~ ^[0-9]+$ ]]
 }
 
+staged_install_root_identity() {
+  local staged_root="$1"
+  local identity
+
+  validate_staged_install_root_path "${staged_root}" || return 1
+  [[ -d "${staged_root}" && ! -L "${staged_root}" ]] || return 1
+  identity="$(stat -c '%d %i' -- "${staged_root}" 2>/dev/null)" || return 1
+  [[ "${identity}" =~ ^[0-9]+\ [0-9]+$ ]] || return 1
+  printf '%s\n' "${identity}"
+}
+
+staged_install_root_identity_matches() {
+  local staged_root="$1"
+  local device="$2"
+  local inode="$3"
+  local identity
+
+  identity="$(staged_install_root_identity "${staged_root}")" || return 1
+  [[ "${identity}" == "${device} ${inode}" ]]
+}
+
+uninstall_cleanup_record_matches_root() {
+  local expected_root="$1"
+  local fields recorded_root device inode
+
+  fields="$(uninstall_cleanup_record_fields)" || return 1
+  IFS=$'\t' read -r recorded_root device inode <<<"${fields}"
+  [[ "${recorded_root}" == "${expected_root}" ]] || return 1
+  staged_install_root_identity_matches \
+    "${recorded_root}" "${device}" "${inode}"
+}
+
 write_uninstall_cleanup_record() {
   local staged_root="$1"
   local temporary="${UNINSTALL_CLEANUP_RECORD}.new.$$"
+  local identity device inode
 
   validate_staged_install_root_path "${staged_root}" || return 1
+  owned_root_is_valid "${staged_root}" || return 1
+  identity="$(staged_install_root_identity "${staged_root}")" || return 1
+  read -r device inode <<<"${identity}"
   [[ ! -e "${UNINSTALL_CLEANUP_RECORD}" &&
     ! -L "${UNINSTALL_CLEANUP_RECORD}" ]] || return 1
   [[ ! -e "${temporary}" && ! -L "${temporary}" ]] || return 1
   if ! jq -n \
     --arg manager_id "${MANAGER_ID}" \
     --argjson schema_version "${OWNERSHIP_SCHEMA_VERSION}" \
-    --arg staged_root "${staged_root}" '{
+    --arg staged_root "${staged_root}" \
+    --arg device "${device}" \
+    --arg inode "${inode}" '{
       schemaVersion: $schema_version,
       managerId: $manager_id,
-      stagedInstallRoot: $staged_root
+      stagedInstallRoot: $staged_root,
+      device: $device,
+      inode: $inode
     }' >"${temporary}" ||
     ! chmod 0600 "${temporary}" ||
     ! mv -Tf -- "${temporary}" "${UNINSTALL_CLEANUP_RECORD}"; then
@@ -1929,21 +2082,25 @@ write_uninstall_cleanup_record() {
 }
 
 recover_pending_uninstall_cleanup() {
-  local staged_root
+  local fields staged_root device inode
 
   [[ ! -e "${UNINSTALL_CLEANUP_RECORD}" &&
     ! -L "${UNINSTALL_CLEANUP_RECORD}" ]] && return 0
   [[ -f "${UNINSTALL_CLEANUP_RECORD}" &&
     ! -L "${UNINSTALL_CLEANUP_RECORD}" ]] ||
     die "unfinished uninstall cleanup record is invalid: ${UNINSTALL_CLEANUP_RECORD}"
-  staged_root="$(uninstall_cleanup_record_path)" ||
+  fields="$(uninstall_cleanup_record_fields)" ||
     die "unfinished uninstall cleanup record is invalid: ${UNINSTALL_CLEANUP_RECORD}"
+  IFS=$'\t' read -r staged_root device inode <<<"${fields}"
   validate_staged_install_root_path "${staged_root}" ||
     die "unfinished uninstall cleanup path is unsafe: ${staged_root}"
 
   if [[ -e "${staged_root}" || -L "${staged_root}" ]]; then
     [[ -d "${staged_root}" && ! -L "${staged_root}" ]] ||
       die "unfinished uninstall cleanup root is unsafe: ${staged_root}"
+    staged_install_root_identity_matches \
+      "${staged_root}" "${device}" "${inode}" ||
+      die "unfinished uninstall cleanup root identity does not match: ${staged_root}"
     info "finishing an interrupted uninstall cleanup"
     rm -rf -- "${staged_root}" ||
       die "could not finish uninstall cleanup: ${staged_root}"
@@ -2658,7 +2815,10 @@ command_uninstall() {
   fi
   discard_transaction ||
     die "uninstall was not durably committed; transaction journal preserved at ${TRANSACTION_JOURNAL}; recovery is required before another installation change"
-  if [[ -n "${staged_root}" ]] && ! rm -rf -- "${staged_root}"; then
+  if [[ -n "${staged_root}" ]] &&
+    ! uninstall_cleanup_record_matches_root "${staged_root}"; then
+    warn "uninstall completed, but the old release data identity changed; cleanup record preserved at ${UNINSTALL_CLEANUP_RECORD}"
+  elif [[ -n "${staged_root}" ]] && ! rm -rf -- "${staged_root}"; then
     warn "uninstall completed, but old release data remains at ${staged_root}"
   elif ! rm -f -- "${UNINSTALL_CLEANUP_RECORD}"; then
     warn "uninstall completed, but its cleanup record remains at ${UNINSTALL_CLEANUP_RECORD}"
