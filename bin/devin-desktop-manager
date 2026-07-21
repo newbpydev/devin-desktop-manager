@@ -32,6 +32,7 @@ readonly STATE_DIR="${STATE_HOME}/devin-desktop-manager"
 readonly STATE_FILE="${STATE_DIR}/state.json"
 readonly LOCK_FILE="${STATE_HOME}/devin-desktop-manager.lock"
 readonly TRANSACTION_JOURNAL="${STATE_HOME}/devin-desktop-manager.transaction"
+readonly TRANSACTION_DISCARD="${TRANSACTION_JOURNAL}.discard"
 readonly UNINSTALL_CLEANUP_RECORD="${STATE_HOME}/devin-desktop-manager.cleanup"
 readonly UNINSTALL_CLEANUP_PROOF="${UNINSTALL_CLEANUP_RECORD}.proof"
 readonly RELEASE_PRUNE_CLEANUP_RECORD="${STATE_HOME}/devin-desktop-manager.prune"
@@ -75,6 +76,7 @@ INTEGRATION_STAGE=""
 TRANSACTION_BACKUP=""
 STAGED_INSTALL_ROOT=""
 TRANSACTION_RESTORING=false
+TRANSACTION_DISCARDING=false
 LEGACY_LOCK_HELD=false
 CLEANUP_PROOF_TEMP=""
 
@@ -126,7 +128,9 @@ handle_transaction_signal() {
   local status="$1"
 
   trap - INT TERM HUP
-  if [[ -n "${TRANSACTION_BACKUP}" && "${TRANSACTION_RESTORING}" != "true" ]]; then
+  if [[ -n "${TRANSACTION_BACKUP}" &&
+    "${TRANSACTION_RESTORING}" != "true" &&
+    "${TRANSACTION_DISCARDING}" != "true" ]]; then
     warn "operation interrupted; restoring the previous managed state"
     restore_transaction ||
       warn "automatic recovery failed; the next manager mutation will retry it"
@@ -255,6 +259,26 @@ validate_environment() {
   if path_is_at_or_below "${STATE_HOME}" "${CACHE_ROOT}"; then
     die "XDG_STATE_HOME must not be the cache root or a directory beneath it"
   fi
+}
+
+validate_state_home_security() {
+  local owner permissions group_mode other_mode
+
+  [[ -d "${STATE_HOME}" && ! -L "${STATE_HOME}" ]] ||
+    die "XDG_STATE_HOME must be a non-symbolic directory: ${STATE_HOME}"
+  owner="$(stat -c '%u' -- "${STATE_HOME}")" ||
+    die "could not inspect XDG_STATE_HOME ownership: ${STATE_HOME}"
+  [[ "${owner}" == "${EUID}" ]] ||
+    die "XDG_STATE_HOME must be owned by the current user: ${STATE_HOME}"
+  permissions="$(stat -c '%a' -- "${STATE_HOME}")" ||
+    die "could not inspect XDG_STATE_HOME permissions: ${STATE_HOME}"
+  [[ "${permissions}" =~ ^[0-7]{3,4}$ ]] ||
+    die "XDG_STATE_HOME has unsupported permissions: ${STATE_HOME}"
+  permissions="${permissions: -3}"
+  group_mode="${permissions:1:1}"
+  other_mode="${permissions:2:1}"
+  (((group_mode & 2) == 0 && (other_mode & 2) == 0)) ||
+    die "XDG_STATE_HOME must not be writable by other users: ${STATE_HOME}"
 }
 
 ensure_not_root() {
@@ -926,6 +950,10 @@ migrate_legacy_layout_if_needed() {
     die "public ${LEGACY_MANAGER_VERSION} installation could not be safely verified; refusing ownership migration"
   fi
 
+  if [[ "${pre_activation}" == "false" ]]; then
+    require_app_stopped
+  fi
+
   info "migrating verified public ${LEGACY_MANAGER_VERSION} installation to ownership schema ${OWNERSHIP_SCHEMA_VERSION}"
   cleanup_legacy_migration_temporaries ||
     die "could not clean an interrupted ownership migration"
@@ -974,12 +1002,36 @@ ensure_layout() {
   chmod 0700 "${RELEASES_DIR}"
 }
 
+acquire_existing_legacy_lock() {
+  local legacy_lock="$1"
+
+  [[ -f "${legacy_lock}" && ! -L "${legacy_lock}" ]] ||
+    die "legacy manager lock must be a non-symbolic regular file: ${legacy_lock}"
+
+  if ! exec 8<"${legacy_lock}"; then
+    die "could not open the legacy manager lock safely: ${legacy_lock}"
+  fi
+  [[ -f "${legacy_lock}" && ! -L "${legacy_lock}" &&
+    "${legacy_lock}" -ef /proc/self/fd/8 ]] ||
+    die "legacy manager lock changed while it was being opened: ${legacy_lock}"
+  flock -n 8 || die "another Devin Desktop manager operation is running"
+  [[ -f "${legacy_lock}" && ! -L "${legacy_lock}" &&
+    "${legacy_lock}" -ef /proc/self/fd/8 ]] ||
+    die "legacy manager lock changed while it was being acquired: ${legacy_lock}"
+  LEGACY_LOCK_HELD=true
+}
+
 acquire_legacy_lock_if_needed() {
   local legacy_lock="${INSTALL_ROOT}/.manager.lock"
   local sentinel="${INSTALL_ROOT}/${OWNERSHIP_SENTINEL_NAME}"
   local install_parent
 
   if [[ -e "${TRANSACTION_JOURNAL}" || -L "${TRANSACTION_JOURNAL}" ]]; then
+    if [[ -e "${INSTALL_ROOT}" || -L "${INSTALL_ROOT}" ]]; then
+      [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] ||
+        die "installation root is unsafe during transaction recovery: ${INSTALL_ROOT}"
+      acquire_existing_legacy_lock "${legacy_lock}"
+    fi
     return 0
   fi
   install_parent="$(dirname "${INSTALL_ROOT}")"
@@ -997,20 +1049,7 @@ acquire_legacy_lock_if_needed() {
         die "could not create the public manager lock safely: ${legacy_lock}"
     fi
   fi
-  [[ -f "${legacy_lock}" && ! -L "${legacy_lock}" ]] ||
-    die "legacy manager lock must be a non-symbolic regular file: ${legacy_lock}"
-
-  if ! exec 8<"${legacy_lock}"; then
-    die "could not open the legacy manager lock safely: ${legacy_lock}"
-  fi
-  [[ -f "${legacy_lock}" && ! -L "${legacy_lock}" &&
-    "${legacy_lock}" -ef /proc/self/fd/8 ]] ||
-    die "legacy manager lock changed while it was being opened: ${legacy_lock}"
-  flock -n 8 || die "another Devin Desktop manager operation is running"
-  [[ -f "${legacy_lock}" && ! -L "${legacy_lock}" &&
-    "${legacy_lock}" -ef /proc/self/fd/8 ]] ||
-    die "legacy manager lock changed while it was being acquired: ${legacy_lock}"
-  LEGACY_LOCK_HELD=true
+  acquire_existing_legacy_lock "${legacy_lock}"
 }
 
 acquire_lock() {
@@ -1018,6 +1057,7 @@ acquire_lock() {
 
   require_commands stat
   mkdir -p -- "${STATE_HOME}"
+  validate_state_home_security
   if [[ ! -e "${LOCK_FILE}" && ! -L "${LOCK_FILE}" ]]; then
     (set -o noclobber; : >"${LOCK_FILE}") 2>/dev/null ||
       die "could not create the manager lock safely: ${LOCK_FILE}"
@@ -1036,6 +1076,7 @@ acquire_lock() {
   [[ -f "${LOCK_FILE}" && ! -L "${LOCK_FILE}" &&
     "${LOCK_FILE}" -ef /proc/self/fd/9 ]] ||
     die "manager lock changed while it was being acquired: ${LOCK_FILE}"
+  recover_pending_transaction_discard
   acquire_legacy_lock_if_needed
   recover_pending_transaction
   recover_pending_uninstall_cleanup
@@ -1090,7 +1131,8 @@ app_is_running() {
     executable="$(readlink "${process_path}/exe" 2>/dev/null || true)"
     case "${executable}" in
       "${RELEASES_DIR}"/*/app/devin-desktop|\
-        "${INSTALL_ROOT}"/.release-prune-*/app/devin-desktop) return 0 ;;
+        "${INSTALL_ROOT}"/.release-prune-*/app/devin-desktop|\
+        "${INSTALL_ROOT}".uninstall-*/releases/*/app/devin-desktop) return 0 ;;
     esac
   done
 
@@ -2004,6 +2046,8 @@ backup_transaction() {
 
   [[ ! -e "${TRANSACTION_JOURNAL}" && ! -L "${TRANSACTION_JOURNAL}" ]] ||
     die "an unfinished manager transaction requires recovery"
+  [[ ! -e "${TRANSACTION_DISCARD}" && ! -L "${TRANSACTION_DISCARD}" ]] ||
+    die "an unfinished manager transaction discard requires cleanup"
   [[ ! -e "${partial}" && ! -L "${partial}" ]] ||
     die "temporary transaction path already exists: ${partial}"
   TRANSACTION_BACKUP="${partial}"
@@ -2219,13 +2263,38 @@ restore_transaction() {
 
 discard_transaction() {
   if [[ -n "${TRANSACTION_BACKUP}" ]]; then
-    rm -rf -- "${TRANSACTION_BACKUP}" || return 1
+    if [[ "${TRANSACTION_BACKUP}" == "${TRANSACTION_JOURNAL}" ]]; then
+      [[ ! -e "${TRANSACTION_DISCARD}" &&
+        ! -L "${TRANSACTION_DISCARD}" ]] || return 1
+      TRANSACTION_DISCARDING=true
+      if ! mv -T -- "${TRANSACTION_JOURNAL}" "${TRANSACTION_DISCARD}"; then
+        TRANSACTION_DISCARDING=false
+        return 1
+      fi
+      TRANSACTION_BACKUP=""
+      if ! rm -rf -- "${TRANSACTION_DISCARD}"; then
+        warn "committed transaction discard will be finished on the next manager mutation"
+      fi
+      TRANSACTION_DISCARDING=false
+    else
+      rm -rf -- "${TRANSACTION_BACKUP}" || return 1
+      TRANSACTION_BACKUP=""
+    fi
   fi
-  TRANSACTION_BACKUP=""
   if [[ -n "${INTEGRATION_STAGE}" ]]; then
     rm -rf -- "${INTEGRATION_STAGE}" || return 1
   fi
   INTEGRATION_STAGE=""
+}
+
+recover_pending_transaction_discard() {
+  [[ ! -e "${TRANSACTION_DISCARD}" &&
+    ! -L "${TRANSACTION_DISCARD}" ]] && return 0
+  [[ -d "${TRANSACTION_DISCARD}" && ! -L "${TRANSACTION_DISCARD}" ]] ||
+    die "unfinished transaction discard is unsafe: ${TRANSACTION_DISCARD}"
+  info "finishing an interrupted transaction discard"
+  rm -rf -- "${TRANSACTION_DISCARD}" ||
+    die "could not finish transaction discard: ${TRANSACTION_DISCARD}"
 }
 
 recover_pending_transaction() {
@@ -2416,6 +2485,7 @@ finish_recorded_uninstall_cleanup() {
 recover_pending_uninstall_cleanup() {
   [[ ! -e "${UNINSTALL_CLEANUP_RECORD}" &&
     ! -L "${UNINSTALL_CLEANUP_RECORD}" ]] && return 0
+  require_app_stopped
   finish_recorded_uninstall_cleanup true
 }
 

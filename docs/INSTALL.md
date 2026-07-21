@@ -98,4 +98,7 @@ distribution documentation if `unshare --user --map-root-user true` fails.
 
 The manager respects absolute `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`,
 `XDG_DATA_HOME`, and `XDG_STATE_HOME` values. Relative XDG paths are refused to
-avoid writing to an unexpected directory.
+avoid writing to an unexpected directory. Because transaction journals and
+locks live in `XDG_STATE_HOME`, that directory must be owned by the current
+user and must not be group- or world-writable; shared directories such as
+`/tmp` are rejected.

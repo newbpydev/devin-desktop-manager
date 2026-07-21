@@ -176,6 +176,16 @@ if [[ -n "${MOCK_CP_FAIL_PATTERN:-}" && "$*" == *"${MOCK_CP_FAIL_PATTERN}"* ]]; 
 fi
 exec "$(command -p -v cp)" "$@"
 EOF
+  cat >"${MOCK_BIN}/mv" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "${MOCK_MV_FAIL_PATH:-}" ]]; then
+  for argument in "$@"; do
+    [[ "${argument}" != "${MOCK_MV_FAIL_PATH}" ]] || exit 74
+  done
+fi
+exec "$(command -p -v mv)" "$@"
+EOF
   cat >"${MOCK_BIN}/rm" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -786,6 +796,50 @@ JSON
   [[ "${output}" == *"migrating verified public 0.1.0 installation"* ]]
   [[ "${output}" == *"removing superseded release ${extra_id}"* ]]
   [ ! -e "${extra_release}" ]
+}
+
+@test "migration refuses to prune a running legacy release" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local current_target current_release extra_version extra_build extra_sha
+  local extra_id extra_release temporary running_pid
+
+  install_fixture
+  downgrade_to_public_0_1_layout
+  current_target="$(readlink "${install_root}/current")"
+  current_release="${install_root}/${current_target}"
+  extra_version="3.4.26"
+  extra_build="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  extra_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  extra_id="${extra_version}-${extra_build:0:12}-${extra_sha:0:12}"
+  extra_release="${install_root}/releases/${extra_id}"
+  cp -a -- "${current_release}" "${extra_release}"
+  temporary="${extra_release}/release.json.test"
+  jq \
+    --arg version "${extra_version}" \
+    --arg build "${extra_build}" \
+    --arg sha "${extra_sha}" \
+    --arg url "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${extra_build}/Devin-linux-x64-${extra_version}.deb" '
+      .windsurfVersion = $version |
+      .productVersion = $version |
+      .build = $build |
+      .artifactUrl = $url |
+      .sha256 = $sha
+    ' "${extra_release}/release.json" >"${temporary}"
+  mv -Tf -- "${temporary}" "${extra_release}/release.json"
+  cp -- /bin/sleep "${extra_release}/app/devin-desktop"
+  chmod 0755 "${extra_release}/app/devin-desktop"
+
+  "${extra_release}/app/devin-desktop" 30 &
+  running_pid=$!
+  sleep 0.1
+  run install_fixture
+  kill "${running_pid}" 2>/dev/null || true
+  wait "${running_pid}" 2>/dev/null || true
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"Devin Desktop is running"* ]]
+  [ -d "${extra_release}" ]
+  [ ! -e "${install_root}/.devin-desktop-manager-owned" ]
 }
 
 @test "migration resumes a validated public download left before first activation" {
@@ -1465,6 +1519,83 @@ EOF
   [ "${lines[-1]}" = "original" ]
 }
 
+@test "transaction recovery takes an existing public manager lock" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local journal="${TEST_HOME}/.local/state/devin-desktop-manager.transaction"
+  local legacy_lock="${install_root}/.manager.lock"
+  local ready="${BATS_TEST_TMPDIR}/legacy-recovery-lock-ready"
+
+  install_fixture
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      acquire_lock
+      backup_transaction
+    ' _ "${MANAGER}"
+  [ "${status}" -eq 0 ]
+  [ -d "${journal}" ]
+
+  start_lock_holder "${legacy_lock}" "${ready}"
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c 'source "$1"; acquire_lock' \
+    _ "${MANAGER}"
+  stop_lock_holder
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"another Devin Desktop manager operation is running"* ]]
+  [ -d "${journal}" ]
+}
+
+@test "a partial transaction discard is cleaned without replaying snapshots" {
+  local desktop="${TEST_HOME}/.local/share/applications/devin-desktop-manager.desktop"
+  local discard="${TEST_HOME}/.local/state/devin-desktop-manager.transaction.discard"
+
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      acquire_lock
+      mkdir -p "$(dirname "${MAIN_DESKTOP}")"
+      printf "original\n" >"${MAIN_DESKTOP}"
+      backup_transaction
+      printf "committed\n" >"${MAIN_DESKTOP}"
+      mv -T -- "${TRANSACTION_JOURNAL}" "${TRANSACTION_DISCARD}"
+      rm -f -- "${TRANSACTION_DISCARD}/main-desktop"
+      TRANSACTION_BACKUP=""
+    ' _ "${MANAGER}"
+  [ "${status}" -eq 0 ]
+  [ -d "${discard}" ]
+
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      acquire_lock
+      cat "${MAIN_DESKTOP}"
+    ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"finishing an interrupted transaction discard"* ]]
+  [[ "${output}" != *"recovering an unfinished manager transaction"* ]]
+  [ "${lines[-1]}" = "committed" ]
+  [ "$(cat "${desktop}")" = "committed" ]
+  [ ! -e "${discard}" ]
+}
+
 @test "termination restores an active transaction before exiting" {
   local desktop="${TEST_HOME}/.local/share/applications/devin-desktop-manager.desktop"
 
@@ -2039,6 +2170,37 @@ EOF
   [ -f "${cleanup_record}" ]
 }
 
+@test "pending uninstall cleanup refuses to delete a running staged release" {
+  local cleanup_record="${TEST_HOME}/.local/state/devin-desktop-manager.cleanup"
+  local staged_root staged_app running_pid
+
+  install_fixture
+  export MOCK_RM_SIGNAL_BEFORE_PATTERN=".uninstall-"
+  run manager_env uninstall --yes
+  unset MOCK_RM_SIGNAL_BEFORE_PATTERN
+  [ "${status}" -eq 143 ]
+  staged_root="$(find "${TEST_HOME}/.local/opt" -maxdepth 1 \
+    -type d -name 'devin-desktop.uninstall-*' -print -quit)"
+  [ -n "${staged_root}" ]
+  staged_app="$(find "${staged_root}/releases" -mindepth 3 -maxdepth 3 \
+    -path '*/app/devin-desktop' -type f -print -quit)"
+  [ -n "${staged_app}" ]
+  cp -- /bin/sleep "${staged_app}"
+  chmod 0755 "${staged_app}"
+
+  "${staged_app}" 30 &
+  running_pid=$!
+  sleep 0.1
+  run install_fixture
+  kill "${running_pid}" 2>/dev/null || true
+  wait "${running_pid}" 2>/dev/null || true
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"Devin Desktop is running"* ]]
+  [ -d "${staged_root}" ]
+  [ -f "${cleanup_record}" ]
+}
+
 @test "doctor reports a damaged command link" {
   install_fixture
   rm "${TEST_HOME}/.local/bin/devin-desktop"
@@ -2133,12 +2295,13 @@ EOF
 
 @test "uninstall transaction cleanup failure reports deferred recovery" {
   local journal="${TEST_HOME}/.local/state/devin-desktop-manager.transaction"
+  local discard="${journal}.discard"
 
   install_fixture
 
-  export MOCK_RM_FAIL_PATH="${journal}"
+  export MOCK_MV_FAIL_PATH="${discard}"
   run manager_env uninstall --yes
-  unset MOCK_RM_FAIL_PATH
+  unset MOCK_MV_FAIL_PATH
 
   [ "${status}" -ne 0 ]
   [[ "${output}" == *"uninstall was not durably committed"* ]]
@@ -2152,13 +2315,14 @@ EOF
 @test "the next mutation restores an uninstall journal before recreating the root" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
   local journal="${TEST_HOME}/.local/state/devin-desktop-manager.transaction"
+  local discard="${journal}.discard"
   local staged_root
 
   install_fixture
 
-  export MOCK_RM_FAIL_PATH="${journal}"
+  export MOCK_MV_FAIL_PATH="${discard}"
   run manager_env uninstall --yes
-  unset MOCK_RM_FAIL_PATH
+  unset MOCK_MV_FAIL_PATH
 
   [ "${status}" -ne 0 ]
   [ -d "${journal}" ]
@@ -2215,12 +2379,13 @@ EOF
 @test "transaction recovery preserves its journal when the staged root is missing" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
   local journal="${TEST_HOME}/.local/state/devin-desktop-manager.transaction"
+  local discard="${journal}.discard"
   local staged_root
 
   install_fixture
-  export MOCK_RM_FAIL_PATH="${journal}"
+  export MOCK_MV_FAIL_PATH="${discard}"
   run manager_env uninstall --yes
-  unset MOCK_RM_FAIL_PATH
+  unset MOCK_MV_FAIL_PATH
   [ "${status}" -ne 0 ]
   staged_root="$(find "${TEST_HOME}/.local/opt" -maxdepth 1 \
     -type d -name 'devin-desktop.uninstall-*' -print -quit)"
@@ -2238,12 +2403,13 @@ EOF
 @test "transaction recovery rejects a partially deleted staged root" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
   local journal="${TEST_HOME}/.local/state/devin-desktop-manager.transaction"
+  local discard="${journal}.discard"
   local staged_root
 
   install_fixture
-  export MOCK_RM_FAIL_PATH="${journal}"
+  export MOCK_MV_FAIL_PATH="${discard}"
   run manager_env uninstall --yes
-  unset MOCK_RM_FAIL_PATH
+  unset MOCK_MV_FAIL_PATH
   [ "${status}" -ne 0 ]
   staged_root="$(find "${TEST_HOME}/.local/opt" -maxdepth 1 \
     -type d -name 'devin-desktop.uninstall-*' -print -quit)"
@@ -2338,6 +2504,26 @@ EOF
 
   [ "${status}" -ne 0 ]
   [[ "${output}" == *"XDG_DATA_HOME must be set to an absolute path"* ]]
+  [ ! -e "${TEST_HOME}/.local/opt/devin-desktop" ]
+}
+
+@test "shared state homes are rejected before journal or lock creation" {
+  local state_home="${BATS_TEST_TMPDIR}/shared-state"
+
+  mkdir -p "${state_home}"
+  chmod 0777 "${state_home}"
+
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${state_home}" PATH="${MOCK_BIN}:${PATH}" \
+    "${MANAGER}" uninstall --yes
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"XDG_STATE_HOME must not be writable by other users"* ]]
+  [ ! -e "${state_home}/devin-desktop-manager.lock" ]
+  [ ! -e "${state_home}/devin-desktop-manager.transaction" ]
   [ ! -e "${TEST_HOME}/.local/opt/devin-desktop" ]
 }
 
