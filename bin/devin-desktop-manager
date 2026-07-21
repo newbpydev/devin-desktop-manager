@@ -233,7 +233,7 @@ path_is_at_or_below() {
 }
 
 validate_environment() {
-  local xdg_name xdg_path
+  local xdg_name xdg_path removed_root
 
   validate_absolute_directory HOME "${HOME_DIR}"
   validate_absolute_directory XDG_CACHE_HOME \
@@ -255,9 +255,15 @@ validate_environment() {
     if path_is_at_or_below "${xdg_path}" "${INSTALL_ROOT}"; then
       die "${xdg_name} must not be the installation root or a directory beneath it"
     fi
+    for removed_root in "${CACHE_ROOT}" "${STATE_DIR}"; do
+      if path_is_at_or_below "${xdg_path}" "${removed_root}"; then
+        die "${xdg_name} must not be a manager root removed by uninstall or a directory beneath it"
+      fi
+    done
   done
-  if path_is_at_or_below "${STATE_HOME}" "${CACHE_ROOT}"; then
-    die "XDG_STATE_HOME must not be the cache root or a directory beneath it"
+  if path_is_at_or_below "${STATE_DIR}" "${CACHE_ROOT}" ||
+    path_is_at_or_below "${CACHE_ROOT}" "${STATE_DIR}"; then
+    die "manager cache and state roots must not overlap"
   fi
 }
 

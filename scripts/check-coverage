@@ -26,7 +26,14 @@ main() {
 
   stats="$(
     jq -er '
-      [.[]?.coverage? | .[]? | .[]? | select(. != null)] as $lines
+      [
+        .[]?.coverage? | .[]? |
+        if type == "array" then .[]
+        elif type == "object" and (.lines? | type) == "array" then .lines[]
+        else empty
+        end |
+        select(. != null)
+      ] as $lines
       | ($lines | length) as $relevant
       | ($lines | map(select(. > 0)) | length) as $covered
       | select($relevant > 0)

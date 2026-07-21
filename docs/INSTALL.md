@@ -101,4 +101,6 @@ The manager respects absolute `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`,
 avoid writing to an unexpected directory. Because transaction journals and
 locks live in `XDG_STATE_HOME`, that directory must be owned by the current
 user and must not be group- or world-writable; shared directories such as
-`/tmp` are rejected.
+`/tmp` are rejected. XDG homes also cannot live beneath the manager's install,
+cache, or state roots, and the derived manager cache and state roots cannot
+overlap, because uninstall removes those manager-owned trees recursively.

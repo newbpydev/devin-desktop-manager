@@ -2569,6 +2569,38 @@ EOF
   done
 }
 
+@test "data and config homes beneath removed manager roots are rejected" {
+  local cache_root="${TEST_HOME}/.cache/devin-desktop-manager"
+  local state_dir="${TEST_HOME}/.local/state/devin-desktop-manager"
+  local xdg_name xdg_path
+
+  for xdg_name in XDG_CONFIG_HOME XDG_DATA_HOME; do
+    case "${xdg_name}" in
+      XDG_CONFIG_HOME) xdg_path="${cache_root}/config" ;;
+      XDG_DATA_HOME) xdg_path="${state_dir}/data" ;;
+    esac
+    run env HOME="${TEST_HOME}" "${xdg_name}=${xdg_path}" \
+      PATH="${MOCK_BIN}:${PATH}" "${MANAGER}" update
+
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == \
+      *"${xdg_name} must not be a manager root removed by uninstall or a directory beneath it"* ]]
+    [ ! -e "${TEST_HOME}/.local/opt/devin-desktop" ]
+  done
+}
+
+@test "derived manager cache and state roots must not overlap" {
+  local shared_home="${TEST_HOME}/.local/manager-storage"
+
+  run env HOME="${TEST_HOME}" XDG_CACHE_HOME="${shared_home}" \
+    XDG_STATE_HOME="${shared_home}" PATH="${MOCK_BIN}:${PATH}" \
+    "${MANAGER}" update
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"manager cache and state roots must not overlap"* ]]
+  [ ! -e "${TEST_HOME}/.local/opt/devin-desktop" ]
+}
+
 @test "state storage beneath the manager cache root is rejected before mutation" {
   local cache_home="${TEST_HOME}/.cache"
   local state_home="${cache_home}/devin-desktop-manager/state"
@@ -2579,7 +2611,7 @@ EOF
 
   [ "${status}" -ne 0 ]
   [[ "${output}" == \
-    *"XDG_STATE_HOME must not be the cache root or a directory beneath it"* ]]
+    *"XDG_STATE_HOME must not be a manager root removed by uninstall or a directory beneath it"* ]]
   [ ! -e "${TEST_HOME}/.local/opt/devin-desktop" ]
 }
 

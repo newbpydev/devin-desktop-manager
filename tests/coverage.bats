@@ -10,7 +10,9 @@ setup() {
 {
   "bats-suite": {
     "coverage": {
-      "/project/bin/tool": [null, 1, 2, 0, 1, 1, 1, 1, 1, 1, 0]
+      "/project/bin/tool": {
+        "lines": [null, 1, 2, 0, 1, 1, 1, 1, 1, 1, 0]
+      }
     },
     "timestamp": 0
   }
@@ -20,6 +22,16 @@ JSON
 
 @test "coverage checker accepts a result at the configured threshold" {
   run "${CHECKER}" "${RESULTSET}" 80
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"80.00% (8/10)"* ]]
+}
+
+@test "coverage checker accepts legacy line-array entries" {
+  jq '."bats-suite".coverage["/project/bin/tool"] |= .lines' \
+    "${RESULTSET}" >"${RESULTSET}.legacy"
+
+  run "${CHECKER}" "${RESULTSET}.legacy" 80
 
   [ "${status}" -eq 0 ]
   [[ "${output}" == *"80.00% (8/10)"* ]]
@@ -36,9 +48,11 @@ JSON
   jq -n '{
     "bats-suite": {
       coverage: {
-        "/project/bin/tool": [
-          range(0; 20000) | if . < 17999 then 1 else 0 end
-        ]
+        "/project/bin/tool": {
+          lines: [
+            range(0; 20000) | if . < 17999 then 1 else 0 end
+          ]
+        }
       }
     }
   }' >"${RESULTSET}"
