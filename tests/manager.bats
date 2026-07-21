@@ -819,6 +819,25 @@ JSON
   [ -f "${cache_root}/.devin-desktop-manager-owned" ]
 }
 
+@test "migration rejects an unreadable legacy cache root without claiming it" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local cache_root="${TEST_HOME}/.cache/devin-desktop-manager"
+  local foreign="${cache_root}/keep.txt"
+
+  install_fixture
+  downgrade_to_public_0_1_layout
+  printf 'user data\n' >"${foreign}"
+  chmod 0300 "${cache_root}"
+
+  run install_fixture
+  chmod 0700 "${cache_root}"
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"could not be safely verified"* ]]
+  [ ! -e "${install_root}/.devin-desktop-manager-owned" ]
+  [ "$(cat "${foreign}")" = "user data" ]
+}
+
 @test "migration rejects an invalid legacy previous link without claiming it" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
 
@@ -1798,6 +1817,32 @@ EOF
   done
 }
 
+@test "pending release prune recovery refuses to delete a running release" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local cleanup_record="${TEST_HOME}/.local/state/devin-desktop-manager.prune"
+  local source_dir stale_dir running_pid
+
+  install_fixture
+  source_dir="${install_root}/$(readlink "${install_root}/current")"
+  stale_dir="${install_root}/releases/running-stale-release"
+  cp -a -- "${source_dir}" "${stale_dir}"
+  cp -- /bin/sleep "${stale_dir}/app/devin-desktop"
+  chmod 0755 "${stale_dir}/app/devin-desktop"
+  record_prune_intent_for_release "${stale_dir}"
+
+  "${stale_dir}/app/devin-desktop" 30 &
+  running_pid=$!
+  sleep 0.1
+  run manager_env update
+  kill "${running_pid}" 2>/dev/null || true
+  wait "${running_pid}" 2>/dev/null || true
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"Devin Desktop is running"* ]]
+  [ -d "${stale_dir}" ]
+  [ -f "${cleanup_record}" ]
+}
+
 @test "doctor reports a damaged command link" {
   install_fixture
   rm "${TEST_HOME}/.local/bin/devin-desktop"
@@ -1884,6 +1929,32 @@ EOF
   [[ "${output}" != *"will be attempted"* ]]
   [[ "${output}" != *"uninstall completed"* ]]
   [ -d "${journal}" ]
+}
+
+@test "the next mutation restores an uninstall journal before recreating the root" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local journal="${TEST_HOME}/.local/state/devin-desktop-manager.transaction"
+  local staged_root
+
+  install_fixture
+
+  export MOCK_RM_FAIL_PATH="${journal}"
+  run manager_env uninstall --yes
+  unset MOCK_RM_FAIL_PATH
+
+  [ "${status}" -ne 0 ]
+  [ -d "${journal}" ]
+  [ ! -e "${install_root}" ]
+  staged_root="$(find "${TEST_HOME}/.local/opt" -maxdepth 1 \
+    -type d -name 'devin-desktop.uninstall-*' -print -quit)"
+  [ -n "${staged_root}" ]
+
+  run install_fixture
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"recovering an unfinished manager transaction"* ]]
+  [ ! -e "${journal}" ]
+  [ -L "${install_root}/current" ]
 }
 
 @test "termination after manager command removal restores the full installation" {
