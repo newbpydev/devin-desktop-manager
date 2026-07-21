@@ -924,6 +924,27 @@ JSON
   [ "$(cat "${target}/keep.txt")" = "user data" ]
 }
 
+@test "owned-root cleanup refuses a symlinked releases directory" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local releases="${install_root}/releases"
+  local parked="${BATS_TEST_TMPDIR}/parked-releases"
+  local external="${BATS_TEST_TMPDIR}/external-releases"
+  local external_temp="${external}/foreign/release.json.new.12345"
+
+  install_fixture
+  mv -T -- "${releases}" "${parked}"
+  mkdir -p "$(dirname "${external_temp}")"
+  printf 'external data\n' >"${external_temp}"
+  ln -s "${external}" "${releases}"
+
+  run manager_env update
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"could not safely recover interrupted installation temporaries"* ]]
+  [ "$(cat "${external_temp}")" = "external data" ]
+  [ -d "${parked}" ]
+}
+
 @test "update refuses an unowned release directory without pruning it" {
   local second="${BATS_TEST_TMPDIR}/second.deb"
   local second_build="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -967,7 +988,7 @@ JSON
   run manager_env update
 
   [ "${status}" -ne 0 ]
-  [[ "${output}" == *"unowned release directory"* ]]
+  [[ "${output}" == *"refusing to activate while an unowned release would be pruned"* ]]
   [ "$(cat "${foreign_release}/keep.txt")" = "preserve foreign data" ]
 }
 
@@ -1661,6 +1682,35 @@ EOF
   [[ "${output}" == *"Current:  3.4.28"* ]]
 }
 
+@test "update validates a soon-to-be-pruned release before activation" {
+  local second="${BATS_TEST_TMPDIR}/second.deb"
+  local third="${BATS_TEST_TMPDIR}/third.deb"
+  local second_build="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  local third_build="cccccccccccccccccccccccccccccccccccccccc"
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local current_before stale_target
+
+  install_fixture
+  "${FIXTURE_BUILDER}" "${second}" safe "${second_build}" "3.4.28"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${second_build}/Devin-linux-x64-3.4.28.deb" \
+    "${second}" "3.4.28" "${second_build}" 1783378474000
+  manager_env update
+  current_before="$(readlink "${install_root}/current")"
+  stale_target="$(readlink "${install_root}/previous")"
+  rm -f -- "${install_root}/${stale_target}/app/bin/devin-desktop"
+  "${FIXTURE_BUILDER}" "${third}" safe "${third_build}" "3.4.29"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${third_build}/Devin-linux-x64-3.4.29.deb" \
+    "${third}" "3.4.29" "${third_build}" 1783378475000
+
+  run manager_env update
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"refusing to activate while an unowned release would be pruned"* ]]
+  [ "$(readlink "${install_root}/current")" = "${current_before}" ]
+}
+
 @test "the next mutation resumes an interrupted release prune before inventory validation" {
   local second="${BATS_TEST_TMPDIR}/second.deb"
   local third="${BATS_TEST_TMPDIR}/third.deb"
@@ -1939,7 +1989,7 @@ EOF
 @test "pending release prune recovery refuses to delete a running release" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
   local cleanup_record="${TEST_HOME}/.local/state/devin-desktop-manager.prune"
-  local source_dir stale_dir running_pid
+  local source_dir stale_dir quarantine_dir running_pid
 
   install_fixture
   source_dir="${install_root}/$(readlink "${install_root}/current")"
@@ -1947,9 +1997,11 @@ EOF
   cp -a -- "${source_dir}" "${stale_dir}"
   cp -- /bin/sleep "${stale_dir}/app/devin-desktop"
   chmod 0755 "${stale_dir}/app/devin-desktop"
+  quarantine_dir="$(prune_quarantine_path "${stale_dir}")"
   record_prune_intent_for_release "${stale_dir}"
+  mv -T -- "${stale_dir}" "${quarantine_dir}"
 
-  "${stale_dir}/app/devin-desktop" 30 &
+  "${quarantine_dir}/app/devin-desktop" 30 &
   running_pid=$!
   sleep 0.1
   run manager_env update
@@ -1958,7 +2010,7 @@ EOF
 
   [ "${status}" -ne 0 ]
   [[ "${output}" == *"Devin Desktop is running"* ]]
-  [ -d "${stale_dir}" ]
+  [ -d "${quarantine_dir}" ]
   [ -f "${cleanup_record}" ]
 }
 
@@ -2098,6 +2150,43 @@ EOF
   [ -L "${install_root}/current" ]
 }
 
+@test "transaction recovery handles a staged-root record published before its move" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local journal="${TEST_HOME}/.local/state/devin-desktop-manager.transaction"
+
+  install_fixture
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      acquire_lock
+      backup_transaction
+      read -r device inode < <(stat -c "%d %i" -- "${INSTALL_ROOT}")
+      jq -n \
+        --arg staged_root "${INSTALL_ROOT}.uninstall-12345" \
+        --arg device "${device}" \
+        --arg inode "${inode}" "{
+          stagedInstallRoot: \$staged_root,
+          device: \$device,
+          inode: \$inode
+        }" >"${TRANSACTION_BACKUP}/staged-install-root"
+      chmod 0600 "${TRANSACTION_BACKUP}/staged-install-root"
+    ' _ "${MANAGER}"
+  [ "${status}" -eq 0 ]
+  [ -d "${journal}" ]
+  [ -d "${install_root}" ]
+
+  run install_fixture
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"recovering an unfinished manager transaction"* ]]
+  [ ! -e "${journal}" ]
+  [ -L "${install_root}/current" ]
+}
+
 @test "transaction recovery preserves its journal when the staged root is missing" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
   local journal="${TEST_HOME}/.local/state/devin-desktop-manager.transaction"
@@ -2227,6 +2316,32 @@ EOF
   [ ! -e "${TEST_HOME}/.local/opt/devin-desktop" ]
 }
 
+@test "state lock rejects FIFOs and hard links without opening or truncating them" {
+  local state_home="${TEST_HOME}/.local/state"
+  local lock_file="${state_home}/devin-desktop-manager.lock"
+  local user_file="${BATS_TEST_TMPDIR}/user-file"
+
+  mkdir -p "${state_home}"
+  mkfifo "${lock_file}"
+  run timeout 2 env HOME="${TEST_HOME}" XDG_STATE_HOME="${state_home}" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c 'source "$1"; acquire_lock' \
+    _ "${MANAGER}"
+  [ "${status}" -ne 0 ]
+  [ "${status}" -ne 124 ]
+  [[ "${output}" == *"manager lock must be a non-symbolic regular file"* ]]
+  [ -p "${lock_file}" ]
+
+  rm -f -- "${lock_file}"
+  printf 'preserve user data\n' >"${user_file}"
+  ln "${user_file}" "${lock_file}"
+  run env HOME="${TEST_HOME}" XDG_STATE_HOME="${state_home}" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c 'source "$1"; acquire_lock' \
+    _ "${MANAGER}"
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"manager lock must not have hard links"* ]]
+  [ "$(cat "${user_file}")" = "preserve user data" ]
+}
+
 @test "XDG roots beneath the installation root are rejected before mutation" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
   local xdg_name
@@ -2241,6 +2356,20 @@ EOF
       *"${xdg_name} must not be the installation root or a directory beneath it"* ]]
     [ ! -e "${install_root}" ]
   done
+}
+
+@test "state storage beneath the manager cache root is rejected before mutation" {
+  local cache_home="${TEST_HOME}/.cache"
+  local state_home="${cache_home}/devin-desktop-manager/state"
+
+  run env HOME="${TEST_HOME}" XDG_CACHE_HOME="${cache_home}" \
+    XDG_STATE_HOME="${state_home}" PATH="${MOCK_BIN}:${PATH}" \
+    "${MANAGER}" update
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == \
+    *"XDG_STATE_HOME must not be the cache root or a directory beneath it"* ]]
+  [ ! -e "${TEST_HOME}/.local/opt/devin-desktop" ]
 }
 
 @test "unknown commands fail without creating installation state" {

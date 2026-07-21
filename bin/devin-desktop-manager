@@ -252,6 +252,9 @@ validate_environment() {
       die "${xdg_name} must not be the installation root or a directory beneath it"
     fi
   done
+  if path_is_at_or_below "${STATE_HOME}" "${CACHE_ROOT}"; then
+    die "XDG_STATE_HOME must not be the cache root or a directory beneath it"
+  fi
 }
 
 ensure_not_root() {
@@ -811,15 +814,29 @@ upgrade_legacy_release_metadata() {
 }
 
 cleanup_install_temporaries() {
-  local path
+  local mode="${1:-owned}"
+  local path release_dir
 
   cleanup_ownership_sentinel_temporaries "${INSTALL_ROOT}" || return 1
 
-  for path in "${RELEASES_DIR}"/*/release.json.new.*; do
-    [[ -e "${path}" || -L "${path}" ]] || continue
-    migration_temporary_is_valid "${path}" "release.json.new" || return 1
-    rm -f -- "${path}" || return 1
-  done
+  if [[ -e "${RELEASES_DIR}" || -L "${RELEASES_DIR}" ]]; then
+    [[ -d "${RELEASES_DIR}" && ! -L "${RELEASES_DIR}" ]] || return 1
+    directory_can_be_listed "${RELEASES_DIR}" || return 1
+    for release_dir in "${RELEASES_DIR}"/*; do
+      [[ -e "${release_dir}" || -L "${release_dir}" ]] || continue
+      [[ -d "${release_dir}" && ! -L "${release_dir}" ]] || return 1
+      for path in "${release_dir}"/release.json.new.*; do
+        [[ -e "${path}" || -L "${path}" ]] || continue
+        if [[ "${mode}" == "legacy" ]]; then
+          legacy_release_metadata_is_valid "${release_dir}" || return 1
+        else
+          release_directory_has_ownership_metadata "${release_dir}" || return 1
+        fi
+        migration_temporary_is_valid "${path}" "release.json.new" || return 1
+        rm -f -- "${path}" || return 1
+      done
+    done
+  fi
 
   for path in "${INSTALL_ROOT}"/.staging-*; do
     [[ -e "${path}" || -L "${path}" ]] || continue
@@ -850,7 +867,7 @@ cleanup_install_temporaries() {
 }
 
 cleanup_legacy_migration_temporaries() {
-  cleanup_install_temporaries || return 1
+  cleanup_install_temporaries legacy || return 1
   cleanup_ownership_sentinel_temporaries "${CACHE_ROOT}" || return 1
   cleanup_ownership_sentinel_temporaries "${STATE_DIR}"
 }
@@ -997,12 +1014,28 @@ acquire_legacy_lock_if_needed() {
 }
 
 acquire_lock() {
+  local lock_links
+
   require_commands stat
   mkdir -p -- "${STATE_HOME}"
-  [[ ! -L "${LOCK_FILE}" ]] ||
-    die "manager lock must not be a symbolic link: ${LOCK_FILE}"
-  exec 9>"${LOCK_FILE}"
+  if [[ ! -e "${LOCK_FILE}" && ! -L "${LOCK_FILE}" ]]; then
+    (set -o noclobber; : >"${LOCK_FILE}") 2>/dev/null ||
+      die "could not create the manager lock safely: ${LOCK_FILE}"
+  fi
+  [[ -f "${LOCK_FILE}" && ! -L "${LOCK_FILE}" ]] ||
+    die "manager lock must be a non-symbolic regular file: ${LOCK_FILE}"
+  lock_links="$(stat -c '%h' -- "${LOCK_FILE}")" ||
+    die "could not inspect the manager lock: ${LOCK_FILE}"
+  [[ "${lock_links}" == "1" ]] ||
+    die "manager lock must not have hard links: ${LOCK_FILE}"
+  exec 9<>"${LOCK_FILE}" || die "could not open the manager lock: ${LOCK_FILE}"
+  [[ -f "${LOCK_FILE}" && ! -L "${LOCK_FILE}" &&
+    "${LOCK_FILE}" -ef /proc/self/fd/9 ]] ||
+    die "manager lock changed while it was being opened: ${LOCK_FILE}"
   flock -n 9 || die "another Devin Desktop manager operation is running"
+  [[ -f "${LOCK_FILE}" && ! -L "${LOCK_FILE}" &&
+    "${LOCK_FILE}" -ef /proc/self/fd/9 ]] ||
+    die "manager lock changed while it was being acquired: ${LOCK_FILE}"
   acquire_legacy_lock_if_needed
   recover_pending_transaction
   recover_pending_uninstall_cleanup
@@ -1056,7 +1089,8 @@ app_is_running() {
   for process_path in /proc/[0-9]*; do
     executable="$(readlink "${process_path}/exe" 2>/dev/null || true)"
     case "${executable}" in
-      "${RELEASES_DIR}"/*/app/devin-desktop) return 0 ;;
+      "${RELEASES_DIR}"/*/app/devin-desktop|\
+        "${INSTALL_ROOT}"/.release-prune-*/app/devin-desktop) return 0 ;;
     esac
   done
 
@@ -2102,6 +2136,13 @@ restore_staged_install_root() {
     device="$(jq -r '.device' "${record}")"
     inode="$(jq -r '.inode' "${record}")"
     validate_staged_install_root_path "${recorded}" || return 1
+    if [[ ! -e "${recorded}" && ! -L "${recorded}" ]]; then
+      [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] || return 1
+      [[ "$(stat -c '%d %i' -- "${INSTALL_ROOT}" 2>/dev/null)" == \
+        "${device} ${inode}" ]] || return 1
+      manager_install_root_is_valid "${INSTALL_ROOT}" || return 1
+      return 0
+    fi
     [[ -d "${recorded}" && ! -L "${recorded}" ]] || return 1
     owned_root_is_valid "${recorded}" || return 1
     staged_install_root_identity_matches \
@@ -2644,6 +2685,22 @@ validate_release_inventory_ownership() {
   done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -print0)
 }
 
+validate_releases_prunable_after_activation() {
+  local destination="$1"
+  local future_current future_previous release_dir relative
+
+  future_current="releases/$(basename "${destination}")"
+  future_previous="$(release_link_target "${CURRENT_LINK}" || true)"
+  while IFS= read -r -d '' release_dir; do
+    relative="releases/$(basename "${release_dir}")"
+    if [[ "${relative}" != "${future_current}" &&
+      "${relative}" != "${future_previous}" ]]; then
+      release_directory_is_owned "${release_dir}" ||
+        die "refusing to activate while an unowned release would be pruned: ${release_dir}"
+    fi
+  done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -print0)
+}
+
 prune_releases() {
   local current_target previous_target release_dir release_name relative
   local identity device inode quarantine_name quarantine_dir metadata_sha256
@@ -2652,11 +2709,11 @@ prune_releases() {
   previous_target="$(release_link_target "${PREVIOUS_LINK}" || true)"
 
   while IFS= read -r -d '' release_dir; do
-    release_directory_is_owned "${release_dir}" ||
-      die "refusing to prune an unowned release directory: ${release_dir}"
     release_name="$(basename "${release_dir}")"
     relative="releases/${release_name}"
     if [[ "${relative}" != "${current_target}" && "${relative}" != "${previous_target}" ]]; then
+      release_directory_is_owned "${release_dir}" ||
+        die "refusing to prune an unowned release directory: ${release_dir}"
       info "removing superseded release ${release_name}"
       identity="$(release_directory_identity "${release_dir}")" || return 1
       read -r device inode <<<"${identity}"
@@ -2830,6 +2887,7 @@ command_update() {
 
   reject_manifest_downgrade "${manifest}"
   destination="$(download_release "${manifest}")"
+  validate_releases_prunable_after_activation "${destination}"
   activate_with_integration "${destination}"
 
   prune_releases
