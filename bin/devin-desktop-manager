@@ -33,7 +33,9 @@ readonly STATE_FILE="${STATE_DIR}/state.json"
 readonly LOCK_FILE="${STATE_HOME}/devin-desktop-manager.lock"
 readonly TRANSACTION_JOURNAL="${STATE_HOME}/devin-desktop-manager.transaction"
 readonly UNINSTALL_CLEANUP_RECORD="${STATE_HOME}/devin-desktop-manager.cleanup"
+readonly UNINSTALL_CLEANUP_PROOF="${UNINSTALL_CLEANUP_RECORD}.proof"
 readonly RELEASE_PRUNE_CLEANUP_RECORD="${STATE_HOME}/devin-desktop-manager.prune"
+readonly RELEASE_PRUNE_CLEANUP_PROOF="${RELEASE_PRUNE_CLEANUP_RECORD}.proof"
 readonly BIN_DIR="${HOME_DIR}/.local/bin"
 readonly APP_COMMAND="${BIN_DIR}/devin-desktop"
 readonly MANAGER_COMMAND="${BIN_DIR}/devin-desktop-manager"
@@ -74,6 +76,7 @@ TRANSACTION_BACKUP=""
 STAGED_INSTALL_ROOT=""
 TRANSACTION_RESTORING=false
 LEGACY_LOCK_HELD=false
+CLEANUP_PROOF_TEMP=""
 
 info() {
   printf 'devin-desktop-manager: %s\n' "$*" >&2
@@ -106,6 +109,13 @@ cleanup() {
     "${TRANSACTION_JOURNAL}".new.*)
       rm -rf -- "${TRANSACTION_BACKUP}"
       TRANSACTION_BACKUP=""
+      ;;
+  esac
+  case "${CLEANUP_PROOF_TEMP}" in
+    "${UNINSTALL_CLEANUP_PROOF}.new.$$"|\
+      "${RELEASE_PRUNE_CLEANUP_PROOF}.new.$$")
+      rm -f -- "${CLEANUP_PROOF_TEMP}"
+      CLEANUP_PROOF_TEMP=""
       ;;
   esac
 }
@@ -207,6 +217,17 @@ validate_absolute_directory() {
     die "${name} contains an unsupported control character"
 }
 
+path_is_at_or_below() {
+  local candidate="$1"
+  local root="$2"
+  local resolved_candidate resolved_root
+
+  resolved_candidate="$(readlink -m -- "${candidate}")" || return 1
+  resolved_root="$(readlink -m -- "${root}")" || return 1
+  [[ "${resolved_candidate}" == "${resolved_root}" ||
+    "${resolved_candidate}" == "${resolved_root}/"* ]]
+}
+
 validate_environment() {
   validate_absolute_directory HOME "${HOME_DIR}"
   validate_absolute_directory XDG_CACHE_HOME \
@@ -217,6 +238,9 @@ validate_environment() {
     "${XDG_STATE_HOME:-${HOME_DIR}/.local/state}"
   validate_absolute_directory XDG_CONFIG_HOME \
     "${XDG_CONFIG_HOME:-${HOME_DIR}/.config}"
+  if path_is_at_or_below "${STATE_HOME}" "${INSTALL_ROOT}"; then
+    die "XDG_STATE_HOME must not be the installation root or a directory beneath it"
+  fi
 }
 
 ensure_not_root() {
@@ -263,6 +287,58 @@ owned_root_is_valid() {
   [[ -d "${root}" && ! -L "${root}" &&
     -f "${sentinel}" && ! -L "${sentinel}" ]] || return 1
   [[ "$(cat "${sentinel}")" == "$(ownership_sentinel_content)" ]]
+}
+
+directory_contains_only_entry() {
+  local root="$1"
+  local retained="$2"
+  local entry
+  local -a entries=()
+
+  directory_can_be_listed "${root}" || return 1
+  mapfile -d '' entries < <(
+    find "${root}" -mindepth 1 -maxdepth 1 -print0
+  )
+  for entry in "${entries[@]}"; do
+    [[ "${entry}" == "${retained}" ]] || return 1
+  done
+  [[ -e "${retained}" || -L "${retained}" ]]
+}
+
+remove_directory_entries_except() {
+  local root="$1"
+  local retained="$2"
+  local entry
+  local -a entries=()
+
+  directory_can_be_listed "${root}" || return 1
+  mapfile -d '' entries < <(
+    find "${root}" -mindepth 1 -maxdepth 1 -print0
+  )
+  for entry in "${entries[@]}"; do
+    [[ "${entry}" == "${retained}" ]] && continue
+    rm -rf -- "${entry}" || return 1
+  done
+  directory_contains_only_entry "${root}" "${retained}"
+}
+
+publish_cleanup_proof() {
+  local source="$1"
+  local proof="$2"
+  local temporary="${proof}.new.$$"
+
+  [[ -f "${source}" && ! -L "${source}" ]] || return 1
+  [[ ! -e "${proof}" && ! -L "${proof}" &&
+    ! -e "${temporary}" && ! -L "${temporary}" ]] || return 1
+  CLEANUP_PROOF_TEMP="${temporary}"
+  if ! cp -- "${source}" "${temporary}" ||
+    ! chmod 0600 "${temporary}" ||
+    ! mv -Tf -- "${temporary}" "${proof}"; then
+    rm -f -- "${temporary}" || true
+    CLEANUP_PROOF_TEMP=""
+    return 1
+  fi
+  CLEANUP_PROOF_TEMP=""
 }
 
 write_ownership_sentinel() {
@@ -396,6 +472,7 @@ legacy_release_link_temporary_is_valid() {
 
 legacy_release_metadata_is_valid() {
   local release_dir="$1"
+  local expected_release_name="${2:-$(basename "${release_dir}")}"
   local metadata="${release_dir}/release.json"
   local entry name
   local version build product_version sha256 artifact_url expected_id
@@ -450,7 +527,7 @@ legacy_release_metadata_is_valid() {
     "${url_prefix}${build}/Devin-linux-x64-${version}.deb" ]] || return 1
   expected_id="$(release_identifier "${version}" "${build}" "${sha256}")" ||
     return 1
-  [[ "$(basename "${release_dir}")" == "${expected_id}" ]] || return 1
+  [[ "${expected_release_name}" == "${expected_id}" ]] || return 1
 
   [[ -d "${release_dir}/app" && ! -L "${release_dir}/app" ]] || return 1
   [[ -d "${release_dir}/integration" &&
@@ -1937,16 +2014,82 @@ transaction_journal_is_valid() {
   [[ "$(cat "${TRANSACTION_BACKUP}/owner")" == "$(ownership_sentinel_content)" ]]
 }
 
-restore_staged_install_root() {
-  local recorded=""
+manager_install_root_is_valid() {
+  local root="$1"
+  local releases="${root}/releases"
+  local current="${root}/current"
+  local previous="${root}/previous"
+  local entry name target release_dir
+  local saw_releases=false saw_current=false saw_lock=false
 
-  if [[ -f "${TRANSACTION_BACKUP}/staged-install-root" ]]; then
-    recorded="$(cat "${TRANSACTION_BACKUP}/staged-install-root")"
+  owned_root_is_valid "${root}" || return 1
+  directory_can_be_listed "${root}" || return 1
+  while IFS= read -r -d '' entry; do
+    name="$(basename "${entry}")"
+    case "${name}" in
+      "${OWNERSHIP_SENTINEL_NAME}") ;;
+      releases)
+        [[ -d "${entry}" && ! -L "${entry}" ]] || return 1
+        saw_releases=true
+        ;;
+      current)
+        [[ -L "${entry}" ]] || return 1
+        saw_current=true
+        ;;
+      previous)
+        [[ -L "${entry}" ]] || return 1
+        ;;
+      .manager.lock)
+        [[ -f "${entry}" && ! -L "${entry}" ]] || return 1
+        saw_lock=true
+        ;;
+      *) return 1 ;;
+    esac
+  done < <(find "${root}" -mindepth 1 -maxdepth 1 -print0)
+  [[ "${saw_releases}" == "true" && "${saw_current}" == "true" &&
+    "${saw_lock}" == "true" ]] || return 1
+  directory_can_be_listed "${releases}" || return 1
+
+  for entry in "${current}" "${previous}"; do
+    [[ -e "${entry}" || -L "${entry}" ]] || continue
+    [[ -L "${entry}" ]] || return 1
+    target="$(readlink "${entry}")"
+    [[ "${target}" == releases/* && "${target}" != *"/"*"/"* ]] ||
+      return 1
+    is_safe_release_identifier "${target#releases/}" || return 1
+    [[ -d "${root}/${target}" && ! -L "${root}/${target}" ]] || return 1
+  done
+  while IFS= read -r -d '' release_dir; do
+    release_directory_is_owned "${release_dir}" || return 1
+  done < <(find "${releases}" -mindepth 1 -maxdepth 1 -print0)
+}
+
+restore_staged_install_root() {
+  local recorded="" device="" inode=""
+  local record="${TRANSACTION_BACKUP}/staged-install-root"
+
+  if [[ -e "${record}" || -L "${record}" ]]; then
+    [[ -f "${record}" && ! -L "${record}" ]] || return 1
+    jq -e '
+      type == "object" and
+      (keys | sort) == ["device", "inode", "stagedInstallRoot"] and
+      (.stagedInstallRoot | type == "string") and
+      (.device | type == "string") and
+      (.device | test("^[0-9]+$")) and
+      (.inode | type == "string") and
+      (.inode | test("^[0-9]+$"))
+    ' "${record}" >/dev/null 2>&1 || return 1
+    recorded="$(jq -r '.stagedInstallRoot' "${record}")"
+    device="$(jq -r '.device' "${record}")"
+    inode="$(jq -r '.inode' "${record}")"
     validate_staged_install_root_path "${recorded}" || return 1
-    if [[ -e "${recorded}" || -L "${recorded}" ]]; then
-      [[ ! -e "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] || return 1
-      mv -T -- "${recorded}" "${INSTALL_ROOT}" || return 1
-    fi
+    [[ -d "${recorded}" && ! -L "${recorded}" ]] || return 1
+    owned_root_is_valid "${recorded}" || return 1
+    staged_install_root_identity_matches \
+      "${recorded}" "${device}" "${inode}" || return 1
+    manager_install_root_is_valid "${recorded}" || return 1
+    [[ ! -e "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] || return 1
+    mv -T -- "${recorded}" "${INSTALL_ROOT}" || return 1
   fi
   STAGED_INSTALL_ROOT=""
 }
@@ -1956,7 +2099,10 @@ restore_transaction() {
 
   transaction_journal_is_valid || return 1
   TRANSACTION_RESTORING=true
-  restore_staged_install_root || failed=1
+  if ! restore_staged_install_root; then
+    TRANSACTION_RESTORING=false
+    return 1
+  fi
   restore_path "${CURRENT_LINK}" current || failed=1
   restore_path "${PREVIOUS_LINK}" previous || failed=1
   restore_path "${APP_COMMAND}" app-command || failed=1
@@ -2067,6 +2213,13 @@ uninstall_cleanup_record_matches_root() {
     "${recorded_root}" "${device}" "${inode}"
 }
 
+uninstall_cleanup_proof_is_valid() {
+  [[ -f "${UNINSTALL_CLEANUP_PROOF}" &&
+    ! -L "${UNINSTALL_CLEANUP_PROOF}" ]] || return 1
+  [[ "$(cat "${UNINSTALL_CLEANUP_PROOF}")" == \
+    "$(ownership_sentinel_content)" ]]
+}
+
 write_uninstall_cleanup_record() {
   local staged_root="$1"
   local temporary="${UNINSTALL_CLEANUP_RECORD}.new.$$"
@@ -2077,7 +2230,9 @@ write_uninstall_cleanup_record() {
   identity="$(staged_install_root_identity "${staged_root}")" || return 1
   read -r device inode <<<"${identity}"
   [[ ! -e "${UNINSTALL_CLEANUP_RECORD}" &&
-    ! -L "${UNINSTALL_CLEANUP_RECORD}" ]] || return 1
+    ! -L "${UNINSTALL_CLEANUP_RECORD}" &&
+    ! -e "${UNINSTALL_CLEANUP_PROOF}" &&
+    ! -L "${UNINSTALL_CLEANUP_PROOF}" ]] || return 1
   [[ ! -e "${temporary}" && ! -L "${temporary}" ]] || return 1
   if ! jq -n \
     --arg manager_id "${MANAGER_ID}" \
@@ -2098,11 +2253,11 @@ write_uninstall_cleanup_record() {
   fi
 }
 
-recover_pending_uninstall_cleanup() {
+finish_recorded_uninstall_cleanup() {
+  local interrupted="$1"
   local fields staged_root device inode
+  local sentinel
 
-  [[ ! -e "${UNINSTALL_CLEANUP_RECORD}" &&
-    ! -L "${UNINSTALL_CLEANUP_RECORD}" ]] && return 0
   [[ -f "${UNINSTALL_CLEANUP_RECORD}" &&
     ! -L "${UNINSTALL_CLEANUP_RECORD}" ]] ||
     die "unfinished uninstall cleanup record is invalid: ${UNINSTALL_CLEANUP_RECORD}"
@@ -2111,21 +2266,73 @@ recover_pending_uninstall_cleanup() {
   IFS=$'\t' read -r staged_root device inode <<<"${fields}"
   validate_staged_install_root_path "${staged_root}" ||
     die "unfinished uninstall cleanup path is unsafe: ${staged_root}"
+  if [[ -e "${UNINSTALL_CLEANUP_PROOF}" ||
+    -L "${UNINSTALL_CLEANUP_PROOF}" ]]; then
+    uninstall_cleanup_proof_is_valid ||
+      die "unfinished uninstall cleanup proof is invalid: ${UNINSTALL_CLEANUP_PROOF}"
+  fi
 
-  if [[ -e "${staged_root}" || -L "${staged_root}" ]]; then
-    [[ -d "${staged_root}" && ! -L "${staged_root}" ]] ||
-      die "unfinished uninstall cleanup root is unsafe: ${staged_root}"
+  if [[ ! -e "${staged_root}" && ! -L "${staged_root}" ]]; then
+    rm -f -- "${UNINSTALL_CLEANUP_PROOF}" ||
+      die "could not remove uninstall cleanup proof"
+    rm -f -- "${UNINSTALL_CLEANUP_RECORD}" ||
+      die "could not remove uninstall cleanup record"
+    return 0
+  fi
+
+  [[ -d "${staged_root}" && ! -L "${staged_root}" ]] ||
+    die "unfinished uninstall cleanup root is unsafe: ${staged_root}"
+  staged_install_root_identity_matches \
+    "${staged_root}" "${device}" "${inode}" ||
+    die "unfinished uninstall cleanup root identity does not match: ${staged_root}"
+  sentinel="${staged_root}/${OWNERSHIP_SENTINEL_NAME}"
+
+  if [[ -e "${sentinel}" || -L "${sentinel}" ]]; then
     owned_root_is_valid "${staged_root}" ||
       die "unfinished uninstall cleanup root is not manager-owned: ${staged_root}"
+    if [[ ! -e "${UNINSTALL_CLEANUP_PROOF}" &&
+      ! -L "${UNINSTALL_CLEANUP_PROOF}" ]]; then
+      publish_cleanup_proof "${sentinel}" "${UNINSTALL_CLEANUP_PROOF}" ||
+        die "could not preserve uninstall cleanup proof"
+    fi
+    uninstall_cleanup_proof_is_valid ||
+      die "unfinished uninstall cleanup proof is invalid: ${UNINSTALL_CLEANUP_PROOF}"
+    remove_directory_entries_except "${staged_root}" "${sentinel}" ||
+      die "could not empty uninstall cleanup root safely: ${staged_root}"
+    owned_root_is_valid "${staged_root}" ||
+      die "unfinished uninstall cleanup ownership proof changed: ${staged_root}"
     staged_install_root_identity_matches \
       "${staged_root}" "${device}" "${inode}" ||
-      die "unfinished uninstall cleanup root identity does not match: ${staged_root}"
-    info "finishing an interrupted uninstall cleanup"
-    rm -rf -- "${staged_root}" ||
-      die "could not finish uninstall cleanup: ${staged_root}"
+      die "unfinished uninstall cleanup root identity changed: ${staged_root}"
+    rm -f -- "${sentinel}" ||
+      die "could not remove uninstall cleanup ownership proof: ${sentinel}"
+  else
+    uninstall_cleanup_proof_is_valid ||
+      die "unfinished uninstall cleanup root lost its ownership proof: ${staged_root}"
+    directory_is_empty "${staged_root}" ||
+      die "unfinished uninstall cleanup root contains unverified data: ${staged_root}"
   fi
+
+  directory_is_empty "${staged_root}" ||
+    die "unfinished uninstall cleanup root could not be emptied: ${staged_root}"
+  staged_install_root_identity_matches \
+    "${staged_root}" "${device}" "${inode}" ||
+    die "unfinished uninstall cleanup root identity changed: ${staged_root}"
+  if [[ "${interrupted}" == "true" ]]; then
+    info "finishing an interrupted uninstall cleanup"
+  fi
+  rmdir -- "${staged_root}" ||
+    die "could not finish uninstall cleanup: ${staged_root}"
+  rm -f -- "${UNINSTALL_CLEANUP_PROOF}" ||
+    die "could not remove uninstall cleanup proof"
   rm -f -- "${UNINSTALL_CLEANUP_RECORD}" ||
     die "could not remove uninstall cleanup record"
+}
+
+recover_pending_uninstall_cleanup() {
+  [[ ! -e "${UNINSTALL_CLEANUP_RECORD}" &&
+    ! -L "${UNINSTALL_CLEANUP_RECORD}" ]] && return 0
+  finish_recorded_uninstall_cleanup true
 }
 
 release_directory_identity() {
@@ -2168,6 +2375,7 @@ release_prune_cleanup_record_fields() {
           "device",
           "inode",
           "managerId",
+          "metadataSha256",
           "quarantineName",
           "releaseName",
           "schemaVersion"
@@ -2179,9 +2387,17 @@ release_prune_cleanup_record_fields() {
         (.device | type == "string") and
         (.device | test("^[0-9]+$")) and
         (.inode | type == "string") and
-        (.inode | test("^[0-9]+$"))
+        (.inode | test("^[0-9]+$")) and
+        (.metadataSha256 | type == "string") and
+        (.metadataSha256 | test("^[0-9a-f]{64}$"))
       )
-      | [.releaseName, .quarantineName, .device, .inode]
+      | [
+          .releaseName,
+          .quarantineName,
+          .device,
+          .inode,
+          .metadataSha256
+        ]
       | @tsv
     ' "${RELEASE_PRUNE_CLEANUP_RECORD}" 2>/dev/null
 }
@@ -2190,14 +2406,18 @@ write_release_prune_cleanup_record() {
   local release_name="$1"
   local device="$2"
   local inode="$3"
+  local metadata_sha256="$4"
   local quarantine_name
   local temporary="${RELEASE_PRUNE_CLEANUP_RECORD}.new.$$"
 
   quarantine_name="$(
     release_prune_quarantine_name "${release_name}" "${device}" "${inode}"
   )" || return 1
+  [[ "${metadata_sha256}" =~ ^[0-9a-f]{64}$ ]] || return 1
   [[ ! -e "${RELEASE_PRUNE_CLEANUP_RECORD}" &&
-    ! -L "${RELEASE_PRUNE_CLEANUP_RECORD}" ]] || return 1
+    ! -L "${RELEASE_PRUNE_CLEANUP_RECORD}" &&
+    ! -e "${RELEASE_PRUNE_CLEANUP_PROOF}" &&
+    ! -L "${RELEASE_PRUNE_CLEANUP_PROOF}" ]] || return 1
   [[ ! -e "${temporary}" && ! -L "${temporary}" ]] || return 1
   if ! jq -n \
     --arg manager_id "${MANAGER_ID}" \
@@ -2205,13 +2425,15 @@ write_release_prune_cleanup_record() {
     --arg release_name "${release_name}" \
     --arg quarantine_name "${quarantine_name}" \
     --arg device "${device}" \
-    --arg inode "${inode}" '{
+    --arg inode "${inode}" \
+    --arg metadata_sha256 "${metadata_sha256}" '{
       schemaVersion: $schema_version,
       managerId: $manager_id,
       releaseName: $release_name,
       quarantineName: $quarantine_name,
       device: $device,
-      inode: $inode
+      inode: $inode,
+      metadataSha256: $metadata_sha256
     }' >"${temporary}" ||
     ! chmod 0600 "${temporary}" ||
     ! mv -Tf -- "${temporary}" "${RELEASE_PRUNE_CLEANUP_RECORD}"; then
@@ -2220,17 +2442,38 @@ write_release_prune_cleanup_record() {
   fi
 }
 
+release_prune_cleanup_proof_is_valid() {
+  local expected_sha256="$1"
+
+  [[ -f "${RELEASE_PRUNE_CLEANUP_PROOF}" &&
+    ! -L "${RELEASE_PRUNE_CLEANUP_PROOF}" ]] || return 1
+  [[ "$(sha256sum "${RELEASE_PRUNE_CLEANUP_PROOF}" | awk '{print $1}')" == \
+    "${expected_sha256}" ]]
+}
+
+release_metadata_matches_hash() {
+  local release_dir="$1"
+  local expected_sha256="$2"
+  local metadata="${release_dir}/release.json"
+
+  [[ -f "${metadata}" && ! -L "${metadata}" ]] || return 1
+  [[ "$(sha256sum "${metadata}" | awk '{print $1}')" == \
+    "${expected_sha256}" ]]
+}
+
 finish_recorded_release_prune() {
   local interrupted="$1"
-  local fields release_name quarantine_name device inode expected_quarantine
-  local release_dir quarantine_dir relative current_target previous_target
+  local fields release_name quarantine_name device inode metadata_sha256
+  local expected_quarantine release_dir quarantine_dir relative
+  local current_target previous_target metadata
 
   [[ -f "${RELEASE_PRUNE_CLEANUP_RECORD}" &&
     ! -L "${RELEASE_PRUNE_CLEANUP_RECORD}" ]] ||
     die "unfinished release prune record is invalid: ${RELEASE_PRUNE_CLEANUP_RECORD}"
   fields="$(release_prune_cleanup_record_fields)" ||
     die "unfinished release prune record is invalid: ${RELEASE_PRUNE_CLEANUP_RECORD}"
-  IFS=$'\t' read -r release_name quarantine_name device inode <<<"${fields}"
+  IFS=$'\t' read -r \
+    release_name quarantine_name device inode metadata_sha256 <<<"${fields}"
   is_safe_release_identifier "${release_name}" ||
     die "unfinished release prune path is unsafe: ${release_name}"
   expected_quarantine="$(
@@ -2245,6 +2488,7 @@ finish_recorded_release_prune() {
 
   release_dir="${RELEASES_DIR}/${release_name}"
   quarantine_dir="${INSTALL_ROOT}/${quarantine_name}"
+  metadata="${quarantine_dir}/release.json"
   relative="releases/${release_name}"
   current_target="$(release_link_target "${CURRENT_LINK}" || true)"
   previous_target="$(release_link_target "${PREVIOUS_LINK}" || true)"
@@ -2260,6 +2504,10 @@ finish_recorded_release_prune() {
     release_directory_identity_matches \
       "${release_dir}" "${device}" "${inode}" ||
       die "unfinished release prune directory identity does not match: ${release_dir}"
+    release_directory_is_owned "${release_dir}" ||
+      die "unfinished release prune directory is not a fully valid manager release: ${release_dir}"
+    release_metadata_matches_hash "${release_dir}" "${metadata_sha256}" ||
+      die "unfinished release prune metadata does not match: ${release_dir}"
     mv -Tn -- "${release_dir}" "${quarantine_dir}" ||
       die "could not quarantine release for pruning: ${release_dir}"
     [[ ! -e "${release_dir}" && ! -L "${release_dir}" ]] ||
@@ -2268,6 +2516,13 @@ finish_recorded_release_prune() {
       "${quarantine_dir}" "${device}" "${inode}" ||
       die "quarantined release identity does not match: ${quarantine_dir}"
   else
+    if [[ -e "${RELEASE_PRUNE_CLEANUP_PROOF}" ||
+      -L "${RELEASE_PRUNE_CLEANUP_PROOF}" ]]; then
+      release_prune_cleanup_proof_is_valid "${metadata_sha256}" ||
+        die "unfinished release prune proof is invalid: ${RELEASE_PRUNE_CLEANUP_PROOF}"
+      rm -f -- "${RELEASE_PRUNE_CLEANUP_PROOF}" ||
+        die "could not remove release prune cleanup proof"
+    fi
     rm -f -- "${RELEASE_PRUNE_CLEANUP_RECORD}" ||
       die "could not remove release prune cleanup record"
     return 0
@@ -2276,11 +2531,46 @@ finish_recorded_release_prune() {
   release_directory_identity_matches \
     "${quarantine_dir}" "${device}" "${inode}" ||
     die "unfinished release prune quarantine identity does not match: ${quarantine_dir}"
+  if [[ ! -e "${RELEASE_PRUNE_CLEANUP_PROOF}" &&
+    ! -L "${RELEASE_PRUNE_CLEANUP_PROOF}" ]]; then
+    release_directory_is_owned_at_name \
+      "${quarantine_dir}" "${release_name}" ||
+      die "unfinished release prune quarantine is not a fully valid manager release: ${quarantine_dir}"
+    release_metadata_matches_hash "${quarantine_dir}" "${metadata_sha256}" ||
+      die "unfinished release prune metadata does not match: ${quarantine_dir}"
+    publish_cleanup_proof "${metadata}" "${RELEASE_PRUNE_CLEANUP_PROOF}" ||
+      die "could not preserve release prune cleanup proof"
+  fi
+  release_prune_cleanup_proof_is_valid "${metadata_sha256}" ||
+    die "unfinished release prune proof is invalid: ${RELEASE_PRUNE_CLEANUP_PROOF}"
   if [[ "${interrupted}" == "true" ]]; then
     info "finishing an interrupted release prune"
   fi
-  rm -rf -- "${quarantine_dir}" ||
+  if [[ -e "${metadata}" || -L "${metadata}" ]]; then
+    release_metadata_matches_hash "${quarantine_dir}" "${metadata_sha256}" ||
+      die "unfinished release prune metadata changed: ${quarantine_dir}"
+    remove_directory_entries_except "${quarantine_dir}" "${metadata}" ||
+      die "could not empty release prune quarantine safely: ${quarantine_dir}"
+    release_directory_identity_matches \
+      "${quarantine_dir}" "${device}" "${inode}" ||
+      die "unfinished release prune quarantine identity changed: ${quarantine_dir}"
+    release_metadata_matches_hash "${quarantine_dir}" "${metadata_sha256}" ||
+      die "unfinished release prune metadata changed: ${quarantine_dir}"
+    rm -f -- "${metadata}" ||
+      die "could not remove release prune metadata proof: ${metadata}"
+  else
+    directory_is_empty "${quarantine_dir}" ||
+      die "unfinished release prune quarantine contains unverified data: ${quarantine_dir}"
+  fi
+  directory_is_empty "${quarantine_dir}" ||
+    die "unfinished release prune quarantine could not be emptied: ${quarantine_dir}"
+  release_directory_identity_matches \
+    "${quarantine_dir}" "${device}" "${inode}" ||
+    die "unfinished release prune quarantine identity changed: ${quarantine_dir}"
+  rmdir -- "${quarantine_dir}" ||
     die "could not finish release prune: ${quarantine_dir}"
+  rm -f -- "${RELEASE_PRUNE_CLEANUP_PROOF}" ||
+    die "could not remove release prune cleanup proof"
   rm -f -- "${RELEASE_PRUNE_CLEANUP_RECORD}" ||
     die "could not remove release prune cleanup record"
 }
@@ -2292,38 +2582,52 @@ recover_pending_release_prune() {
   finish_recorded_release_prune true
 }
 
-release_directory_is_owned() {
+release_directory_has_ownership_metadata() {
   local release_dir="$1"
-  local release_name
 
-  [[ -d "${release_dir}" && ! -L "${release_dir}" ]] || return 1
-  release_name="$(basename "${release_dir}")"
-  is_safe_release_identifier "${release_name}" || return 1
-  [[ -f "${release_dir}/release.json" &&
+  [[ -d "${release_dir}" && ! -L "${release_dir}" &&
+    -f "${release_dir}/release.json" &&
     ! -L "${release_dir}/release.json" ]] || return 1
   jq -e \
     --arg manager_id "${MANAGER_ID}" \
     --argjson schema_version "${RELEASE_METADATA_SCHEMA_VERSION}" '
+    type == "object" and
     .schemaVersion == $schema_version and
     .managerId == $manager_id and
     (.windsurfVersion | type == "string") and
     (.build | type == "string") and
+    (.sha256 | type == "string") and
     (.sha256 | test("^[0-9a-f]{64}$"))
   ' "${release_dir}/release.json" >/dev/null 2>&1
+}
+
+release_directory_is_owned_at_name() {
+  local release_dir="$1"
+  local release_name="$2"
+
+  release_directory_has_ownership_metadata "${release_dir}" || return 1
+  legacy_release_metadata_is_valid "${release_dir}" "${release_name}"
+}
+
+release_directory_is_owned() {
+  local release_dir="$1"
+
+  release_directory_is_owned_at_name \
+    "${release_dir}" "$(basename "${release_dir}")"
 }
 
 validate_release_inventory_ownership() {
   local release_dir
 
   while IFS= read -r -d '' release_dir; do
-    release_directory_is_owned "${release_dir}" ||
+    release_directory_has_ownership_metadata "${release_dir}" ||
       die "unowned release directory requires manual review: ${release_dir}"
   done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -print0)
 }
 
 prune_releases() {
   local current_target previous_target release_dir release_name relative
-  local identity device inode quarantine_name quarantine_dir
+  local identity device inode quarantine_name quarantine_dir metadata_sha256
 
   current_target="$(release_link_target "${CURRENT_LINK}" || true)"
   previous_target="$(release_link_target "${PREVIOUS_LINK}" || true)"
@@ -2343,8 +2647,12 @@ prune_releases() {
       quarantine_dir="${INSTALL_ROOT}/${quarantine_name}"
       [[ ! -e "${quarantine_dir}" && ! -L "${quarantine_dir}" ]] ||
         die "release prune quarantine already exists: ${quarantine_dir}"
+      metadata_sha256="$(
+        sha256sum "${release_dir}/release.json" | awk '{print $1}'
+      )" || return 1
+      [[ "${metadata_sha256}" =~ ^[0-9a-f]{64}$ ]] || return 1
       write_release_prune_cleanup_record \
-        "${release_name}" "${device}" "${inode}" || return 1
+        "${release_name}" "${device}" "${inode}" "${metadata_sha256}" || return 1
       finish_recorded_release_prune false
     fi
   done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -print0)
@@ -2767,13 +3075,39 @@ remove_manager_command_if_owned() {
 }
 
 stage_install_root_for_uninstall() {
+  local identity device inode
+  local record temporary
+
   STAGED_INSTALL_ROOT="${INSTALL_ROOT}.uninstall-$$"
   [[ ! -e "${STAGED_INSTALL_ROOT}" && ! -L "${STAGED_INSTALL_ROOT}" ]] ||
     return 1
-  printf '%s\n' "${STAGED_INSTALL_ROOT}" \
-    >"${TRANSACTION_BACKUP}/staged-install-root" || return 1
-  chmod 0600 "${TRANSACTION_BACKUP}/staged-install-root" || return 1
-  mv -T -- "${INSTALL_ROOT}" "${STAGED_INSTALL_ROOT}" || return 1
+  manager_install_root_is_valid "${INSTALL_ROOT}" || return 1
+  identity="$(stat -c '%d %i' -- "${INSTALL_ROOT}" 2>/dev/null)" || return 1
+  [[ "${identity}" =~ ^[0-9]+\ [0-9]+$ ]] || return 1
+  read -r device inode <<<"${identity}"
+  record="${TRANSACTION_BACKUP}/staged-install-root"
+  temporary="${record}.new.$$"
+  [[ ! -e "${record}" && ! -L "${record}" &&
+    ! -e "${temporary}" && ! -L "${temporary}" ]] || return 1
+  if ! jq -n \
+    --arg staged_root "${STAGED_INSTALL_ROOT}" \
+    --arg device "${device}" \
+    --arg inode "${inode}" '{
+      stagedInstallRoot: $staged_root,
+      device: $device,
+      inode: $inode
+    }' >"${temporary}" ||
+    ! chmod 0600 "${temporary}" ||
+    ! mv -Tf -- "${temporary}" "${record}"; then
+    rm -f -- "${temporary}" || true
+    return 1
+  fi
+  if ! mv -T -- "${INSTALL_ROOT}" "${STAGED_INSTALL_ROOT}"; then
+    rm -f -- "${record}" || true
+    return 1
+  fi
+  staged_install_root_identity_matches \
+    "${STAGED_INSTALL_ROOT}" "${device}" "${inode}" || return 1
 }
 
 perform_uninstall() {
@@ -2838,10 +3172,8 @@ command_uninstall() {
   if [[ -n "${staged_root}" ]] &&
     ! uninstall_cleanup_record_matches_root "${staged_root}"; then
     warn "uninstall completed, but the old release data identity changed; cleanup record preserved at ${UNINSTALL_CLEANUP_RECORD}"
-  elif [[ -n "${staged_root}" ]] && ! rm -rf -- "${staged_root}"; then
-    warn "uninstall completed, but old release data remains at ${staged_root}"
-  elif ! rm -f -- "${UNINSTALL_CLEANUP_RECORD}"; then
-    warn "uninstall completed, but its cleanup record remains at ${UNINSTALL_CLEANUP_RECORD}"
+  elif [[ -n "${staged_root}" ]]; then
+    finish_recorded_uninstall_cleanup false
   fi
   STAGED_INSTALL_ROOT=""
   info "managed application removed; Devin CLI and user configuration were preserved"

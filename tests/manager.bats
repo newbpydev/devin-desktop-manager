@@ -186,8 +186,9 @@ if [[ -n "${MOCK_RM_FAIL_PATH:-}" ]]; then
 fi
 if [[ -n "${MOCK_RM_PARTIAL_SIGNAL_PATH:-}" ]]; then
   for argument in "$@"; do
-    if [[ "${argument}" == "${MOCK_RM_PARTIAL_SIGNAL_PATH}" ]]; then
-      "$(command -p -v rm)" -f -- "${argument}/release.json"
+    if [[ "${argument}" == "${MOCK_RM_PARTIAL_SIGNAL_PATH}" ||
+      "${argument}" == "${MOCK_RM_PARTIAL_SIGNAL_PATH}/"* ]]; then
+      "$(command -p -v rm)" -rf -- "${argument}"
       kill -TERM "${PPID}"
       exit 143
     fi
@@ -276,11 +277,12 @@ manager_env() {
 record_prune_intent_for_release() {
   local release_dir="$1"
   local record="${TEST_HOME}/.local/state/devin-desktop-manager.prune"
-  local release_name identity device inode quarantine_name
+  local release_name identity device inode quarantine_name metadata_sha256
 
   release_name="$(basename "${release_dir}")"
   identity="$(stat -c '%d %i' -- "${release_dir}")"
   read -r device inode <<<"${identity}"
+  metadata_sha256="$(sha256sum "${release_dir}/release.json" | awk '{print $1}')"
   quarantine_name=".release-prune-${release_name}-${device}-${inode}"
   [[ ! -e "${record}" && ! -L "${record}" ]]
   jq -n \
@@ -288,13 +290,15 @@ record_prune_intent_for_release() {
     --arg release_name "${release_name}" \
     --arg quarantine_name "${quarantine_name}" \
     --arg device "${device}" \
-    --arg inode "${inode}" '{
+    --arg inode "${inode}" \
+    --arg metadata_sha256 "${metadata_sha256}" '{
       schemaVersion: 1,
       managerId: $manager_id,
       releaseName: $release_name,
       quarantineName: $quarantine_name,
       device: $device,
-      inode: $inode
+      inode: $inode,
+      metadataSha256: $metadata_sha256
     }' >"${record}"
   chmod 0600 "${record}"
 }
@@ -308,6 +312,33 @@ prune_quarantine_path() {
   printf '%s/.release-prune-%s-%s-%s\n' \
     "${TEST_HOME}/.local/opt/devin-desktop" \
     "$(basename "${release_dir}")" "${device}" "${inode}"
+}
+
+copy_release_with_identity() {
+  local source_dir="$1"
+  local version="$2"
+  local build="$3"
+  local sha256="$4"
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local release_id destination temporary
+
+  release_id="${version}-${build:0:12}-${sha256:0:12}"
+  destination="${install_root}/releases/${release_id}"
+  cp -a -- "${source_dir}" "${destination}"
+  temporary="${destination}/release.json.test"
+  jq \
+    --arg version "${version}" \
+    --arg build "${build}" \
+    --arg sha256 "${sha256}" \
+    --arg artifact_url "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${build}/Devin-linux-x64-${version}.deb" '
+      .windsurfVersion = $version |
+      .productVersion = $version |
+      .build = $build |
+      .artifactUrl = $artifact_url |
+      .sha256 = $sha256
+    ' "${destination}/release.json" >"${temporary}"
+  mv -Tf -- "${temporary}" "${destination}/release.json"
+  printf '%s\n' "${destination}"
 }
 
 seed_defaults() {
@@ -916,6 +947,30 @@ JSON
   [ "$(readlink "${install_root}/current")" = "${current_before}" ]
 }
 
+@test "pruning rejects superficially valid metadata without a full release payload" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local current_release foreign_release second second_build
+
+  install_fixture
+  current_release="${install_root}/$(readlink "${install_root}/current")"
+  foreign_release="${install_root}/releases/foreign-metadata"
+  mkdir -p "${foreign_release}"
+  cp -- "${current_release}/release.json" "${foreign_release}/release.json"
+  printf 'preserve foreign data\n' >"${foreign_release}/keep.txt"
+  second="${BATS_TEST_TMPDIR}/second.deb"
+  second_build="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  "${FIXTURE_BUILDER}" "${second}" safe "${second_build}" "3.4.28"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${second_build}/Devin-linux-x64-3.4.28.deb" \
+    "${second}" "3.4.28" "${second_build}" 1783378474000
+
+  run manager_env update
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"unowned release directory"* ]]
+  [ "$(cat "${foreign_release}/keep.txt")" = "preserve foreign data" ]
+}
+
 @test "release links cannot traverse above the releases directory" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
 
@@ -1287,7 +1342,8 @@ EOF
             prune)
               record="${RELEASE_PRUNE_CLEANUP_RECORD}"
               if write_release_prune_cleanup_record \
-                "stale-release" "1" "2"; then
+                "stale-release" "1" "2" \
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; then
                 exit 1
               fi
               ;;
@@ -1641,19 +1697,24 @@ EOF
   [ -f "${cleanup_record}" ]
   [ ! -e "${stale_dir}" ]
   [ -d "${quarantine_dir}" ]
-  [ ! -e "${quarantine_dir}/release.json" ]
+  [ -f "${quarantine_dir}/release.json" ]
+  [ -f "${cleanup_record}.proof" ]
   run jq -e \
     --arg manager "io.github.newbpydev.devin-desktop-manager" \
     --arg release_name "${stale_name}" \
     --arg quarantine_name "${quarantine_name}" \
     --arg device "${device}" \
-    --arg inode "${inode}" '
+    --arg inode "${inode}" \
+    --arg metadata_sha256 "$(
+      sha256sum "${quarantine_dir}/release.json" | awk '{print $1}'
+    )" '
       .schemaVersion == 1 and
       .managerId == $manager and
       .releaseName == $release_name and
       .quarantineName == $quarantine_name and
       .device == $device and
-      .inode == $inode
+      .inode == $inode and
+      .metadataSha256 == $metadata_sha256
     ' "${cleanup_record}"
   [ "${status}" -eq 0 ]
 
@@ -1664,6 +1725,37 @@ EOF
   [ ! -e "${stale_dir}" ]
   [ ! -e "${quarantine_dir}" ]
   [ ! -e "${cleanup_record}" ]
+  [ ! -e "${cleanup_record}.proof" ]
+}
+
+@test "uninstall cleanup proof survives removal of the in-tree ownership marker" {
+  local cleanup_record="${TEST_HOME}/.local/state/devin-desktop-manager.cleanup"
+  local staged_root sentinel
+
+  install_fixture
+  export MOCK_RM_SIGNAL_BEFORE_PATTERN=".uninstall-"
+  run manager_env uninstall --yes
+  unset MOCK_RM_SIGNAL_BEFORE_PATTERN
+
+  [ "${status}" -eq 143 ]
+  staged_root="$(find "${TEST_HOME}/.local/opt" -maxdepth 1 \
+    -type d -name 'devin-desktop.uninstall-*' -print -quit)"
+  [ -n "${staged_root}" ]
+  sentinel="${staged_root}/.devin-desktop-manager-owned"
+  [ -f "${cleanup_record}" ]
+  [ -f "${cleanup_record}.proof" ]
+  find "${staged_root}" -mindepth 1 -maxdepth 1 \
+    ! -path "${sentinel}" -exec rm -rf -- {} +
+  rm -f -- "${sentinel}"
+  [ -d "${staged_root}" ]
+  [ -z "$(find "${staged_root}" -mindepth 1 -maxdepth 1 -print -quit)" ]
+
+  run install_fixture
+
+  [ "${status}" -eq 0 ]
+  [ ! -e "${staged_root}" ]
+  [ ! -e "${cleanup_record}" ]
+  [ ! -e "${cleanup_record}.proof" ]
 }
 
 @test "release prune recovery preserves a replacement at the original path" {
@@ -1673,8 +1765,10 @@ EOF
 
   install_fixture
   source_dir="${install_root}/$(readlink "${install_root}/current")"
-  stale_dir="${install_root}/releases/stale-replacement"
-  cp -a -- "${source_dir}" "${stale_dir}"
+  stale_dir="$(copy_release_with_identity \
+    "${source_dir}" "3.4.25" \
+    "dddddddddddddddddddddddddddddddddddddddd" \
+    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")"
   quarantine_dir="$(prune_quarantine_path "${stale_dir}")"
   record_prune_intent_for_release "${stale_dir}"
   mv -T -- "${stale_dir}" "${quarantine_dir}"
@@ -1717,6 +1811,29 @@ EOF
   [ ! -e "${quarantine_dir}" ]
 }
 
+@test "release prune recovery rejects an in-place replacement with the recorded inode" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local cleanup_record="${TEST_HOME}/.local/state/devin-desktop-manager.prune"
+  local source_dir stale_dir quarantine_dir
+
+  install_fixture
+  source_dir="${install_root}/$(readlink "${install_root}/current")"
+  stale_dir="${install_root}/releases/stale-in-place"
+  cp -a -- "${source_dir}" "${stale_dir}"
+  quarantine_dir="$(prune_quarantine_path "${stale_dir}")"
+  record_prune_intent_for_release "${stale_dir}"
+  find "${stale_dir}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+  printf 'foreign replacement\n' >"${stale_dir}/keep.txt"
+
+  run manager_env update
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"not a fully valid manager release"* ]]
+  [ "$(cat "${stale_dir}/keep.txt")" = "foreign replacement" ]
+  [ -f "${cleanup_record}" ]
+  [ ! -e "${quarantine_dir}" ]
+}
+
 @test "release prune recovery quarantines a matching record-before-rename directory" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
   local cleanup_record="${TEST_HOME}/.local/state/devin-desktop-manager.prune"
@@ -1724,8 +1841,10 @@ EOF
 
   install_fixture
   source_dir="${install_root}/$(readlink "${install_root}/current")"
-  stale_dir="${install_root}/releases/stale-before-rename"
-  cp -a -- "${source_dir}" "${stale_dir}"
+  stale_dir="$(copy_release_with_identity \
+    "${source_dir}" "3.4.24" \
+    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" \
+    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")"
   quarantine_dir="$(prune_quarantine_path "${stale_dir}")"
   record_prune_intent_for_release "${stale_dir}"
 
@@ -1957,6 +2076,53 @@ EOF
   [ -L "${install_root}/current" ]
 }
 
+@test "transaction recovery preserves its journal when the staged root is missing" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local journal="${TEST_HOME}/.local/state/devin-desktop-manager.transaction"
+  local staged_root
+
+  install_fixture
+  export MOCK_RM_FAIL_PATH="${journal}"
+  run manager_env uninstall --yes
+  unset MOCK_RM_FAIL_PATH
+  [ "${status}" -ne 0 ]
+  staged_root="$(find "${TEST_HOME}/.local/opt" -maxdepth 1 \
+    -type d -name 'devin-desktop.uninstall-*' -print -quit)"
+  [ -n "${staged_root}" ]
+  rm -rf -- "${staged_root}"
+
+  run install_fixture
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"unfinished transaction recovery failed"* ]]
+  [ -d "${journal}" ]
+  [ ! -e "${install_root}" ]
+}
+
+@test "transaction recovery rejects a partially deleted staged root" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local journal="${TEST_HOME}/.local/state/devin-desktop-manager.transaction"
+  local staged_root
+
+  install_fixture
+  export MOCK_RM_FAIL_PATH="${journal}"
+  run manager_env uninstall --yes
+  unset MOCK_RM_FAIL_PATH
+  [ "${status}" -ne 0 ]
+  staged_root="$(find "${TEST_HOME}/.local/opt" -maxdepth 1 \
+    -type d -name 'devin-desktop.uninstall-*' -print -quit)"
+  [ -n "${staged_root}" ]
+  rm -rf -- "${staged_root}/releases"
+
+  run install_fixture
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"unfinished transaction recovery failed"* ]]
+  [ -d "${journal}" ]
+  [ -d "${staged_root}" ]
+  [ ! -e "${install_root}" ]
+}
+
 @test "termination after manager command removal restores the full installation" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
   local manager_command="${TEST_HOME}/.local/bin/devin-desktop-manager"
@@ -2025,7 +2191,8 @@ EOF
   run install_fixture
 
   [ "${status}" -ne 0 ]
-  [[ "${output}" == *"uninstall cleanup root is not manager-owned"* ]]
+  [[ "${output}" == *"uninstall cleanup root identity does not match"* ||
+    "${output}" == *"uninstall cleanup root is not manager-owned"* ]]
   [ "$(cat "${staged_root}/keep.txt")" = "replacement data" ]
   [ -f "${cleanup_record}" ]
 }
@@ -2037,6 +2204,19 @@ EOF
   [ "${status}" -ne 0 ]
   [[ "${output}" == *"XDG_DATA_HOME must be set to an absolute path"* ]]
   [ ! -e "${TEST_HOME}/.local/opt/devin-desktop" ]
+}
+
+@test "state storage beneath the installation root is rejected before mutation" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local nested_state="${install_root}/state"
+
+  run env HOME="${TEST_HOME}" XDG_STATE_HOME="${nested_state}" \
+    PATH="${MOCK_BIN}:${PATH}" "${MANAGER}" update
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == \
+    *"XDG_STATE_HOME must not be the installation root or a directory beneath it"* ]]
+  [ ! -e "${install_root}" ]
 }
 
 @test "unknown commands fail without creating installation state" {
