@@ -1207,6 +1207,31 @@ EOF
   [ ! -e "${TEST_HOME}/.local/state/devin-desktop-manager" ]
 }
 
+@test "uninstall is idempotent when the application is not installed" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local cache_root="${TEST_HOME}/.cache/devin-desktop-manager"
+  local state_dir="${TEST_HOME}/.local/state/devin-desktop-manager"
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"managed application removed"* ]]
+  [ ! -e "${install_root}" ]
+  [ ! -e "${cache_root}" ]
+  [ ! -e "${state_dir}" ]
+  run find "${TEST_HOME}/.local/opt" -maxdepth 1 \
+    -type d -name 'devin-desktop.uninstall-*' -print
+  [ "${status}" -eq 0 ]
+  [ -z "${output}" ]
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [ ! -e "${install_root}" ]
+  [ ! -e "${cache_root}" ]
+  [ ! -e "${state_dir}" ]
+}
+
 @test "uninstall preserves a default changed by the user after installation" {
   install_fixture
   env XDG_CONFIG_HOME="${TEST_HOME}/.config" \
