@@ -229,6 +229,8 @@ path_is_at_or_below() {
 }
 
 validate_environment() {
+  local xdg_name xdg_path
+
   validate_absolute_directory HOME "${HOME_DIR}"
   validate_absolute_directory XDG_CACHE_HOME \
     "${XDG_CACHE_HOME:-${HOME_DIR}/.cache}"
@@ -238,9 +240,18 @@ validate_environment() {
     "${XDG_STATE_HOME:-${HOME_DIR}/.local/state}"
   validate_absolute_directory XDG_CONFIG_HOME \
     "${XDG_CONFIG_HOME:-${HOME_DIR}/.config}"
-  if path_is_at_or_below "${STATE_HOME}" "${INSTALL_ROOT}"; then
-    die "XDG_STATE_HOME must not be the installation root or a directory beneath it"
-  fi
+  for xdg_name in \
+    XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CONFIG_HOME; do
+    case "${xdg_name}" in
+      XDG_CACHE_HOME) xdg_path="${XDG_CACHE_HOME:-${HOME_DIR}/.cache}" ;;
+      XDG_DATA_HOME) xdg_path="${DATA_HOME}" ;;
+      XDG_STATE_HOME) xdg_path="${STATE_HOME}" ;;
+      XDG_CONFIG_HOME) xdg_path="${CONFIG_HOME}" ;;
+    esac
+    if path_is_at_or_below "${xdg_path}" "${INSTALL_ROOT}"; then
+      die "${xdg_name} must not be the installation root or a directory beneath it"
+    fi
+  done
 }
 
 ensure_not_root() {
@@ -799,12 +810,10 @@ upgrade_legacy_release_metadata() {
   mv -Tf -- "${temporary}" "${metadata}"
 }
 
-cleanup_legacy_migration_temporaries() {
+cleanup_install_temporaries() {
   local path
 
   cleanup_ownership_sentinel_temporaries "${INSTALL_ROOT}" || return 1
-  cleanup_ownership_sentinel_temporaries "${CACHE_ROOT}" || return 1
-  cleanup_ownership_sentinel_temporaries "${STATE_DIR}" || return 1
 
   for path in "${RELEASES_DIR}"/*/release.json.new.*; do
     [[ -e "${path}" || -L "${path}" ]] || continue
@@ -838,6 +847,12 @@ cleanup_legacy_migration_temporaries() {
     esac
     rm -f -- "${path}" || return 1
   done
+}
+
+cleanup_legacy_migration_temporaries() {
+  cleanup_install_temporaries || return 1
+  cleanup_ownership_sentinel_temporaries "${CACHE_ROOT}" || return 1
+  cleanup_ownership_sentinel_temporaries "${STATE_DIR}"
 }
 
 fresh_markerless_install_root_is_valid() {
@@ -927,6 +942,10 @@ migrate_legacy_layout_if_needed() {
 
 ensure_layout() {
   migrate_legacy_layout_if_needed
+  if owned_root_is_valid "${INSTALL_ROOT}"; then
+    cleanup_install_temporaries ||
+      die "could not safely recover interrupted installation temporaries"
+  fi
   ensure_owned_root "${INSTALL_ROOT}" "installation root"
   [[ ! -L "${RELEASES_DIR}" ]] ||
     die "release directory must not be a symbolic link: ${RELEASES_DIR}"

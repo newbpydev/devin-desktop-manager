@@ -2032,6 +2032,28 @@ EOF
   [ -L "${manager_command}" ]
 }
 
+@test "uninstall recovers verified current-manager temporaries before validation" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local current_target release_name staging integration
+
+  install_fixture
+  current_target="$(readlink "${install_root}/current")"
+  release_name="$(basename "${current_target}")"
+  staging="${install_root}/.staging-${release_name}-12345"
+  integration="${install_root}/.integration-12345"
+  mkdir -p "${staging}/partial" "${integration}"
+  printf 'partial staging\n' >"${staging}/partial/keep.txt"
+  printf 'partial integration\n' >"${integration}/keep.txt"
+  ln -s "${current_target}" "${install_root}/.current.new.12345"
+  ln -s "${current_target}" "${install_root}/.previous.new.12345"
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"managed application removed"* ]]
+  [ ! -e "${install_root}" ]
+}
+
 @test "uninstall transaction cleanup failure reports deferred recovery" {
   local journal="${TEST_HOME}/.local/state/devin-desktop-manager.transaction"
 
@@ -2205,17 +2227,20 @@ EOF
   [ ! -e "${TEST_HOME}/.local/opt/devin-desktop" ]
 }
 
-@test "state storage beneath the installation root is rejected before mutation" {
+@test "XDG roots beneath the installation root are rejected before mutation" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
-  local nested_state="${install_root}/state"
+  local xdg_name
 
-  run env HOME="${TEST_HOME}" XDG_STATE_HOME="${nested_state}" \
-    PATH="${MOCK_BIN}:${PATH}" "${MANAGER}" update
+  for xdg_name in \
+    XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CONFIG_HOME; do
+    run env HOME="${TEST_HOME}" "${xdg_name}=${install_root}/${xdg_name}" \
+      PATH="${MOCK_BIN}:${PATH}" "${MANAGER}" update
 
-  [ "${status}" -ne 0 ]
-  [[ "${output}" == \
-    *"XDG_STATE_HOME must not be the installation root or a directory beneath it"* ]]
-  [ ! -e "${install_root}" ]
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == \
+      *"${xdg_name} must not be the installation root or a directory beneath it"* ]]
+    [ ! -e "${install_root}" ]
+  done
 }
 
 @test "unknown commands fail without creating installation state" {
