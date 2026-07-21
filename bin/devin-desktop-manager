@@ -2046,6 +2046,7 @@ uninstall_cleanup_record_matches_root() {
   fields="$(uninstall_cleanup_record_fields)" || return 1
   IFS=$'\t' read -r recorded_root device inode <<<"${fields}"
   [[ "${recorded_root}" == "${expected_root}" ]] || return 1
+  owned_root_is_valid "${recorded_root}" || return 1
   staged_install_root_identity_matches \
     "${recorded_root}" "${device}" "${inode}"
 }
@@ -2098,6 +2099,8 @@ recover_pending_uninstall_cleanup() {
   if [[ -e "${staged_root}" || -L "${staged_root}" ]]; then
     [[ -d "${staged_root}" && ! -L "${staged_root}" ]] ||
       die "unfinished uninstall cleanup root is unsafe: ${staged_root}"
+    owned_root_is_valid "${staged_root}" ||
+      die "unfinished uninstall cleanup root is not manager-owned: ${staged_root}"
     staged_install_root_identity_matches \
       "${staged_root}" "${device}" "${inode}" ||
       die "unfinished uninstall cleanup root identity does not match: ${staged_root}"

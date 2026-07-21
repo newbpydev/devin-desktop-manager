@@ -1919,7 +1919,6 @@ EOF
   staged_before="$(find "${TEST_HOME}/.local/opt" -maxdepth 1 \
     -type d -name 'devin-desktop.uninstall-*' -print -quit)"
   [ -n "${staged_before}" ]
-  rm -f -- "${staged_before}/.devin-desktop-manager-owned"
   rm -rf -- "${staged_before}/releases"
 
   run install_fixture
@@ -1955,7 +1954,7 @@ EOF
   run install_fixture
 
   [ "${status}" -ne 0 ]
-  [[ "${output}" == *"uninstall cleanup root identity does not match"* ]]
+  [[ "${output}" == *"uninstall cleanup root is not manager-owned"* ]]
   [ "$(cat "${staged_root}/keep.txt")" = "replacement data" ]
   [ -f "${cleanup_record}" ]
 }
