@@ -1813,10 +1813,10 @@ EOF
           printf "manager result\n" >"${CONFIG_HOME}/mimeapps.list"
           return 0
         fi
-        result="${TRANSACTION_BACKUP}/results/config-mimeapps.sha256"
+        result="${TRANSACTION_BACKUP}/results/config-mimeapps.result"
         [[ -f "${result}" && ! -L "${result}" ]]
         [[ "$(cat "${result}")" == \
-          "$(sha256sum "${CONFIG_HOME}/mimeapps.list" | awk '\''{print $1}'\'')" ]]
+          "sha256 $(sha256sum "${CONFIG_HOME}/mimeapps.list" | awk '\''{print $1}'\'')" ]]
         : >"${TRANSACTION_BACKUP}/proof-seen-before-second-rewrite"
         return 1
       }
@@ -1824,6 +1824,35 @@ EOF
         exit 1
       fi
       [[ -f "${TRANSACTION_BACKUP}/proof-seen-before-second-rewrite" ]]
+    ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
+}
+
+@test "MIME result publication preserves the prior proof when replacement fails" {
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      acquire_lock
+      backup_transaction
+      mkdir -p "${CONFIG_HOME}"
+      printf "first manager result\n" >"${CONFIG_HOME}/mimeapps.list"
+      record_user_configuration_result \
+        "${CONFIG_HOME}/mimeapps.list" config-mimeapps
+      result="${TRANSACTION_BACKUP}/results/config-mimeapps.result"
+      [[ -f "${result}" && ! -L "${result}" ]]
+      proof_before="$(cat "${result}")"
+      printf "second manager result\n" >"${CONFIG_HOME}/mimeapps.list"
+      export MOCK_MV_FAIL_PATH="${result}"
+      if record_user_configuration_result \
+        "${CONFIG_HOME}/mimeapps.list" config-mimeapps; then
+        exit 1
+      fi
+      [[ "$(cat "${result}")" == "${proof_before}" ]]
     ' _ "${MANAGER}"
 
   [ "${status}" -eq 0 ]
@@ -2112,6 +2141,30 @@ EOF
   [ "${status}" -ne 0 ]
   [[ "${output}" == *"release is missing the terminal launcher"* ]]
   [ "$(readlink "${TEST_HOME}/.local/opt/devin-desktop/current")" = "${current_before}" ]
+}
+
+@test "rollback refuses to retain a corrupted current release as previous" {
+  local second="${BATS_TEST_TMPDIR}/second.deb"
+  local second_build="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local current_before previous_before
+
+  install_fixture
+  "${FIXTURE_BUILDER}" "${second}" safe "${second_build}" "3.4.28"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${second_build}/Devin-linux-x64-3.4.28.deb" \
+    "${second}" "3.4.28" "${second_build}" 1783378474000
+  manager_env update
+  current_before="$(readlink "${install_root}/current")"
+  previous_before="$(readlink "${install_root}/previous")"
+  chmod 0644 "${install_root}/${current_before}/app/bin/devin-desktop"
+
+  run manager_env rollback
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"retained or reused release is invalid"* ]]
+  [ "$(readlink "${install_root}/current")" = "${current_before}" ]
+  [ "$(readlink "${install_root}/previous")" = "${previous_before}" ]
 }
 
 @test "a third update keeps exactly the current and rollback releases" {
@@ -2707,6 +2760,34 @@ EOF
   [ "${status}" -ne 0 ]
   [[ "${output}" == *"unfinished transaction recovery failed"* ]]
   [ -d "${journal}" ]
+  [ ! -e "${install_root}" ]
+}
+
+@test "absent-root recovery takes the staged installation legacy lock" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local journal="${TEST_HOME}/.local/state/devin-desktop-manager.transaction"
+  local discard="${journal}.discard"
+  local staged_root ready
+
+  install_fixture
+  export MOCK_MV_FAIL_PATH="${discard}"
+  run manager_env uninstall --yes
+  unset MOCK_MV_FAIL_PATH
+  [ "${status}" -ne 0 ]
+  staged_root="$(find "${TEST_HOME}/.local/opt" -maxdepth 1 \
+    -type d -name 'devin-desktop.uninstall-*' -print -quit)"
+  [ -n "${staged_root}" ]
+  [ ! -e "${install_root}" ]
+  ready="${BATS_TEST_TMPDIR}/staged-recovery-lock-ready"
+  start_lock_holder "${staged_root}/.manager.lock" "${ready}"
+
+  run install_fixture
+  stop_lock_holder
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"another Devin Desktop manager operation is running"* ]]
+  [ -d "${journal}" ]
+  [ -d "${staged_root}" ]
   [ ! -e "${install_root}" ]
 }
 

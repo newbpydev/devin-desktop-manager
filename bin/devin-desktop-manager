@@ -2248,25 +2248,26 @@ record_user_configuration_result() {
   local path="$1"
   local name="$2"
   local results="${TRANSACTION_BACKUP}/results"
-  local hash temporary
+  local result="${results}/${name}.result"
+  local temporary="${result}.new.$$"
+  local hash proof
 
   mkdir -p -- "${results}" || return 1
   chmod 0700 "${results}" || return 1
-  rm -f -- "${results}/${name}.sha256" "${results}/${name}.absent" ||
-    return 1
+  rm -f -- "${temporary}" || return 1
   if [[ -e "${path}" || -L "${path}" ]]; then
     [[ -f "${path}" && ! -L "${path}" ]] || return 1
     hash="$(sha256sum "${path}" | awk '{print $1}')" || return 1
     [[ "${hash}" =~ ^[0-9a-f]{64}$ ]] || return 1
-    temporary="${results}/${name}.sha256.new.$$"
-    printf '%s\n' "${hash}" >"${temporary}" || return 1
-    chmod 0600 "${temporary}" || return 1
-    mv -Tf -- "${temporary}" "${results}/${name}.sha256" || return 1
+    proof="sha256 ${hash}"
   else
-    temporary="${results}/${name}.absent.new.$$"
-    : >"${temporary}" || return 1
-    chmod 0600 "${temporary}" || return 1
-    mv -Tf -- "${temporary}" "${results}/${name}.absent" || return 1
+    proof="absent"
+  fi
+  if ! printf '%s\n' "${proof}" >"${temporary}" ||
+    ! chmod 0600 "${temporary}" ||
+    ! mv -Tf -- "${temporary}" "${result}"; then
+    rm -f -- "${temporary}" || true
+    return 1
   fi
 }
 
@@ -2285,11 +2286,31 @@ durable_user_configuration_matches_recorded_result() {
   local destination="$1"
   local name="$2"
   local results="${TRANSACTION_BACKUP}/results"
+  local result_file="${results}/${name}.result"
   local hash_file="${results}/${name}.sha256"
   local absent_file="${results}/${name}.absent"
-  local expected_hash current_hash
+  local proof expected_hash current_hash
 
-  if [[ -e "${hash_file}" || -L "${hash_file}" ]]; then
+  if [[ -e "${result_file}" || -L "${result_file}" ]]; then
+    [[ -f "${result_file}" && ! -L "${result_file}" ]] || return 1
+    proof="$(cat "${result_file}")" || return 1
+    case "${proof}" in
+      absent)
+        [[ ! -e "${destination}" && ! -L "${destination}" ]]
+        ;;
+      "sha256 "*)
+        expected_hash="${proof#sha256 }"
+        [[ "${expected_hash}" =~ ^[0-9a-f]{64}$ &&
+          -f "${destination}" && ! -L "${destination}" ]] || return 1
+        current_hash="$(sha256sum "${destination}" | awk '{print $1}')" ||
+          return 1
+        [[ "${current_hash}" == "${expected_hash}" ]]
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  elif [[ -e "${hash_file}" || -L "${hash_file}" ]]; then
     [[ -f "${hash_file}" && ! -L "${hash_file}" &&
       ! -e "${absent_file}" && ! -L "${absent_file}" &&
       -f "${destination}" && ! -L "${destination}" ]] || return 1
@@ -2494,6 +2515,14 @@ restore_staged_install_root() {
     manager_install_root_is_valid "${recorded}" ||
       empty_manager_install_root_is_valid "${recorded}" ||
       pre_activation_manager_install_root_is_valid "${recorded}" || return 1
+    if [[ "${LEGACY_LOCK_HELD}" != "true" ]]; then
+      acquire_existing_legacy_lock "${recorded}/.manager.lock"
+      staged_install_root_identity_matches \
+        "${recorded}" "${device}" "${inode}" || return 1
+      manager_install_root_is_valid "${recorded}" ||
+        empty_manager_install_root_is_valid "${recorded}" ||
+        pre_activation_manager_install_root_is_valid "${recorded}" || return 1
+    fi
     [[ ! -e "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] || return 1
     mv -T -- "${recorded}" "${INSTALL_ROOT}" || return 1
   fi
@@ -3296,7 +3325,7 @@ command_update() {
 
 command_rollback() {
   local current_target previous_target previous_path
-  local metadata_build metadata_product
+  local current_path metadata_build metadata_product
 
   require_release_commands
   require_commands flock unshare
@@ -3310,7 +3339,9 @@ command_rollback() {
     die "no active release is installed"
   previous_target="$(release_target "${PREVIOUS_LINK}")" ||
     die "no previous release is available"
+  current_path="${INSTALL_ROOT}/${current_target}"
   previous_path="${INSTALL_ROOT}/${previous_target}"
+  validate_retained_or_reused_release "${current_path}"
   metadata_build="$(jq -r '.build // empty' "${previous_path}/release.json")"
   metadata_product="$(jq -r '.productVersion // empty' "${previous_path}/release.json")"
   validate_release "${previous_path}" "${metadata_build}" "${metadata_product}"
