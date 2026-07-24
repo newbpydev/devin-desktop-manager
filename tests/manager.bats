@@ -3177,6 +3177,21 @@ EOF
   done
 }
 
+@test "temporary cleanup root validation canonicalizes a symlinked home" {
+  local real_home="${BATS_TEST_TMPDIR}/real-home"
+  local linked_home="${BATS_TEST_TMPDIR}/linked-home"
+
+  mkdir -p "${real_home}"
+  ln -s "${real_home}" "${linked_home}"
+  run env HOME="${linked_home}" \
+    XDG_DATA_HOME="${linked_home}/.local/opt/devin-desktop.uninstall-123/data" \
+    bash -c 'source "$1"; validate_environment' _ "${MANAGER}"
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == \
+    *"XDG_DATA_HOME must not be a manager temporary cleanup root or a directory beneath it"* ]]
+}
+
 @test "unknown commands fail without creating installation state" {
   run manager_env explode
 

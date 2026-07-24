@@ -234,7 +234,8 @@ path_is_at_or_below() {
 }
 
 validate_environment() {
-  local xdg_name xdg_path resolved_xdg removed_root state_artifact
+  local xdg_name xdg_path resolved_xdg resolved_transaction_journal
+  local resolved_install_root removed_root state_artifact
 
   validate_absolute_directory HOME "${HOME_DIR}"
   validate_absolute_directory XDG_CACHE_HOME \
@@ -245,6 +246,10 @@ validate_environment() {
     "${XDG_STATE_HOME:-${HOME_DIR}/.local/state}"
   validate_absolute_directory XDG_CONFIG_HOME \
     "${XDG_CONFIG_HOME:-${HOME_DIR}/.config}"
+  resolved_transaction_journal="$(readlink -m -- "${TRANSACTION_JOURNAL}")" ||
+    die "could not resolve the transaction journal path"
+  resolved_install_root="$(readlink -m -- "${INSTALL_ROOT}")" ||
+    die "could not resolve the installation root"
   for xdg_name in \
     XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CONFIG_HOME; do
     case "${xdg_name}" in
@@ -256,7 +261,7 @@ validate_environment() {
     resolved_xdg="$(readlink -m -- "${xdg_path}")" ||
       die "could not resolve ${xdg_name}"
     case "${resolved_xdg}" in
-      "${TRANSACTION_JOURNAL}.new."*|"${INSTALL_ROOT}.uninstall-"*)
+      "${resolved_transaction_journal}.new."*|"${resolved_install_root}.uninstall-"*)
         die "${xdg_name} must not be a manager temporary cleanup root or a directory beneath it"
         ;;
     esac
