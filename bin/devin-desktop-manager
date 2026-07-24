@@ -234,7 +234,7 @@ path_is_at_or_below() {
 }
 
 validate_environment() {
-  local xdg_name xdg_path removed_root state_artifact
+  local xdg_name xdg_path resolved_xdg removed_root state_artifact
 
   validate_absolute_directory HOME "${HOME_DIR}"
   validate_absolute_directory XDG_CACHE_HOME \
@@ -252,6 +252,13 @@ validate_environment() {
       XDG_DATA_HOME) xdg_path="${DATA_HOME}" ;;
       XDG_STATE_HOME) xdg_path="${STATE_HOME}" ;;
       XDG_CONFIG_HOME) xdg_path="${CONFIG_HOME}" ;;
+    esac
+    resolved_xdg="$(readlink -m -- "${xdg_path}")" ||
+      die "could not resolve ${xdg_name}"
+    case "${resolved_xdg}" in
+      "${TRANSACTION_JOURNAL}.new."*|"${INSTALL_ROOT}.uninstall-"*)
+        die "${xdg_name} must not be a manager temporary cleanup root or a directory beneath it"
+        ;;
     esac
     if path_is_at_or_below "${xdg_path}" "${INSTALL_ROOT}"; then
       die "${xdg_name} must not be the installation root or a directory beneath it"
@@ -2309,6 +2316,26 @@ record_user_configuration_results() {
     "${DATA_HOME}/mimeapps.list" data-mimeapps
 }
 
+record_user_configuration_path_result() {
+  local path="$1"
+
+  [[ -n "${TRANSACTION_BACKUP}" ]] || return 0
+  case "${path}" in
+    "${CONFIG_HOME}/mimeapps.list")
+      record_user_configuration_result "${path}" config-mimeapps
+      ;;
+    "${DATA_HOME}/applications/mimeapps.list")
+      record_user_configuration_result "${path}" applications-mimeapps
+      ;;
+    "${DATA_HOME}/mimeapps.list")
+      record_user_configuration_result "${path}" data-mimeapps
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 durable_user_configuration_matches_recorded_result() {
   local destination="$1"
   local name="$2"
@@ -3128,8 +3155,13 @@ validate_retained_or_reused_release() {
 validate_linked_releases() {
   local current_dir previous_dir
 
-  current_dir="$(release_path "${CURRENT_LINK}" 2>/dev/null || true)"
-  previous_dir="$(release_path "${PREVIOUS_LINK}" 2>/dev/null || true)"
+  current_dir="$(release_path "${CURRENT_LINK}")" ||
+    die "current release link is invalid: ${CURRENT_LINK}"
+  previous_dir=""
+  if [[ -e "${PREVIOUS_LINK}" || -L "${PREVIOUS_LINK}" ]]; then
+    previous_dir="$(release_path "${PREVIOUS_LINK}")" ||
+      die "previous release link is invalid: ${PREVIOUS_LINK}"
+  fi
   validate_retained_or_reused_release "${current_dir}"
   if [[ "${previous_dir}" != "${current_dir}" ]]; then
     validate_retained_or_reused_release "${previous_dir}"
@@ -3512,6 +3544,7 @@ rewrite_mimeapps_without_handler() {
   ' "${file}" >"${temporary}" || return 1
   chmod --reference="${file}" "${temporary}" || return 1
   mv -Tf -- "${temporary}" "${file}" || return 1
+  record_user_configuration_path_result "${file}"
 }
 
 remove_handler_from_user_defaults() {
@@ -3543,6 +3576,7 @@ restore_one_association() {
     fi
     if [[ -n "${original}" ]]; then
       xdg-mime default "${original}" "${mime_type}" || return 1
+      record_user_configuration_results || return 1
     fi
   else
     remove_handler_from_user_defaults "${mime_type}" "${desktop_id}" || return 1

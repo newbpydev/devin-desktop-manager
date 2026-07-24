@@ -1297,6 +1297,19 @@ EOF
   [ "$(readlink "${install_root}/current")" = "${current_target}" ]
 }
 
+@test "an up-to-date update rejects a malformed existing previous link" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+
+  install_fixture
+  ln -s "../other" "${install_root}/previous"
+
+  run install_fixture
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"previous release link is invalid"* ]]
+  [ "$(readlink "${install_root}/previous")" = "../other" ]
+}
+
 @test "check distinguishes up-to-date and update-available installations" {
   local second="${BATS_TEST_TMPDIR}/second.deb"
   local second_build="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -1866,6 +1879,29 @@ EOF
         exit 1
       fi
       [[ -f "${TRANSACTION_BACKUP}/proof-seen-before-second-rewrite" ]]
+    ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
+}
+
+@test "association restore records the result at its mutation boundary" {
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      acquire_lock
+      backup_transaction
+      mkdir -p "${CONFIG_HOME}"
+      printf "[Default Applications]\n%s=%s;\n" \
+        "${MIME_DEVIN}" "${URL_DESKTOP_ID}" >"${CONFIG_HOME}/mimeapps.list"
+      restore_one_association "${MIME_DEVIN}" "${URL_DESKTOP_ID}" ""
+      result="${TRANSACTION_BACKUP}/results/config-mimeapps.result"
+      [[ -f "${result}" && ! -L "${result}" ]]
+      [[ "$(cat "${result}")" == \
+        "sha256 $(sha256sum "${CONFIG_HOME}/mimeapps.list" | awk '\''{print $1}'\'')" ]]
     ' _ "${MANAGER}"
 
   [ "${status}" -eq 0 ]
@@ -3096,6 +3132,25 @@ EOF
     [[ "${output}" == \
       *"XDG_DATA_HOME must not be a removable manager state artifact or a directory beneath it"* ]]
     [ ! -e "${TEST_HOME}/.local/opt/devin-desktop" ]
+  done
+}
+
+@test "XDG homes beneath manager temporary cleanup roots are rejected" {
+  local state_home="${TEST_HOME}/.local/state"
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local temporary_path
+
+  for temporary_path in \
+    "${state_home}/devin-desktop-manager.transaction.new.123/data" \
+    "${install_root}.uninstall-123/data"; do
+    run env HOME="${TEST_HOME}" XDG_STATE_HOME="${state_home}" \
+      XDG_DATA_HOME="${temporary_path}" PATH="${MOCK_BIN}:${PATH}" \
+      "${MANAGER}" update
+
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == \
+      *"XDG_DATA_HOME must not be a manager temporary cleanup root or a directory beneath it"* ]]
+    [ ! -e "${install_root}" ]
   done
 }
 
