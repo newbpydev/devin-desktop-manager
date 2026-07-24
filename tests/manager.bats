@@ -1675,6 +1675,23 @@ EOF
   [ "${status}" -eq 0 ]
 }
 
+@test "orphan transaction recovery rejects a symlink without touching its target" {
+  local external="${BATS_TEST_TMPDIR}/external-transaction-data"
+
+  printf 'preserve\n' >"${external}"
+  run env HOME="${TEST_HOME}" XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      mkdir -p "${STATE_HOME}"
+      ln -s "$2" "${TRANSACTION_JOURNAL}.new.12345"
+      acquire_lock
+    ' _ "${MANAGER}" "${external}"
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"unfinished transaction temporary is unsafe"* ]]
+  [ "$(cat "${external}")" = "preserve" ]
+}
+
 @test "the next mutation recovers an interrupted durable transaction" {
   local desktop="${TEST_HOME}/.local/share/applications/devin-desktop-manager.desktop"
 
