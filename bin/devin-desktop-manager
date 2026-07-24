@@ -81,6 +81,7 @@ TRANSACTION_DISCARDING=false
 TRANSACTION_DURABLE_RECOVERY=false
 LEGACY_LOCK_HELD=false
 CLEANUP_PROOF_TEMP=""
+RESTORE_TEMP_ROOT=""
 
 info() {
   printf 'devin-desktop-manager: %s\n' "$*" >&2
@@ -123,6 +124,22 @@ cleanup() {
       CLEANUP_PROOF_TEMP=""
       ;;
   esac
+  if [[ -n "${RESTORE_TEMP_ROOT}" ]]; then
+    case "$(basename "${RESTORE_TEMP_ROOT}")" in
+      .devin-desktop-manager-restore.*)
+        if [[ -d "${RESTORE_TEMP_ROOT}" && ! -L "${RESTORE_TEMP_ROOT}" &&
+          "$(stat -c '%u' -- "${RESTORE_TEMP_ROOT}" 2>/dev/null)" == "${EUID}" ]]; then
+          rm -rf -- "${RESTORE_TEMP_ROOT}"
+        else
+          warn "refusing to clean unsafe restore temporary: ${RESTORE_TEMP_ROOT}"
+        fi
+        ;;
+      *)
+        warn "refusing to clean unexpected restore temporary: ${RESTORE_TEMP_ROOT}"
+        ;;
+    esac
+    RESTORE_TEMP_ROOT=""
+  fi
 }
 
 trap cleanup EXIT
@@ -2482,9 +2499,8 @@ restore_path() {
   local name="$2"
   local snapshot="${TRANSACTION_BACKUP}/${name}"
   local preserved="${TRANSACTION_BACKUP}/preserved/${name}"
-  local temporary="${destination}.restore.$$"
+  local parent temporary
 
-  rm -rf -- "${temporary}" || return 1
   if [[ -e "${snapshot}" || -L "${snapshot}" ]]; then
     if [[ "${TRANSACTION_DURABLE_RECOVERY}" == "true" ]]; then
       if [[ -e "${preserved}" || -L "${preserved}" ]]; then
@@ -2504,15 +2520,24 @@ restore_path() {
           ;;
       esac
     fi
-    mkdir -p -- "$(dirname "${destination}")" || return 1
+    parent="$(dirname "${destination}")"
+    mkdir -p -- "${parent}" || return 1
+    RESTORE_TEMP_ROOT="$(
+      mktemp -d -- "${parent}/.devin-desktop-manager-restore.XXXXXXXX"
+    )" || return 1
+    temporary="${RESTORE_TEMP_ROOT}/payload"
     cp -a -- "${snapshot}" "${temporary}" || {
-      rm -rf -- "${temporary}" || true
+      rm -rf -- "${RESTORE_TEMP_ROOT}" || true
+      RESTORE_TEMP_ROOT=""
       return 1
     }
     mv -Tf -- "${temporary}" "${destination}" || {
-      rm -rf -- "${temporary}" || true
+      rm -rf -- "${RESTORE_TEMP_ROOT}" || true
+      RESTORE_TEMP_ROOT=""
       return 1
     }
+    rmdir -- "${RESTORE_TEMP_ROOT}" || return 1
+    RESTORE_TEMP_ROOT=""
   elif [[ -e "${destination}" || -L "${destination}" ]]; then
     case "${name}" in
       config-mimeapps|applications-mimeapps|data-mimeapps)
@@ -2671,26 +2696,25 @@ restore_staged_install_root() {
       return 0
     fi
     [[ -d "${recorded}" && ! -L "${recorded}" ]] || return 1
-    owned_root_is_valid "${recorded}" || return 1
     staged_install_root_identity_matches \
       "${recorded}" "${device}" "${inode}" || return 1
-    manager_install_root_is_valid "${recorded}" ||
-      empty_manager_install_root_is_valid "${recorded}" ||
-      pre_activation_manager_install_root_is_valid "${recorded}" || return 1
     if [[ "${LEGACY_LOCK_HELD}" != "true" ]]; then
       acquire_existing_legacy_lock "${recorded}/.manager.lock"
       staged_install_root_identity_matches \
         "${recorded}" "${device}" "${inode}" || return 1
+    fi
+    if [[ -e "${INSTALL_ROOT}" || -L "${INSTALL_ROOT}" ]]; then
+      restore_staged_install_pair "${recorded}" || return 1
+    else
+      owned_root_is_valid "${recorded}" || return 1
       manager_install_root_is_valid "${recorded}" ||
         empty_manager_install_root_is_valid "${recorded}" ||
         pre_activation_manager_install_root_is_valid "${recorded}" || return 1
+      mv -T -- "${recorded}" "${INSTALL_ROOT}" || return 1
     fi
-    if [[ -e "${INSTALL_ROOT}" || -L "${INSTALL_ROOT}" ]]; then
-      legacy_lock_bridge_is_valid "${recorded}" || return 1
-      remove_legacy_lock_bridge || return 1
-    fi
-    [[ ! -e "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] || return 1
-    mv -T -- "${recorded}" "${INSTALL_ROOT}" || return 1
+  elif [[ -n "${STAGED_INSTALL_ROOT}" ]] &&
+    [[ -e "${STAGED_INSTALL_ROOT}" || -L "${STAGED_INSTALL_ROOT}" ]]; then
+    discard_unrecorded_staged_install_root "${STAGED_INSTALL_ROOT}" || return 1
   fi
   STAGED_INSTALL_ROOT=""
 }
@@ -2810,6 +2834,7 @@ recover_cleanup_record_temporaries() {
   local record="$1"
   local validator="$2"
   local temporary suffix
+  shift 2
 
   for temporary in "${record}.new."*; do
     [[ -e "${temporary}" || -L "${temporary}" ]] || continue
@@ -2817,7 +2842,7 @@ recover_cleanup_record_temporaries() {
     if ! [[ "${suffix}" =~ ^[0-9]+$ &&
       -f "${temporary}" && ! -L "${temporary}" &&
       "$(stat -c '%u' -- "${temporary}" 2>/dev/null)" == "${EUID}" ]] ||
-      ! "${validator}" "${temporary}" >/dev/null; then
+      ! "${validator}" "${temporary}" "$@" >/dev/null; then
       return 1
     fi
     rm -f -- "${temporary}" || return 1
@@ -2854,6 +2879,24 @@ staged_install_root_identity_matches() {
   [[ "${identity}" == "${device} ${inode}" ]]
 }
 
+uninstall_cleanup_record_temporary_matches() {
+  local record="$1"
+  local expected_root="$2"
+  local expected_device="$3"
+  local expected_inode="$4"
+  local fields staged_root device inode
+
+  fields="$(uninstall_cleanup_record_fields "${record}")" || return 1
+  IFS=$'\t' read -r staged_root device inode <<<"${fields}"
+  [[ "${staged_root}" == "${expected_root}" &&
+    "${device}" == "${expected_device}" &&
+    "${inode}" == "${expected_inode}" ]] || return 1
+  validate_staged_install_root_path "${staged_root}" || return 1
+  owned_root_is_valid "${staged_root}" || return 1
+  staged_install_root_identity_matches \
+    "${staged_root}" "${device}" "${inode}"
+}
+
 uninstall_cleanup_record_matches_root() {
   local expected_root="$1"
   local fields recorded_root device inode
@@ -2885,7 +2928,9 @@ write_uninstall_cleanup_record() {
   identity="$(staged_install_root_identity "${staged_root}")" || return 1
   read -r device inode <<<"${identity}"
   recover_cleanup_record_temporaries \
-    "${UNINSTALL_CLEANUP_RECORD}" uninstall_cleanup_record_fields || return 1
+    "${UNINSTALL_CLEANUP_RECORD}" \
+    uninstall_cleanup_record_temporary_matches \
+    "${staged_root}" "${device}" "${inode}" || return 1
   [[ ! -e "${UNINSTALL_CLEANUP_RECORD}" &&
     ! -L "${UNINSTALL_CLEANUP_RECORD}" &&
     ! -e "${UNINSTALL_CLEANUP_PROOF}" &&
@@ -2932,14 +2977,9 @@ finish_recorded_uninstall_cleanup() {
   fi
 
   if [[ ! -e "${staged_root}" && ! -L "${staged_root}" ]]; then
-    if [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" &&
-      "$(stat -c '%d %i' -- "${INSTALL_ROOT}" 2>/dev/null)" == \
-        "${device} ${inode}" ]] &&
-      {
-        manager_install_root_is_valid "${INSTALL_ROOT}" ||
-          empty_manager_install_root_is_valid "${INSTALL_ROOT}" ||
-          pre_activation_manager_install_root_is_valid "${INSTALL_ROOT}"
-      }; then
+    if manager_install_root_is_valid "${INSTALL_ROOT}" ||
+      empty_manager_install_root_is_valid "${INSTALL_ROOT}" ||
+      pre_activation_manager_install_root_is_valid "${INSTALL_ROOT}"; then
       :
     else
       remove_legacy_lock_bridge ||
@@ -3083,6 +3123,30 @@ release_prune_cleanup_record_fields() {
     ' "${record}" 2>/dev/null
 }
 
+release_prune_cleanup_record_temporary_matches() {
+  local record="$1"
+  local expected_release_name="$2"
+  local expected_quarantine_name="$3"
+  local expected_device="$4"
+  local expected_inode="$5"
+  local expected_metadata_sha256="$6"
+  local fields release_name quarantine_name device inode metadata_sha256
+  local derived_quarantine
+
+  fields="$(release_prune_cleanup_record_fields "${record}")" || return 1
+  IFS=$'\t' read -r \
+    release_name quarantine_name device inode metadata_sha256 <<<"${fields}"
+  [[ "${release_name}" == "${expected_release_name}" &&
+    "${quarantine_name}" == "${expected_quarantine_name}" &&
+    "${device}" == "${expected_device}" &&
+    "${inode}" == "${expected_inode}" &&
+    "${metadata_sha256}" == "${expected_metadata_sha256}" ]] || return 1
+  derived_quarantine="$(
+    release_prune_quarantine_name "${release_name}" "${device}" "${inode}"
+  )" || return 1
+  [[ "${quarantine_name}" == "${derived_quarantine}" ]]
+}
+
 write_release_prune_cleanup_record() {
   local release_name="$1"
   local device="$2"
@@ -3097,7 +3161,9 @@ write_release_prune_cleanup_record() {
   [[ "${metadata_sha256}" =~ ^[0-9a-f]{64}$ ]] || return 1
   recover_cleanup_record_temporaries \
     "${RELEASE_PRUNE_CLEANUP_RECORD}" \
-    release_prune_cleanup_record_fields || return 1
+    release_prune_cleanup_record_temporary_matches \
+    "${release_name}" "${quarantine_name}" "${device}" "${inode}" \
+    "${metadata_sha256}" || return 1
   [[ ! -e "${RELEASE_PRUNE_CLEANUP_RECORD}" &&
     ! -L "${RELEASE_PRUNE_CLEANUP_RECORD}" &&
     ! -e "${RELEASE_PRUNE_CLEANUP_PROOF}" &&
@@ -3846,17 +3912,124 @@ legacy_public_lock_bridge_is_valid() {
   directory_contains_only_entry "${INSTALL_ROOT}" "${public_lock}"
 }
 
+staged_install_pair_is_valid() {
+  local staged_root="$1"
+  local public_lock="${INSTALL_ROOT}/.manager.lock"
+  local staged_lock="${staged_root}/.manager.lock"
+  local root entry name target release_dir
+  local sentinel="" releases="" current="" previous=""
+  declare -A paths=()
+
+  [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" &&
+    -d "${staged_root}" && ! -L "${staged_root}" &&
+    -f "${public_lock}" && ! -L "${public_lock}" &&
+    -f "${staged_lock}" && ! -L "${staged_lock}" &&
+    "${public_lock}" -ef "${staged_lock}" &&
+    "${public_lock}" -ef /proc/self/fd/8 ]] || return 1
+
+  for root in "${INSTALL_ROOT}" "${staged_root}"; do
+    directory_can_be_listed "${root}" || return 1
+    while IFS= read -r -d '' entry; do
+      name="$(basename "${entry}")"
+      case "${name}" in
+        .manager.lock)
+          ;;
+        "${OWNERSHIP_SENTINEL_NAME}"|releases|current|previous)
+          [[ -z "${paths[${name}]+present}" ]] || return 1
+          paths["${name}"]="${entry}"
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+    done < <(find "${root}" -mindepth 1 -maxdepth 1 -print0)
+  done
+
+  sentinel="${paths[${OWNERSHIP_SENTINEL_NAME}]:-}"
+  releases="${paths[releases]:-}"
+  current="${paths[current]:-}"
+  previous="${paths[previous]:-}"
+  [[ -n "${sentinel}" && -f "${sentinel}" && ! -L "${sentinel}" &&
+    "$(cat "${sentinel}")" == "$(ownership_sentinel_content)" &&
+    -n "${releases}" && -d "${releases}" && ! -L "${releases}" ]] ||
+    return 1
+  [[ -n "${current}" || -z "${previous}" ]] || return 1
+
+  for entry in "${current}" "${previous}"; do
+    [[ -n "${entry}" ]] || continue
+    [[ -L "${entry}" ]] || return 1
+    target="$(readlink "${entry}")"
+    [[ "${target}" == releases/* && "${target}" != *"/"*"/"* ]] ||
+      return 1
+    is_safe_release_identifier "${target#releases/}" || return 1
+    [[ -d "${releases}/${target#releases/}" &&
+      ! -L "${releases}/${target#releases/}" ]] || return 1
+  done
+  directory_can_be_listed "${releases}" || return 1
+  while IFS= read -r -d '' release_dir; do
+    release_directory_is_owned "${release_dir}" || return 1
+  done < <(find "${releases}" -mindepth 1 -maxdepth 1 -print0)
+}
+
+restore_staged_install_pair() {
+  local staged_root="$1"
+  local staged_lock="${staged_root}/.manager.lock"
+  local entry name destination
+
+  staged_install_pair_is_valid "${staged_root}" || return 1
+  while IFS= read -r -d '' entry; do
+    name="$(basename "${entry}")"
+    [[ "${name}" != ".manager.lock" ]] || continue
+    destination="${INSTALL_ROOT}/${name}"
+    [[ ! -e "${destination}" && ! -L "${destination}" ]] || return 1
+    mv -T -- "${entry}" "${destination}" || return 1
+  done < <(find "${staged_root}" -mindepth 1 -maxdepth 1 -print0)
+  staged_install_pair_is_valid "${staged_root}" || return 1
+  rm -f -- "${staged_lock}" || return 1
+  rmdir -- "${staged_root}" || return 1
+  manager_install_root_is_valid "${INSTALL_ROOT}" ||
+    empty_manager_install_root_is_valid "${INSTALL_ROOT}" ||
+    pre_activation_manager_install_root_is_valid "${INSTALL_ROOT}"
+}
+
+discard_unrecorded_staged_install_root() {
+  local staged_root="$1"
+  local staged_lock="${staged_root}/.manager.lock"
+  local public_lock="${INSTALL_ROOT}/.manager.lock"
+
+  validate_staged_install_root_path "${staged_root}" || return 1
+  [[ -d "${staged_root}" && ! -L "${staged_root}" ]] || return 1
+  manager_install_root_is_valid "${INSTALL_ROOT}" ||
+    empty_manager_install_root_is_valid "${INSTALL_ROOT}" ||
+    pre_activation_manager_install_root_is_valid "${INSTALL_ROOT}" || return 1
+  if directory_is_empty "${staged_root}"; then
+    rmdir -- "${staged_root}"
+    return
+  fi
+  [[ -f "${staged_lock}" && ! -L "${staged_lock}" &&
+    -f "${public_lock}" && ! -L "${public_lock}" &&
+    "${staged_lock}" -ef "${public_lock}" &&
+    "${public_lock}" -ef /proc/self/fd/8 ]] || return 1
+  directory_contains_only_entry "${staged_root}" "${staged_lock}" || return 1
+  rm -f -- "${staged_lock}" || return 1
+  rmdir -- "${staged_root}"
+}
+
 create_legacy_lock_bridge() {
   local staged_root="$1"
   local public_lock="${INSTALL_ROOT}/.manager.lock"
+  local staged_lock="${staged_root}/.manager.lock"
 
-  if ! mkdir -- "${INSTALL_ROOT}" ||
-    ! ln -- "${staged_root}/.manager.lock" "${public_lock}"; then
-    rm -f -- "${public_lock}" || true
-    rmdir -- "${INSTALL_ROOT}" 2>/dev/null || true
+  if ! mkdir -- "${staged_root}" ||
+    ! ln -- "${public_lock}" "${staged_lock}"; then
+    rm -f -- "${staged_lock}" || true
+    rmdir -- "${staged_root}" 2>/dev/null || true
     return 1
   fi
-  legacy_lock_bridge_is_valid "${staged_root}"
+  [[ -f "${staged_lock}" && ! -L "${staged_lock}" &&
+    "${staged_lock}" -ef "${public_lock}" &&
+    "${public_lock}" -ef /proc/self/fd/8 ]] || return 1
+  directory_contains_only_entry "${staged_root}" "${staged_lock}"
 }
 
 remove_legacy_lock_bridge() {
@@ -3870,7 +4043,7 @@ remove_legacy_lock_bridge() {
 
 stage_install_root_for_uninstall() {
   local identity device inode
-  local record temporary
+  local record temporary entry name destination
 
   STAGED_INSTALL_ROOT="${INSTALL_ROOT}.uninstall-$$"
   [[ ! -e "${STAGED_INSTALL_ROOT}" && ! -L "${STAGED_INSTALL_ROOT}" ]] ||
@@ -3878,7 +4051,9 @@ stage_install_root_for_uninstall() {
   manager_install_root_is_valid "${INSTALL_ROOT}" ||
     empty_manager_install_root_is_valid "${INSTALL_ROOT}" ||
     pre_activation_manager_install_root_is_valid "${INSTALL_ROOT}" || return 1
-  identity="$(stat -c '%d %i' -- "${INSTALL_ROOT}" 2>/dev/null)" || return 1
+  create_legacy_lock_bridge "${STAGED_INSTALL_ROOT}" || return 1
+  identity="$(stat -c '%d %i' -- "${STAGED_INSTALL_ROOT}" 2>/dev/null)" ||
+    return 1
   [[ "${identity}" =~ ^[0-9]+\ [0-9]+$ ]] || return 1
   read -r device inode <<<"${identity}"
   record="${TRANSACTION_BACKUP}/staged-install-root"
@@ -3896,13 +4071,21 @@ stage_install_root_for_uninstall() {
     ! chmod 0600 "${temporary}" ||
     ! mv -Tf -- "${temporary}" "${record}"; then
     rm -f -- "${temporary}" || true
+    discard_unrecorded_staged_install_root "${STAGED_INSTALL_ROOT}" || true
     return 1
   fi
-  if ! mv -T -- "${INSTALL_ROOT}" "${STAGED_INSTALL_ROOT}"; then
-    rm -f -- "${record}" || true
+  while IFS= read -r -d '' entry; do
+    name="$(basename "${entry}")"
+    [[ "${name}" != ".manager.lock" ]] || continue
+    destination="${STAGED_INSTALL_ROOT}/${name}"
+    [[ ! -e "${destination}" && ! -L "${destination}" ]] || return 1
+    mv -T -- "${entry}" "${destination}" || return 1
+  done < <(find "${INSTALL_ROOT}" -mindepth 1 -maxdepth 1 -print0)
+  legacy_lock_bridge_is_valid "${STAGED_INSTALL_ROOT}" || return 1
+  manager_install_root_is_valid "${STAGED_INSTALL_ROOT}" ||
+    empty_manager_install_root_is_valid "${STAGED_INSTALL_ROOT}" ||
+    pre_activation_manager_install_root_is_valid "${STAGED_INSTALL_ROOT}" ||
     return 1
-  fi
-  create_legacy_lock_bridge "${STAGED_INSTALL_ROOT}" || return 1
   staged_install_root_identity_matches \
     "${STAGED_INSTALL_ROOT}" "${device}" "${inode}" || return 1
 }

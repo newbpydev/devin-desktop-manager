@@ -1656,6 +1656,28 @@ EOF
   [ -f "${backup}/snapshot" ]
 }
 
+@test "restore preserves a pre-existing PID-shaped path" {
+  local destination="${BATS_TEST_TMPDIR}/live-file"
+  local backup="${BATS_TEST_TMPDIR}/devin-desktop-manager.restore-test"
+
+  mkdir -p "${backup}"
+  printf 'original\n' >"${destination}"
+  printf 'snapshot\n' >"${backup}/snapshot"
+
+  run env HOME="${TEST_HOME}" PATH="${MOCK_BIN}:${PATH}" bash -c '
+    source "$1"
+    TRANSACTION_BACKUP="$2"
+    collision="$3.restore.$$"
+    mkdir -p "${collision}"
+    printf "user data\n" >"${collision}/keep.txt"
+    restore_path "$3" snapshot
+    [[ "$(cat "$3")" == "snapshot" &&
+      "$(cat "${collision}/keep.txt")" == "user data" ]]
+  ' _ "${MANAGER}" "${backup}" "${destination}"
+
+  [ "${status}" -eq 0 ]
+}
+
 @test "transaction recovery rejects a slash-containing staged install path" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
   local staged_root="${install_root}.uninstall-123"
@@ -1824,20 +1846,46 @@ EOF
       read -r device inode < <(stat -c "%d %i" -- "${staged_root}")
 
       uninstall_temp="${UNINSTALL_CLEANUP_RECORD}.new.$$"
-      printf "user data\n" >"${uninstall_temp}"
+      jq -n \
+        --arg manager_id "${MANAGER_ID}" \
+        --argjson schema_version "${OWNERSHIP_SCHEMA_VERSION}" \
+        --arg staged_root "${INSTALL_ROOT}.uninstall-999" \
+        --arg device "${device}" \
+        --arg inode "${inode}" "{
+          schemaVersion: \$schema_version,
+          managerId: \$manager_id,
+          stagedInstallRoot: \$staged_root,
+          device: \$device,
+          inode: \$inode
+        }" >"${uninstall_temp}"
       ! write_uninstall_cleanup_record "${staged_root}"
-      [[ -f "${uninstall_temp}" &&
+      [[ -s "${uninstall_temp}" &&
         ! -e "${UNINSTALL_CLEANUP_RECORD}" ]]
       rm -f -- "${uninstall_temp}"
 
       prune_temp="${RELEASE_PRUNE_CLEANUP_RECORD}.new.$$"
-      printf "user data\n" >"${prune_temp}"
       metadata_sha256="$(
         printf "metadata" | sha256sum | awk "{print \$1}"
       )"
+      jq -n \
+        --arg manager_id "${MANAGER_ID}" \
+        --argjson schema_version "${OWNERSHIP_SCHEMA_VERSION}" \
+        --arg release_name "stale-release" \
+        --arg quarantine_name ".release-prune-other-1-2" \
+        --arg device "${device}" \
+        --arg inode "${inode}" \
+        --arg metadata_sha256 "${metadata_sha256}" "{
+          schemaVersion: \$schema_version,
+          managerId: \$manager_id,
+          releaseName: \$release_name,
+          quarantineName: \$quarantine_name,
+          device: \$device,
+          inode: \$inode,
+          metadataSha256: \$metadata_sha256
+        }" >"${prune_temp}"
       ! write_release_prune_cleanup_record \
         "stale-release" "${device}" "${inode}" "${metadata_sha256}"
-      [[ -f "${prune_temp}" &&
+      [[ -s "${prune_temp}" &&
         ! -e "${RELEASE_PRUNE_CLEANUP_RECORD}" ]]
     ' _ "${MANAGER}"
 
@@ -3054,7 +3102,7 @@ EOF
   [ -L "${manager_command}" ]
 }
 
-@test "staged uninstall keeps the public legacy lock held until rollback" {
+@test "staged uninstall keeps the public legacy lock continuously held until rollback" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
 
   install_fixture
@@ -3067,10 +3115,22 @@ EOF
       source "$1"
       acquire_lock
       backup_transaction
+      saw_staging_move=false
+      mv() {
+        command mv "$@" || return
+        public_lock="${INSTALL_ROOT}/.manager.lock"
+        [[ -f "${public_lock}" && ! -L "${public_lock}" ]] || return 1
+        if bash -c '\''exec 8>&-; flock -n "$1" true'\'' _ "${public_lock}"; then
+          return 1
+        fi
+        saw_staging_move=true
+      }
       stage_install_root_for_uninstall
+      unset -f mv
       public_lock="${INSTALL_ROOT}/.manager.lock"
       staged_lock="${STAGED_INSTALL_ROOT}/.manager.lock"
-      [[ -f "${public_lock}" && ! -L "${public_lock}" &&
+      [[ "${saw_staging_move}" == "true" &&
+        -f "${public_lock}" && ! -L "${public_lock}" &&
         "${public_lock}" -ef "${staged_lock}" ]]
       if bash -c '\''exec 8>&-; flock -n "$1" true'\'' _ "${public_lock}"; then
         exit 1
@@ -3101,8 +3161,46 @@ EOF
         exit 1
       fi
       unset -f ln
-      [[ ! -e "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" &&
-        -d "${STAGED_INSTALL_ROOT}" ]]
+      [[ -L "${CURRENT_LINK}" &&
+        ! -e "${STAGED_INSTALL_ROOT}" && ! -L "${STAGED_INSTALL_ROOT}" ]]
+      restore_transaction
+      [[ -L "${CURRENT_LINK}" && ! -e "${STAGED_INSTALL_ROOT}" ]]
+    ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
+  [ -L "${install_root}/current" ]
+}
+
+@test "partial locked-root staging restores without exposing another lock inode" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+
+  install_fixture
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      acquire_lock
+      backup_transaction
+      mv() {
+        if [[ "$*" == *"${INSTALL_ROOT}/releases"* ]]; then
+          return 1
+        fi
+        command mv "$@"
+      }
+      if stage_install_root_for_uninstall; then
+        exit 1
+      fi
+      unset -f mv
+      public_lock="${INSTALL_ROOT}/.manager.lock"
+      staged_lock="${STAGED_INSTALL_ROOT}/.manager.lock"
+      [[ -f "${public_lock}" && -f "${staged_lock}" &&
+        "${public_lock}" -ef "${staged_lock}" ]]
+      if bash -c '\''exec 8>&-; flock -n "$1" true'\'' _ "${public_lock}"; then
+        exit 1
+      fi
       restore_transaction
       [[ -L "${CURRENT_LINK}" && ! -e "${STAGED_INSTALL_ROOT}" ]]
     ' _ "${MANAGER}"
