@@ -949,6 +949,50 @@ JSON
   [ ! -e "${state_temporary}" ]
 }
 
+@test "migration rejects a post-link layout after manager defaults were claimed" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+
+  install_fixture
+  downgrade_to_public_0_1_layout
+  rm -f -- \
+    "${TEST_HOME}/.local/state/devin-desktop-manager/state.json" \
+    "${TEST_HOME}/.local/bin/devin-desktop" \
+    "${TEST_HOME}/.local/share/applications/devin-desktop-manager.desktop" \
+    "${TEST_HOME}/.local/share/applications/devin-desktop-manager-url-handler.desktop" \
+    "${TEST_HOME}/.local/share/icons/hicolor/512x512/apps/devin-desktop-manager.png" \
+    "${TEST_HOME}/.local/share/mime/packages/devin-desktop-manager-workspace.xml"
+
+  run install_fixture
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"post-link installation could not be safely verified"* ]]
+  [ ! -e "${install_root}/.devin-desktop-manager-owned" ]
+  [ "$(query_default x-scheme-handler/devin)" = \
+    "devin-desktop-manager-url-handler.desktop" ]
+}
+
+@test "uninstall removes verified post-link assets without published state" {
+  local icon="${TEST_HOME}/.local/share/icons/hicolor/512x512/apps/devin-desktop-manager.png"
+  local mime="${TEST_HOME}/.local/share/mime/packages/devin-desktop-manager-workspace.xml"
+
+  install_fixture
+  downgrade_to_public_0_1_layout
+  rm -f -- \
+    "${TEST_HOME}/.local/state/devin-desktop-manager/state.json" \
+    "${TEST_HOME}/.local/bin/devin-desktop" \
+    "${TEST_HOME}/.local/share/applications/devin-desktop-manager.desktop" \
+    "${TEST_HOME}/.local/share/applications/devin-desktop-manager-url-handler.desktop" \
+    "${DEFAULTS_FILE}"
+  [ -f "${icon}" ]
+  [ -f "${mime}" ]
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [ ! -e "${icon}" ]
+  [ ! -e "${mime}" ]
+}
+
 @test "migration rejects a symlinked manager temporary without changing its target" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
   local external="${BATS_TEST_TMPDIR}/external-temporary"
@@ -1669,6 +1713,40 @@ EOF
   grep -Fqx \
     'x-scheme-handler/devin=user-after-crash.desktop;' "${DEFAULTS_FILE}"
   [ -d "${journal}" ]
+}
+
+@test "association batches record each result before the next rewrite" {
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      acquire_lock
+      backup_transaction
+      calls=0
+      register_one_association() {
+        calls=$((calls + 1))
+        if ((calls == 1)); then
+          mkdir -p "${CONFIG_HOME}"
+          printf "manager result\n" >"${CONFIG_HOME}/mimeapps.list"
+          return 0
+        fi
+        result="${TRANSACTION_BACKUP}/results/config-mimeapps.sha256"
+        [[ -f "${result}" && ! -L "${result}" ]]
+        [[ "$(cat "${result}")" == \
+          "$(sha256sum "${CONFIG_HOME}/mimeapps.list" | awk '\''{print $1}'\'')" ]]
+        : >"${TRANSACTION_BACKUP}/proof-seen-before-second-rewrite"
+        return 1
+      }
+      if register_associations false; then
+        exit 1
+      fi
+      [[ -f "${TRANSACTION_BACKUP}/proof-seen-before-second-rewrite" ]]
+    ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
 }
 
 @test "transaction recovery takes an existing public manager lock" {
@@ -2765,6 +2843,29 @@ EOF
   [[ "${output}" == \
     *"XDG_STATE_HOME must not be a manager root removed by uninstall or a directory beneath it"* ]]
   [ ! -e "${TEST_HOME}/.local/opt/devin-desktop" ]
+}
+
+@test "XDG homes beneath removable state artifacts are rejected" {
+  local state_home="${TEST_HOME}/.local/state"
+  local artifact_path
+
+  for artifact_path in \
+    "${state_home}/devin-desktop-manager.lock/data" \
+    "${state_home}/devin-desktop-manager.transaction/data" \
+    "${state_home}/devin-desktop-manager.transaction.discard/data" \
+    "${state_home}/devin-desktop-manager.cleanup/data" \
+    "${state_home}/devin-desktop-manager.cleanup.proof/data" \
+    "${state_home}/devin-desktop-manager.prune/data" \
+    "${state_home}/devin-desktop-manager.prune.proof/data"; do
+    run env HOME="${TEST_HOME}" XDG_STATE_HOME="${state_home}" \
+      XDG_DATA_HOME="${artifact_path}" PATH="${MOCK_BIN}:${PATH}" \
+      "${MANAGER}" update
+
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == \
+      *"XDG_DATA_HOME must not be a removable manager state artifact or a directory beneath it"* ]]
+    [ ! -e "${TEST_HOME}/.local/opt/devin-desktop" ]
+  done
 }
 
 @test "unknown commands fail without creating installation state" {

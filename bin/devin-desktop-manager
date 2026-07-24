@@ -234,7 +234,7 @@ path_is_at_or_below() {
 }
 
 validate_environment() {
-  local xdg_name xdg_path removed_root
+  local xdg_name xdg_path removed_root state_artifact
 
   validate_absolute_directory HOME "${HOME_DIR}"
   validate_absolute_directory XDG_CACHE_HOME \
@@ -259,6 +259,18 @@ validate_environment() {
     for removed_root in "${CACHE_ROOT}" "${STATE_DIR}"; do
       if path_is_at_or_below "${xdg_path}" "${removed_root}"; then
         die "${xdg_name} must not be a manager root removed by uninstall or a directory beneath it"
+      fi
+    done
+    for state_artifact in \
+      "${LOCK_FILE}" \
+      "${TRANSACTION_JOURNAL}" \
+      "${TRANSACTION_DISCARD}" \
+      "${UNINSTALL_CLEANUP_RECORD}" \
+      "${UNINSTALL_CLEANUP_PROOF}" \
+      "${RELEASE_PRUNE_CLEANUP_RECORD}" \
+      "${RELEASE_PRUNE_CLEANUP_PROOF}"; do
+      if path_is_at_or_below "${xdg_path}" "${state_artifact}"; then
+        die "${xdg_name} must not be a removable manager state artifact or a directory beneath it"
       fi
     done
   done
@@ -866,6 +878,23 @@ legacy_post_link_integration_is_recoverable() {
   fi
 }
 
+legacy_post_link_defaults_are_unclaimed() {
+  local mime_type current
+
+  for mime_type in \
+    "${MIME_DEVIN}" \
+    "${MIME_WINDSURF}" \
+    "${MIME_WORKSPACE}"; do
+    current="$(query_default "${mime_type}")" || return 1
+    case "${current}" in
+      "${MAIN_DESKTOP_ID}"|"${URL_DESKTOP_ID}"|\
+        "${LEGACY_MAIN_DESKTOP_ID}"|"${LEGACY_URL_DESKTOP_ID}")
+        return 1
+        ;;
+    esac
+  done
+}
+
 upgrade_legacy_release_metadata() {
   local release_dir="$1"
   local metadata="${release_dir}/release.json"
@@ -1002,7 +1031,8 @@ migrate_legacy_layout_if_needed() {
     if ! legacy_install_root_is_valid ||
       ! legacy_cache_root_is_valid ||
       ! legacy_pre_activation_state_root_is_valid ||
-      ! legacy_post_link_integration_is_recoverable; then
+      ! legacy_post_link_integration_is_recoverable ||
+      ! legacy_post_link_defaults_are_unclaimed; then
       die "public ${LEGACY_MANAGER_VERSION} post-link installation could not be safely verified; refusing ownership migration"
     fi
   elif ! legacy_install_root_is_valid ||
@@ -1950,8 +1980,10 @@ register_associations() {
 
   register_one_association "${MIME_DEVIN}" "${URL_DESKTOP_ID}" "${force}" ||
     return 1
+  record_user_configuration_results || return 1
   register_one_association "${MIME_WINDSURF}" "${URL_DESKTOP_ID}" "${force}" ||
     return 1
+  record_user_configuration_results || return 1
   register_one_association "${MIME_WORKSPACE}" "${MAIN_DESKTOP_ID}" "${force}" ||
     return 1
   record_user_configuration_results
@@ -3411,8 +3443,10 @@ restore_associations() {
 
   restore_one_association "${MIME_DEVIN}" "${URL_DESKTOP_ID}" "${original_devin}" ||
     return 1
+  record_user_configuration_results || return 1
   restore_one_association "${MIME_WINDSURF}" "${URL_DESKTOP_ID}" "${original_windsurf}" ||
     return 1
+  record_user_configuration_results || return 1
   restore_one_association "${MIME_WORKSPACE}" "${MAIN_DESKTOP_ID}" "${original_workspace}" ||
     return 1
   record_user_configuration_results
@@ -3422,6 +3456,7 @@ remove_managed_regular_file() {
   local path="$1"
   local key="$2"
   local marker_allowed="${3:-false}"
+  local release_asset="${4:-}"
 
   [[ -e "${path}" || -L "${path}" ]] || return 0
   if state_is_valid; then
@@ -3432,6 +3467,9 @@ remove_managed_regular_file() {
     fi
   elif [[ "${marker_allowed}" == "true" && -f "${path}" && ! -L "${path}" ]] &&
     grep -qx "${MANAGER_DESKTOP_MARKER}" "${path}"; then
+    rm -f -- "${path}" || return 1
+  elif [[ -n "${release_asset}" ]] &&
+    asset_matches_release "${path}" "${release_asset}"; then
     rm -f -- "${path}" || return 1
   else
     warn "leaving modified or non-manager-owned path in place: ${path}"
@@ -3507,8 +3545,10 @@ perform_uninstall() {
 
   remove_managed_regular_file "${MAIN_DESKTOP}" mainDesktop true || return 1
   remove_managed_regular_file "${URL_DESKTOP}" urlDesktop true || return 1
-  remove_managed_regular_file "${ICON_FILE}" icon false || return 1
-  remove_managed_regular_file "${MIME_FILE}" mime false || return 1
+  remove_managed_regular_file \
+    "${ICON_FILE}" icon false devin-desktop.png || return 1
+  remove_managed_regular_file \
+    "${MIME_FILE}" mime false devin-desktop-workspace.xml || return 1
   remove_legacy_integration || return 1
   refresh_desktop_caches || return 1
   stage_install_root_for_uninstall || return 1
