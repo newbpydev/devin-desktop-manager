@@ -1272,6 +1272,25 @@ EOF
   [[ "${output}" == *"release is missing the terminal launcher"* ]]
 }
 
+@test "an up-to-date update rejects damaged active release metadata" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local current_target current_release temporary
+
+  install_fixture
+  current_target="$(readlink "${install_root}/current")"
+  current_release="${install_root}/${current_target}"
+  temporary="${current_release}/release.json.test"
+  jq '.artifactUrl = "https://example.invalid/foreign.deb"' \
+    "${current_release}/release.json" >"${temporary}"
+  mv -Tf -- "${temporary}" "${current_release}/release.json"
+
+  run install_fixture
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"retained or reused release is invalid"* ]]
+  [ "$(readlink "${install_root}/current")" = "${current_target}" ]
+}
+
 @test "check distinguishes up-to-date and update-available installations" {
   local second="${BATS_TEST_TMPDIR}/second.deb"
   local second_build="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -1409,6 +1428,28 @@ EOF
   [ ! -e "${state_dir}" ]
 }
 
+@test "uninstall cleans a failed first-install release before activation" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+
+  install_fixture
+  rm -f -- \
+    "${install_root}/current" \
+    "${install_root}/previous" \
+    "${TEST_HOME}/.local/bin/devin-desktop" \
+    "${TEST_HOME}/.local/share/applications/devin-desktop-manager.desktop" \
+    "${TEST_HOME}/.local/share/applications/devin-desktop-manager-url-handler.desktop" \
+    "${TEST_HOME}/.local/share/icons/hicolor/512x512/apps/devin-desktop-manager.png" \
+    "${TEST_HOME}/.local/share/mime/packages/devin-desktop-manager-workspace.xml"
+  rm -rf -- \
+    "${TEST_HOME}/.cache/devin-desktop-manager" \
+    "${TEST_HOME}/.local/state/devin-desktop-manager"
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [ ! -e "${install_root}" ]
+}
+
 @test "uninstall preserves a default changed by the user after installation" {
   install_fixture
   env XDG_CONFIG_HOME="${TEST_HOME}/.config" \
@@ -1473,7 +1514,10 @@ EOF
   [[ "${output}" == *"restoring the previous release and desktop state"* ]]
   [ ! -L "${TEST_HOME}/.local/opt/devin-desktop/current" ]
   [ ! -e "${TEST_HOME}/.local/share/applications/devin-desktop-manager.desktop" ]
+  [ ! -e "${TEST_HOME}/.local/share/icons/hicolor/512x512/apps/devin-desktop-manager.png" ]
+  [ ! -e "${TEST_HOME}/.local/share/mime/packages/devin-desktop-manager-workspace.xml" ]
   [ ! -e "${TEST_HOME}/.local/state/devin-desktop-manager/state.json" ]
+  [ ! -e "${TEST_HOME}/.local/state/devin-desktop-manager.transaction" ]
   [ "$(query_default x-scheme-handler/devin)" = "browser.desktop" ]
 }
 
@@ -1676,6 +1720,42 @@ EOF
   [[ "${output}" == *"unfinished transaction recovery failed"* ]]
   [ "$(cat "${mimeapps}")" = "user-created after crash" ]
   [ -d "${journal}" ]
+}
+
+@test "transaction recovery removes a recorded manager MIME file after an absent snapshot" {
+  local mimeapps="${TEST_HOME}/.config/mimeapps.list"
+  local journal="${TEST_HOME}/.local/state/devin-desktop-manager.transaction"
+
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      acquire_lock
+      backup_transaction
+      mkdir -p "$(dirname "${CONFIG_HOME}/mimeapps.list")"
+      printf "manager-created\n" >"${CONFIG_HOME}/mimeapps.list"
+      record_user_configuration_results
+    ' _ "${MANAGER}"
+  [ "${status}" -eq 0 ]
+  [ -d "${journal}" ]
+
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      acquire_lock
+    ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"recovering an unfinished manager transaction"* ]]
+  [ ! -e "${mimeapps}" ]
+  [ ! -e "${journal}" ]
 }
 
 @test "transaction recovery preserves user defaults edited after a crash" {

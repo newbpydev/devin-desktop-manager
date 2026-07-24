@@ -2337,6 +2337,15 @@ restore_path() {
       return 1
     }
   elif [[ -e "${destination}" || -L "${destination}" ]]; then
+    case "${name}" in
+      config-mimeapps|applications-mimeapps|data-mimeapps)
+        if durable_user_configuration_matches_recorded_result \
+          "${destination}" "${name}"; then
+          rm -rf -- "${destination}" || return 1
+          return 0
+        fi
+        ;;
+    esac
     transaction_created_path_is_manager_owned "${destination}" "${name}" ||
       return 1
     rm -rf -- "${destination}" || return 1
@@ -2422,6 +2431,34 @@ empty_manager_install_root_is_valid() {
     ! -e "${root}/previous" && ! -L "${root}/previous" ]]
 }
 
+pre_activation_manager_install_root_is_valid() {
+  local root="$1"
+  local releases="${root}/releases"
+  local legacy_lock="${root}/.manager.lock"
+  local entry name release_dir
+  local saw_release=false
+
+  owned_root_is_valid "${root}" || return 1
+  [[ -d "${releases}" && ! -L "${releases}" &&
+    -f "${legacy_lock}" && ! -L "${legacy_lock}" ]] || return 1
+  directory_can_be_listed "${root}" || return 1
+  while IFS= read -r -d '' entry; do
+    name="$(basename "${entry}")"
+    case "${name}" in
+      "${OWNERSHIP_SENTINEL_NAME}"|releases|.manager.lock) ;;
+      *) return 1 ;;
+    esac
+  done < <(find "${root}" -mindepth 1 -maxdepth 1 -print0)
+  [[ ! -e "${root}/current" && ! -L "${root}/current" &&
+    ! -e "${root}/previous" && ! -L "${root}/previous" ]] || return 1
+  directory_can_be_listed "${releases}" || return 1
+  while IFS= read -r -d '' release_dir; do
+    release_directory_is_owned "${release_dir}" || return 1
+    saw_release=true
+  done < <(find "${releases}" -mindepth 1 -maxdepth 1 -print0)
+  [[ "${saw_release}" == "true" ]]
+}
+
 restore_staged_install_root() {
   local recorded="" device="" inode=""
   local record="${TRANSACTION_BACKUP}/staged-install-root"
@@ -2446,7 +2483,8 @@ restore_staged_install_root() {
       [[ "$(stat -c '%d %i' -- "${INSTALL_ROOT}" 2>/dev/null)" == \
         "${device} ${inode}" ]] || return 1
       manager_install_root_is_valid "${INSTALL_ROOT}" ||
-        empty_manager_install_root_is_valid "${INSTALL_ROOT}" || return 1
+        empty_manager_install_root_is_valid "${INSTALL_ROOT}" ||
+        pre_activation_manager_install_root_is_valid "${INSTALL_ROOT}" || return 1
       return 0
     fi
     [[ -d "${recorded}" && ! -L "${recorded}" ]] || return 1
@@ -2454,7 +2492,8 @@ restore_staged_install_root() {
     staged_install_root_identity_matches \
       "${recorded}" "${device}" "${inode}" || return 1
     manager_install_root_is_valid "${recorded}" ||
-      empty_manager_install_root_is_valid "${recorded}" || return 1
+      empty_manager_install_root_is_valid "${recorded}" ||
+      pre_activation_manager_install_root_is_valid "${recorded}" || return 1
     [[ ! -e "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] || return 1
     mv -T -- "${recorded}" "${INSTALL_ROOT}" || return 1
   fi
@@ -2470,21 +2509,21 @@ restore_transaction() {
     TRANSACTION_RESTORING=false
     return 1
   fi
+  restore_path "${ICON_FILE}" icon || failed=1
+  restore_path "${MIME_FILE}" mime || failed=1
+  restore_path "${LEGACY_ICON_FILE}" legacy-icon || failed=1
+  restore_path "${LEGACY_MIME_FILE}" legacy-mime || failed=1
   restore_path "${CURRENT_LINK}" current || failed=1
   restore_path "${PREVIOUS_LINK}" previous || failed=1
   restore_path "${APP_COMMAND}" app-command || failed=1
   restore_path "${MANAGER_COMMAND}" manager-command || failed=1
   restore_path "${MAIN_DESKTOP}" main-desktop || failed=1
   restore_path "${URL_DESKTOP}" url-desktop || failed=1
-  restore_path "${ICON_FILE}" icon || failed=1
-  restore_path "${MIME_FILE}" mime || failed=1
   restore_path "${STATE_DIR}/${OWNERSHIP_SENTINEL_NAME}" state-owner || failed=1
   restore_path "${CACHE_ROOT}/${OWNERSHIP_SENTINEL_NAME}" cache-owner || failed=1
   restore_path "${STATE_FILE}" state || failed=1
   restore_path "${LEGACY_MAIN_DESKTOP}" legacy-main || failed=1
   restore_path "${LEGACY_URL_DESKTOP}" legacy-url || failed=1
-  restore_path "${LEGACY_ICON_FILE}" legacy-icon || failed=1
-  restore_path "${LEGACY_MIME_FILE}" legacy-mime || failed=1
   restore_path "${CONFIG_HOME}/mimeapps.list" config-mimeapps || failed=1
   restore_path "${DATA_HOME}/applications/mimeapps.list" applications-mimeapps ||
     failed=1
@@ -3022,6 +3061,25 @@ validate_release_inventory_ownership() {
   done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -print0)
 }
 
+validate_retained_or_reused_release() {
+  local release_dir="$1"
+
+  [[ -n "${release_dir}" ]] || return 0
+  release_directory_is_owned "${release_dir}" ||
+    die "retained or reused release is invalid: ${release_dir}"
+}
+
+validate_linked_releases() {
+  local current_dir previous_dir
+
+  current_dir="$(release_path "${CURRENT_LINK}" 2>/dev/null || true)"
+  previous_dir="$(release_path "${PREVIOUS_LINK}" 2>/dev/null || true)"
+  validate_retained_or_reused_release "${current_dir}"
+  if [[ "${previous_dir}" != "${current_dir}" ]]; then
+    validate_retained_or_reused_release "${previous_dir}"
+  fi
+}
+
 validate_releases_prunable_after_activation() {
   local destination="$1"
   local future_current future_previous release_dir relative
@@ -3217,13 +3275,17 @@ command_update() {
       "${destination}" \
       "$(jq -r '.version' <<<"${manifest}")" \
       "$(jq -r '.productVersion' <<<"${manifest}")"
+    validate_linked_releases
     activate_with_integration "${destination}"
     command_status
     return
   fi
 
   reject_manifest_downgrade "${manifest}"
+  validate_retained_or_reused_release \
+    "$(release_path "${CURRENT_LINK}" 2>/dev/null || true)"
   destination="$(download_release "${manifest}")"
+  validate_retained_or_reused_release "${destination}"
   validate_releases_prunable_after_activation "${destination}"
   activate_with_integration "${destination}"
 
@@ -3504,7 +3566,8 @@ stage_install_root_for_uninstall() {
   [[ ! -e "${STAGED_INSTALL_ROOT}" && ! -L "${STAGED_INSTALL_ROOT}" ]] ||
     return 1
   manager_install_root_is_valid "${INSTALL_ROOT}" ||
-    empty_manager_install_root_is_valid "${INSTALL_ROOT}" || return 1
+    empty_manager_install_root_is_valid "${INSTALL_ROOT}" ||
+    pre_activation_manager_install_root_is_valid "${INSTALL_ROOT}" || return 1
   identity="$(stat -c '%d %i' -- "${INSTALL_ROOT}" 2>/dev/null)" || return 1
   [[ "${identity}" =~ ^[0-9]+\ [0-9]+$ ]] || return 1
   read -r device inode <<<"${identity}"
