@@ -127,8 +127,7 @@ cleanup() {
   if [[ -n "${RESTORE_TEMP_ROOT}" ]]; then
     case "$(basename "${RESTORE_TEMP_ROOT}")" in
       .devin-desktop-manager-restore.*)
-        if [[ -d "${RESTORE_TEMP_ROOT}" && ! -L "${RESTORE_TEMP_ROOT}" &&
-          "$(stat -c '%u' -- "${RESTORE_TEMP_ROOT}" 2>/dev/null)" == "${EUID}" ]]; then
+        if [[ -d "${RESTORE_TEMP_ROOT}" && ! -L "${RESTORE_TEMP_ROOT}" && "$(stat -c '%u' -- "${RESTORE_TEMP_ROOT}" 2>/dev/null)" == "${EUID}" ]]; then
           rm -rf -- "${RESTORE_TEMP_ROOT}"
         else
           warn "refusing to clean unsafe restore temporary: ${RESTORE_TEMP_ROOT}"
@@ -2941,13 +2940,9 @@ write_uninstall_cleanup_record() {
     --argjson schema_version "${OWNERSHIP_SCHEMA_VERSION}" \
     --arg staged_root "${staged_root}" \
     --arg device "${device}" \
-    --arg inode "${inode}" '{
-      schemaVersion: $schema_version,
-      managerId: $manager_id,
-      stagedInstallRoot: $staged_root,
-      device: $device,
-      inode: $inode
-    }' >"${temporary}" ||
+    --arg inode "${inode}" \
+    '{schemaVersion: $schema_version, managerId: $manager_id, stagedInstallRoot: $staged_root, device: $device, inode: $inode}' \
+    >"${temporary}" ||
     ! chmod 0600 "${temporary}" ||
     ! mv -Tf -- "${temporary}" "${UNINSTALL_CLEANUP_RECORD}"; then
     rm -f -- "${temporary}" || true
@@ -3176,15 +3171,11 @@ write_release_prune_cleanup_record() {
     --arg quarantine_name "${quarantine_name}" \
     --arg device "${device}" \
     --arg inode "${inode}" \
-    --arg metadata_sha256 "${metadata_sha256}" '{
-      schemaVersion: $schema_version,
-      managerId: $manager_id,
-      releaseName: $release_name,
-      quarantineName: $quarantine_name,
-      device: $device,
-      inode: $inode,
-      metadataSha256: $metadata_sha256
-    }' >"${temporary}" ||
+    --arg metadata_sha256 "${metadata_sha256}" \
+    '{schemaVersion: $schema_version, managerId: $manager_id,
+      releaseName: $release_name, quarantineName: $quarantine_name,
+      device: $device, inode: $inode, metadataSha256: $metadata_sha256}' \
+    >"${temporary}" ||
     ! chmod 0600 "${temporary}" ||
     ! mv -Tf -- "${temporary}" "${RELEASE_PRUNE_CLEANUP_RECORD}"; then
     rm -f -- "${temporary}" || true
@@ -4063,11 +4054,9 @@ stage_install_root_for_uninstall() {
   if ! jq -n \
     --arg staged_root "${STAGED_INSTALL_ROOT}" \
     --arg device "${device}" \
-    --arg inode "${inode}" '{
-      stagedInstallRoot: $staged_root,
-      device: $device,
-      inode: $inode
-    }' >"${temporary}" ||
+    --arg inode "${inode}" \
+    '{stagedInstallRoot: $staged_root, device: $device, inode: $inode}' \
+    >"${temporary}" ||
     ! chmod 0600 "${temporary}" ||
     ! mv -Tf -- "${temporary}" "${record}"; then
     rm -f -- "${temporary}" || true

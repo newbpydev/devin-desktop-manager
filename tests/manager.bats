@@ -1654,6 +1654,18 @@ EOF
   [ "${status}" -ne 0 ]
   [ "$(cat "${destination}")" = "original" ]
   [ -f "${backup}/snapshot" ]
+
+  run env HOME="${TEST_HOME}" PATH="${MOCK_BIN}:${PATH}" \
+    MOCK_MV_FAIL_PATH="${destination}" bash -c '
+      source "$1"
+      TRANSACTION_BACKUP="$2"
+      restore_path "$3" snapshot
+    ' _ "${MANAGER}" "${backup}" "${destination}"
+
+  [ "${status}" -ne 0 ]
+  [ "$(cat "${destination}")" = "original" ]
+  [ -z "$(find "$(dirname "${destination}")" -maxdepth 1 \
+    -name '.devin-desktop-manager-restore.*' -print -quit)" ]
 }
 
 @test "restore preserves a pre-existing PID-shaped path" {
@@ -1674,6 +1686,43 @@ EOF
     [[ "$(cat "$3")" == "snapshot" &&
       "$(cat "${collision}/keep.txt")" == "user data" ]]
   ' _ "${MANAGER}" "${backup}" "${destination}"
+
+  [ "${status}" -eq 0 ]
+}
+
+@test "restore cleanup removes only its tracked owned temporary" {
+  run env HOME="${TEST_HOME}" PATH="${MOCK_BIN}:${PATH}" bash -c '
+    source "$1"
+    mkdir -p "${STATE_HOME}"
+    proof_temp="${UNINSTALL_CLEANUP_PROOF}.new.$$"
+    CLEANUP_PROOF_TEMP="${proof_temp}"
+    printf "proof\n" >"${CLEANUP_PROOF_TEMP}"
+    cleanup
+    [[ ! -e "${proof_temp}" && -z "${CLEANUP_PROOF_TEMP}" ]]
+
+    owned="${TEST_HOME}/.devin-desktop-manager-restore.owned"
+    mkdir -p "${owned}"
+    printf "temporary\n" >"${owned}/payload"
+    RESTORE_TEMP_ROOT="${owned}"
+    cleanup
+    [[ ! -e "${owned}" && -z "${RESTORE_TEMP_ROOT}" ]]
+
+    target="${TEST_HOME}/user-data"
+    unsafe="${TEST_HOME}/.devin-desktop-manager-restore.unsafe"
+    mkdir -p "${target}"
+    printf "keep\n" >"${target}/keep.txt"
+    ln -s -- "${target}" "${unsafe}"
+    RESTORE_TEMP_ROOT="${unsafe}"
+    cleanup
+    [[ -L "${unsafe}" && "$(cat "${target}/keep.txt")" == "keep" &&
+      -z "${RESTORE_TEMP_ROOT}" ]]
+
+    unexpected="${TEST_HOME}/unrelated-restore-path"
+    mkdir -p "${unexpected}"
+    RESTORE_TEMP_ROOT="${unexpected}"
+    cleanup
+    [[ -d "${unexpected}" && -z "${RESTORE_TEMP_ROOT}" ]]
+  ' _ "${MANAGER}"
 
   [ "${status}" -eq 0 ]
 }
@@ -3209,6 +3258,39 @@ EOF
   [ -L "${install_root}/current" ]
 }
 
+@test "recovery discards only lock staging shells created before record publication" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+
+  install_fixture
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      acquire_lock
+      backup_transaction
+
+      STAGED_INSTALL_ROOT="${INSTALL_ROOT}.uninstall-$$"
+      mkdir -- "${STAGED_INSTALL_ROOT}"
+      restore_staged_install_root
+      [[ ! -e "${STAGED_INSTALL_ROOT}" ]]
+
+      STAGED_INSTALL_ROOT="${INSTALL_ROOT}.uninstall-$$"
+      create_legacy_lock_bridge "${STAGED_INSTALL_ROOT}"
+      [[ "${INSTALL_ROOT}/.manager.lock" -ef \
+        "${STAGED_INSTALL_ROOT}/.manager.lock" ]]
+      restore_staged_install_root
+      [[ ! -e "${STAGED_INSTALL_ROOT}" &&
+        -L "${CURRENT_LINK}" &&
+        "${INSTALL_ROOT}/.manager.lock" -ef /proc/self/fd/8 ]]
+    ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
+  [ -L "${install_root}/current" ]
+}
+
 @test "uninstall recovers verified current-manager temporaries before validation" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
   local current_target release_name staging integration
@@ -3311,6 +3393,40 @@ EOF
   [ "${status}" -eq 0 ]
   [[ "${output}" == *"recovering an unfinished manager transaction"* ]]
   [ ! -e "${journal}" ]
+  [ -L "${install_root}/current" ]
+}
+
+@test "transaction recovery remains compatible with a whole-root staged journal" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+
+  install_fixture
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      acquire_lock
+      backup_transaction
+      staged_root="${INSTALL_ROOT}.uninstall-123"
+      mv -T -- "${INSTALL_ROOT}" "${staged_root}"
+      read -r device inode < <(stat -c "%d %i" -- "${staged_root}")
+      jq -n \
+        --arg staged_root "${staged_root}" \
+        --arg device "${device}" \
+        --arg inode "${inode}" "{
+          stagedInstallRoot: \$staged_root,
+          device: \$device,
+          inode: \$inode
+        }" >"${TRANSACTION_BACKUP}/staged-install-root"
+      restore_staged_install_root
+      [[ -L "${CURRENT_LINK}" &&
+        ! -e "${staged_root}" &&
+        "${INSTALL_ROOT}/.manager.lock" -ef /proc/self/fd/8 ]]
+    ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
   [ -L "${install_root}/current" ]
 }
 
