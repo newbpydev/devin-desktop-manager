@@ -1310,6 +1310,18 @@ EOF
   [ "$(readlink "${install_root}/previous")" = "../other" ]
 }
 
+@test "linked release validation rejects a malformed current link" {
+  run env HOME="${TEST_HOME}" bash -c '
+    source "$1"
+    mkdir -p "${RELEASES_DIR}"
+    ln -s "../other" "${CURRENT_LINK}"
+    validate_linked_releases
+  ' _ "${MANAGER}"
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"current release link is invalid"* ]]
+}
+
 @test "check distinguishes up-to-date and update-available installations" {
   local second="${BATS_TEST_TMPDIR}/second.deb"
   local second_build="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -1905,6 +1917,17 @@ EOF
     ' _ "${MANAGER}"
 
   [ "${status}" -eq 0 ]
+}
+
+@test "configuration result recording rejects an unsupported path" {
+  run env HOME="${TEST_HOME}" XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    bash -c '
+      source "$1"
+      TRANSACTION_BACKUP="${STATE_HOME}/transaction"
+      record_user_configuration_path_result "${HOME_DIR}/unsupported"
+    ' _ "${MANAGER}"
+
+  [ "${status}" -ne 0 ]
 }
 
 @test "MIME result publication preserves the prior proof when replacement fails" {
