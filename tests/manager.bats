@@ -691,6 +691,20 @@ JSON
   [ "${status}" -eq 0 ]
 }
 
+@test "owned installations keep taking the public manager lock" {
+  local legacy_lock="${TEST_HOME}/.local/opt/devin-desktop/.manager.lock"
+  local ready="${BATS_TEST_TMPDIR}/owned-legacy-lock.ready"
+
+  install_fixture
+  start_lock_holder "${legacy_lock}" "${ready}"
+
+  run install_fixture
+  stop_lock_holder
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"another Devin Desktop manager operation is running"* ]]
+}
+
 @test "migration rejects a near-miss legacy layout without claiming it" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
   local desktop="${TEST_HOME}/.local/share/applications/devin-desktop-manager.desktop"
@@ -923,8 +937,6 @@ JSON
     "${TEST_HOME}/.local/state/devin-desktop-manager/state.json" \
     "${TEST_HOME}/.local/share/applications/devin-desktop-manager.desktop" \
     "${TEST_HOME}/.local/share/applications/devin-desktop-manager-url-handler.desktop" \
-    "${TEST_HOME}/.local/share/icons/hicolor/512x512/apps/devin-desktop-manager.png" \
-    "${TEST_HOME}/.local/share/mime/packages/devin-desktop-manager-workspace.xml" \
     "${DEFAULTS_FILE}"
   printf 'partial state\n' >"${state_temporary}"
 
@@ -1622,6 +1634,43 @@ EOF
   [ -d "${journal}" ]
 }
 
+@test "transaction recovery preserves user defaults edited after a crash" {
+  local journal="${TEST_HOME}/.local/state/devin-desktop-manager.transaction"
+
+  seed_defaults
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      acquire_lock
+      backup_transaction
+    ' _ "${MANAGER}"
+  [ "${status}" -eq 0 ]
+  [ -d "${journal}" ]
+
+  printf '[Default Applications]\nx-scheme-handler/devin=user-after-crash.desktop;\n' \
+    >"${DEFAULTS_FILE}"
+
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      acquire_lock
+    ' _ "${MANAGER}"
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"unfinished transaction recovery failed"* ]]
+  grep -Fqx \
+    'x-scheme-handler/devin=user-after-crash.desktop;' "${DEFAULTS_FILE}"
+  [ -d "${journal}" ]
+}
+
 @test "transaction recovery takes an existing public manager lock" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
   local journal="${TEST_HOME}/.local/state/devin-desktop-manager.transaction"
@@ -2254,13 +2303,13 @@ EOF
   source_dir="${install_root}/$(readlink "${install_root}/current")"
   stale_dir="${install_root}/releases/running-stale-release"
   cp -a -- "${source_dir}" "${stale_dir}"
-  cp -- /bin/sleep "${stale_dir}/app/devin-desktop"
-  chmod 0755 "${stale_dir}/app/devin-desktop"
+  cp -- /bin/sleep "${stale_dir}/app/bin/devin-desktop"
+  chmod 0755 "${stale_dir}/app/bin/devin-desktop"
   quarantine_dir="$(prune_quarantine_path "${stale_dir}")"
   record_prune_intent_for_release "${stale_dir}"
   mv -T -- "${stale_dir}" "${quarantine_dir}"
 
-  "${quarantine_dir}/app/devin-desktop" 30 &
+  "${quarantine_dir}/app/bin/devin-desktop" 30 &
   running_pid=$!
   sleep 0.1
   run manager_env update
@@ -2285,8 +2334,8 @@ EOF
   staged_root="$(find "${TEST_HOME}/.local/opt" -maxdepth 1 \
     -type d -name 'devin-desktop.uninstall-*' -print -quit)"
   [ -n "${staged_root}" ]
-  staged_app="$(find "${staged_root}/releases" -mindepth 3 -maxdepth 3 \
-    -path '*/app/devin-desktop' -type f -print -quit)"
+  staged_app="$(find "${staged_root}/releases" -mindepth 4 -maxdepth 4 \
+    -path '*/app/bin/devin-desktop' -type f -print -quit)"
   [ -n "${staged_app}" ]
   cp -- /bin/sleep "${staged_app}"
   chmod 0755 "${staged_app}"

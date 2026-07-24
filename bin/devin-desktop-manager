@@ -77,6 +77,7 @@ TRANSACTION_BACKUP=""
 STAGED_INSTALL_ROOT=""
 TRANSACTION_RESTORING=false
 TRANSACTION_DISCARDING=false
+TRANSACTION_DURABLE_RECOVERY=false
 LEGACY_LOCK_HELD=false
 CLEANUP_PROOF_TEMP=""
 
@@ -1101,7 +1102,17 @@ acquire_legacy_lock_if_needed() {
     mkdir -- "${INSTALL_ROOT}" 2>/dev/null || true
   fi
   [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] || return 0
-  [[ ! -e "${sentinel}" && ! -L "${sentinel}" ]] || return 0
+  if [[ -e "${sentinel}" || -L "${sentinel}" ]]; then
+    owned_root_is_valid "${INSTALL_ROOT}" || return 0
+    if [[ ! -e "${legacy_lock}" && ! -L "${legacy_lock}" ]]; then
+      if ! (set -o noclobber; : >"${legacy_lock}") 2>/dev/null; then
+        [[ -e "${legacy_lock}" || -L "${legacy_lock}" ]] ||
+          die "could not create the public manager lock safely: ${legacy_lock}"
+      fi
+    fi
+    acquire_existing_legacy_lock "${legacy_lock}"
+    return 0
+  fi
   if [[ ! -e "${legacy_lock}" && ! -L "${legacy_lock}" ]]; then
     directory_is_empty "${INSTALL_ROOT}" || return 0
     if ! (set -o noclobber; : >"${legacy_lock}") 2>/dev/null; then
@@ -1191,8 +1202,11 @@ app_is_running() {
     executable="$(readlink "${process_path}/exe" 2>/dev/null || true)"
     case "${executable}" in
       "${RELEASES_DIR}"/*/app/devin-desktop|\
+        "${RELEASES_DIR}"/*/app/bin/devin-desktop|\
         "${INSTALL_ROOT}"/.release-prune-*/app/devin-desktop|\
-        "${INSTALL_ROOT}".uninstall-*/releases/*/app/devin-desktop) return 0 ;;
+        "${INSTALL_ROOT}"/.release-prune-*/app/bin/devin-desktop|\
+        "${INSTALL_ROOT}".uninstall-*/releases/*/app/devin-desktop|\
+        "${INSTALL_ROOT}".uninstall-*/releases/*/app/bin/devin-desktop) return 0 ;;
     esac
   done
 
@@ -1702,6 +1716,7 @@ ensure_regular_path_manageable() {
   local path="$1"
   local key="$2"
   local marker_allowed="${3:-false}"
+  local release_asset="${4:-}"
 
   [[ -e "${path}" || -L "${path}" ]] || return 0
   [[ -f "${path}" && ! -L "${path}" ]] ||
@@ -1714,6 +1729,10 @@ ensure_regular_path_manageable() {
   fi
   if [[ "${marker_allowed}" == "true" ]] &&
     grep -qx "${MANAGER_DESKTOP_MARKER}" "${path}"; then
+    return 0
+  fi
+  if [[ -n "${release_asset}" ]] &&
+    asset_matches_release "${path}" "${release_asset}"; then
     return 0
   fi
 
@@ -1733,8 +1752,10 @@ ensure_integration_manageable() {
   ensure_app_command_manageable
   ensure_regular_path_manageable "${MAIN_DESKTOP}" mainDesktop true
   ensure_regular_path_manageable "${URL_DESKTOP}" urlDesktop true
-  ensure_regular_path_manageable "${ICON_FILE}" icon false
-  ensure_regular_path_manageable "${MIME_FILE}" mime false
+  ensure_regular_path_manageable \
+    "${ICON_FILE}" icon false devin-desktop.png
+  ensure_regular_path_manageable \
+    "${MIME_FILE}" mime false devin-desktop-workspace.xml
 }
 
 write_desktop_entries() {
@@ -1931,7 +1952,9 @@ register_associations() {
     return 1
   register_one_association "${MIME_WINDSURF}" "${URL_DESKTOP_ID}" "${force}" ||
     return 1
-  register_one_association "${MIME_WORKSPACE}" "${MAIN_DESKTOP_ID}" "${force}"
+  register_one_association "${MIME_WORKSPACE}" "${MAIN_DESKTOP_ID}" "${force}" ||
+    return 1
+  record_user_configuration_results
 }
 
 legacy_desktop_owned() {
@@ -2189,6 +2212,68 @@ transaction_created_path_is_manager_owned() {
   esac
 }
 
+record_user_configuration_result() {
+  local path="$1"
+  local name="$2"
+  local results="${TRANSACTION_BACKUP}/results"
+  local hash temporary
+
+  mkdir -p -- "${results}" || return 1
+  chmod 0700 "${results}" || return 1
+  rm -f -- "${results}/${name}.sha256" "${results}/${name}.absent" ||
+    return 1
+  if [[ -e "${path}" || -L "${path}" ]]; then
+    [[ -f "${path}" && ! -L "${path}" ]] || return 1
+    hash="$(sha256sum "${path}" | awk '{print $1}')" || return 1
+    [[ "${hash}" =~ ^[0-9a-f]{64}$ ]] || return 1
+    temporary="${results}/${name}.sha256.new.$$"
+    printf '%s\n' "${hash}" >"${temporary}" || return 1
+    chmod 0600 "${temporary}" || return 1
+    mv -Tf -- "${temporary}" "${results}/${name}.sha256" || return 1
+  else
+    temporary="${results}/${name}.absent.new.$$"
+    : >"${temporary}" || return 1
+    chmod 0600 "${temporary}" || return 1
+    mv -Tf -- "${temporary}" "${results}/${name}.absent" || return 1
+  fi
+}
+
+record_user_configuration_results() {
+  [[ -n "${TRANSACTION_BACKUP}" ]] || return 0
+
+  record_user_configuration_result \
+    "${CONFIG_HOME}/mimeapps.list" config-mimeapps || return 1
+  record_user_configuration_result \
+    "${DATA_HOME}/applications/mimeapps.list" applications-mimeapps || return 1
+  record_user_configuration_result \
+    "${DATA_HOME}/mimeapps.list" data-mimeapps
+}
+
+durable_user_configuration_matches_recorded_result() {
+  local destination="$1"
+  local name="$2"
+  local results="${TRANSACTION_BACKUP}/results"
+  local hash_file="${results}/${name}.sha256"
+  local absent_file="${results}/${name}.absent"
+  local expected_hash current_hash
+
+  if [[ -e "${hash_file}" || -L "${hash_file}" ]]; then
+    [[ -f "${hash_file}" && ! -L "${hash_file}" &&
+      ! -e "${absent_file}" && ! -L "${absent_file}" &&
+      -f "${destination}" && ! -L "${destination}" ]] || return 1
+    expected_hash="$(cat "${hash_file}")"
+    [[ "${expected_hash}" =~ ^[0-9a-f]{64}$ ]] || return 1
+    current_hash="$(sha256sum "${destination}" | awk '{print $1}')" || return 1
+    [[ "${current_hash}" == "${expected_hash}" ]]
+  elif [[ -e "${absent_file}" || -L "${absent_file}" ]]; then
+    [[ -f "${absent_file}" && ! -L "${absent_file}" &&
+      ! -s "${absent_file}" &&
+      ! -e "${destination}" && ! -L "${destination}" ]]
+  else
+    return 1
+  fi
+}
+
 restore_path() {
   local destination="$1"
   local name="$2"
@@ -2197,6 +2282,19 @@ restore_path() {
 
   rm -rf -- "${temporary}" || return 1
   if [[ -e "${snapshot}" || -L "${snapshot}" ]]; then
+    if [[ "${TRANSACTION_DURABLE_RECOVERY}" == "true" ]]; then
+      case "${name}" in
+        config-mimeapps|applications-mimeapps|data-mimeapps)
+          durable_user_configuration_matches_recorded_result \
+            "${destination}" "${name}" || {
+              [[ -f "${snapshot}" && ! -L "${snapshot}" &&
+                -f "${destination}" && ! -L "${destination}" ]] || return 1
+              cmp -s -- "${snapshot}" "${destination}" || return 1
+              return 0
+            }
+          ;;
+      esac
+    fi
     mkdir -p -- "$(dirname "${destination}")" || return 1
     cp -a -- "${snapshot}" "${temporary}" || {
       rm -rf -- "${temporary}" || true
@@ -2410,9 +2508,13 @@ recover_pending_transaction() {
   [[ ! -e "${TRANSACTION_JOURNAL}" && ! -L "${TRANSACTION_JOURNAL}" ]] ||
     {
       TRANSACTION_BACKUP="${TRANSACTION_JOURNAL}"
+      TRANSACTION_DURABLE_RECOVERY=true
       warn "recovering an unfinished manager transaction"
-      restore_transaction ||
+      if ! restore_transaction; then
+        TRANSACTION_DURABLE_RECOVERY=false
         die "unfinished transaction recovery failed; preserved at ${TRANSACTION_JOURNAL}"
+      fi
+      TRANSACTION_DURABLE_RECOVERY=false
     }
 }
 
@@ -3311,7 +3413,9 @@ restore_associations() {
     return 1
   restore_one_association "${MIME_WINDSURF}" "${URL_DESKTOP_ID}" "${original_windsurf}" ||
     return 1
-  restore_one_association "${MIME_WORKSPACE}" "${MAIN_DESKTOP_ID}" "${original_workspace}"
+  restore_one_association "${MIME_WORKSPACE}" "${MAIN_DESKTOP_ID}" "${original_workspace}" ||
+    return 1
+  record_user_configuration_results
 }
 
 remove_managed_regular_file() {
