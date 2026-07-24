@@ -74,6 +74,7 @@ declare -ar CURL_SECURITY_OPTIONS=(
 STAGING_PATH=""
 INTEGRATION_STAGE=""
 TRANSACTION_BACKUP=""
+TRANSACTION_BACKUP_READY=false
 STAGED_INSTALL_ROOT=""
 TRANSACTION_RESTORING=false
 TRANSACTION_DISCARDING=false
@@ -112,6 +113,7 @@ cleanup() {
     "${TRANSACTION_JOURNAL}".new.*)
       rm -rf -- "${TRANSACTION_BACKUP}"
       TRANSACTION_BACKUP=""
+      TRANSACTION_BACKUP_READY=false
       ;;
   esac
   case "${CLEANUP_PROOF_TEMP}" in
@@ -130,6 +132,7 @@ handle_transaction_signal() {
 
   trap - INT TERM HUP
   if [[ -n "${TRANSACTION_BACKUP}" &&
+    "${TRANSACTION_BACKUP_READY}" == "true" &&
     "${TRANSACTION_RESTORING}" != "true" &&
     "${TRANSACTION_DISCARDING}" != "true" ]]; then
     warn "operation interrupted; restoring the previous managed state"
@@ -494,14 +497,21 @@ migration_temporary_is_valid() {
   [[ "${suffix}" =~ ^[0-9]+$ && -f "${path}" && ! -L "${path}" ]]
 }
 
+ownership_sentinel_temporary_is_valid() {
+  local path="$1"
+
+  migration_temporary_is_valid \
+    "${path}" "${OWNERSHIP_SENTINEL_NAME}.new" || return 1
+  [[ "$(cat "${path}")" == "$(ownership_sentinel_content)" ]]
+}
+
 cleanup_ownership_sentinel_temporaries() {
   local root="$1"
   local path
 
   for path in "${root}/${OWNERSHIP_SENTINEL_NAME}.new."*; do
     [[ -e "${path}" || -L "${path}" ]] || continue
-    migration_temporary_is_valid \
-      "${path}" "${OWNERSHIP_SENTINEL_NAME}.new" || return 1
+    ownership_sentinel_temporary_is_valid "${path}" || return 1
     rm -f -- "${path}" || return 1
   done
 }
@@ -513,8 +523,7 @@ root_contains_only_ownership_sentinel_temporaries() {
 
   directory_can_be_listed "${root}" || return 1
   while IFS= read -r -d '' path; do
-    migration_temporary_is_valid \
-      "${path}" "${OWNERSHIP_SENTINEL_NAME}.new" || return 1
+    ownership_sentinel_temporary_is_valid "${path}" || return 1
     saw_temporary=true
   done < <(find "${root}" -mindepth 1 -maxdepth 1 -print0)
   [[ "${saw_temporary}" == "true" ]]
@@ -754,8 +763,7 @@ legacy_install_root_is_valid() {
         owned_root_is_valid "${INSTALL_ROOT}" || return 1
         ;;
       "${OWNERSHIP_SENTINEL_NAME}".new.*)
-        migration_temporary_is_valid \
-          "${entry}" "${OWNERSHIP_SENTINEL_NAME}.new" || return 1
+        ownership_sentinel_temporary_is_valid "${entry}" || return 1
         ;;
       .staging-*)
         legacy_staging_temporary_is_valid "${entry}" || return 1
@@ -796,8 +804,7 @@ legacy_cache_root_is_valid() {
       "${OWNERSHIP_SENTINEL_NAME}")
         ;;
       "${OWNERSHIP_SENTINEL_NAME}".new.*)
-        migration_temporary_is_valid \
-          "${entry}" "${OWNERSHIP_SENTINEL_NAME}.new" || return 1
+        ownership_sentinel_temporary_is_valid "${entry}" || return 1
         ;;
       Devin-linux-x64-*.deb|Devin-linux-x64-*.deb.part)
         [[ -f "${entry}" && ! -L "${entry}" ]] || return 1
@@ -827,8 +834,7 @@ legacy_state_root_is_valid() {
         migration_temporary_is_valid "${entry}" "state.json.new" || return 1
         ;;
       "${OWNERSHIP_SENTINEL_NAME}".new.*)
-        migration_temporary_is_valid \
-          "${entry}" "${OWNERSHIP_SENTINEL_NAME}.new" || return 1
+        ownership_sentinel_temporary_is_valid "${entry}" || return 1
         ;;
       *) return 1 ;;
     esac
@@ -853,8 +859,7 @@ legacy_pre_activation_state_root_is_valid() {
         migration_temporary_is_valid "${entry}" "state.json.new" || return 1
         ;;
       "${OWNERSHIP_SENTINEL_NAME}".new.*)
-        migration_temporary_is_valid \
-          "${entry}" "${OWNERSHIP_SENTINEL_NAME}.new" || return 1
+        ownership_sentinel_temporary_is_valid "${entry}" || return 1
         ;;
       *) return 1 ;;
     esac
@@ -2211,6 +2216,7 @@ snapshot_path() {
 backup_transaction() {
   local partial="${TRANSACTION_JOURNAL}.new.$$"
 
+  TRANSACTION_BACKUP_READY=false
   [[ ! -e "${TRANSACTION_JOURNAL}" && ! -L "${TRANSACTION_JOURNAL}" ]] ||
     die "an unfinished manager transaction requires recovery"
   [[ ! -e "${TRANSACTION_DISCARD}" && ! -L "${TRANSACTION_DISCARD}" ]] ||
@@ -2263,6 +2269,7 @@ backup_transaction() {
     return 1
   mv -T -- "${partial}" "${TRANSACTION_JOURNAL}"
   TRANSACTION_BACKUP="${TRANSACTION_JOURNAL}"
+  TRANSACTION_BACKUP_READY=true
 }
 
 recover_transaction_partials() {
@@ -2738,6 +2745,7 @@ discard_transaction() {
         return 1
       fi
       TRANSACTION_BACKUP=""
+      TRANSACTION_BACKUP_READY=false
       if ! rm -rf -- "${TRANSACTION_DISCARD}"; then
         warn "committed transaction discard will be finished on the next manager mutation"
       fi
@@ -2745,6 +2753,7 @@ discard_transaction() {
     else
       rm -rf -- "${TRANSACTION_BACKUP}" || return 1
       TRANSACTION_BACKUP=""
+      TRANSACTION_BACKUP_READY=false
     fi
   fi
   if [[ -n "${INTEGRATION_STAGE}" ]]; then
@@ -2767,6 +2776,7 @@ recover_pending_transaction() {
   [[ ! -e "${TRANSACTION_JOURNAL}" && ! -L "${TRANSACTION_JOURNAL}" ]] ||
     {
       TRANSACTION_BACKUP="${TRANSACTION_JOURNAL}"
+      TRANSACTION_BACKUP_READY=true
       TRANSACTION_DURABLE_RECOVERY=true
       warn "recovering an unfinished manager transaction"
       if ! restore_transaction; then
@@ -2778,6 +2788,8 @@ recover_pending_transaction() {
 }
 
 uninstall_cleanup_record_fields() {
+  local record="${1:-${UNINSTALL_CLEANUP_RECORD}}"
+
   jq -er --arg manager_id "${MANAGER_ID}" \
     --argjson schema_version "${OWNERSHIP_SCHEMA_VERSION}" '
       select(
@@ -2791,7 +2803,25 @@ uninstall_cleanup_record_fields() {
       )
       | [.stagedInstallRoot, .device, .inode]
       | @tsv
-    ' "${UNINSTALL_CLEANUP_RECORD}" 2>/dev/null
+    ' "${record}" 2>/dev/null
+}
+
+recover_cleanup_record_temporaries() {
+  local record="$1"
+  local validator="$2"
+  local temporary suffix
+
+  for temporary in "${record}.new."*; do
+    [[ -e "${temporary}" || -L "${temporary}" ]] || continue
+    suffix="${temporary##*.new.}"
+    if ! [[ "${suffix}" =~ ^[0-9]+$ &&
+      -f "${temporary}" && ! -L "${temporary}" &&
+      "$(stat -c '%u' -- "${temporary}" 2>/dev/null)" == "${EUID}" ]] ||
+      ! "${validator}" "${temporary}" >/dev/null; then
+      return 1
+    fi
+    rm -f -- "${temporary}" || return 1
+  done
 }
 
 validate_staged_install_root_path() {
@@ -2852,6 +2882,8 @@ write_uninstall_cleanup_record() {
   owned_root_is_valid "${staged_root}" || return 1
   identity="$(staged_install_root_identity "${staged_root}")" || return 1
   read -r device inode <<<"${identity}"
+  recover_cleanup_record_temporaries \
+    "${UNINSTALL_CLEANUP_RECORD}" uninstall_cleanup_record_fields || return 1
   [[ ! -e "${UNINSTALL_CLEANUP_RECORD}" &&
     ! -L "${UNINSTALL_CLEANUP_RECORD}" &&
     ! -e "${UNINSTALL_CLEANUP_PROOF}" &&
@@ -3009,6 +3041,8 @@ release_prune_quarantine_name() {
 }
 
 release_prune_cleanup_record_fields() {
+  local record="${1:-${RELEASE_PRUNE_CLEANUP_RECORD}}"
+
   jq -er \
     --arg manager_id "${MANAGER_ID}" \
     --argjson schema_version "${OWNERSHIP_SCHEMA_VERSION}" '
@@ -3042,7 +3076,7 @@ release_prune_cleanup_record_fields() {
           .metadataSha256
         ]
       | @tsv
-    ' "${RELEASE_PRUNE_CLEANUP_RECORD}" 2>/dev/null
+    ' "${record}" 2>/dev/null
 }
 
 write_release_prune_cleanup_record() {
@@ -3057,6 +3091,9 @@ write_release_prune_cleanup_record() {
     release_prune_quarantine_name "${release_name}" "${device}" "${inode}"
   )" || return 1
   [[ "${metadata_sha256}" =~ ^[0-9a-f]{64}$ ]] || return 1
+  recover_cleanup_record_temporaries \
+    "${RELEASE_PRUNE_CLEANUP_RECORD}" \
+    release_prune_cleanup_record_fields || return 1
   [[ ! -e "${RELEASE_PRUNE_CLEANUP_RECORD}" &&
     ! -L "${RELEASE_PRUNE_CLEANUP_RECORD}" &&
     ! -e "${RELEASE_PRUNE_CLEANUP_PROOF}" &&
@@ -3222,6 +3259,7 @@ recover_pending_release_prune() {
   [[ ! -e "${RELEASE_PRUNE_CLEANUP_RECORD}" &&
     ! -L "${RELEASE_PRUNE_CLEANUP_RECORD}" ]] && return 0
   require_app_stopped
+  validate_linked_releases false
   finish_recorded_release_prune true
 }
 

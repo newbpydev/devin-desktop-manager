@@ -577,13 +577,27 @@ JSON
   local temporary="${install_root}/.devin-desktop-manager-owned.new.12345"
 
   mkdir -p "${install_root}"
-  printf 'partial ownership marker\n' >"${temporary}"
+  printf 'io.github.newbpydev.devin-desktop-manager schema=1\n' >"${temporary}"
 
   run install_fixture
 
   [ "${status}" -eq 0 ]
   [ -f "${install_root}/.devin-desktop-manager-owned" ]
   [ ! -e "${temporary}" ]
+}
+
+@test "ownership recovery rejects an unproven temporary-only root" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local temporary="${install_root}/.devin-desktop-manager-owned.new.12345"
+
+  mkdir -p "${install_root}"
+  printf 'user data\n' >"${temporary}"
+
+  run install_fixture
+
+  [ "${status}" -ne 0 ]
+  [ "$(cat "${temporary}")" = "user data" ]
+  [ ! -e "${install_root}/.devin-desktop-manager-owned" ]
 }
 
 @test "ownership recovery preserves manager-looking files in a foreign root" {
@@ -754,9 +768,10 @@ JSON
   downgrade_to_public_0_1_layout
   release="$(find "${install_root}/releases" -mindepth 1 -maxdepth 1 \
     -type d -print -quit)"
-  printf 'partial\n' >"${install_root}/.devin-desktop-manager-owned.new.12345"
-  printf 'partial\n' >"${cache_root}/.devin-desktop-manager-owned.new.12345"
-  printf 'partial\n' >"${state_root}/.devin-desktop-manager-owned.new.12345"
+  for root in "${install_root}" "${cache_root}" "${state_root}"; do
+    printf 'io.github.newbpydev.devin-desktop-manager schema=1\n' \
+      >"${root}/.devin-desktop-manager-owned.new.12345"
+  done
   printf 'partial\n' >"${release}/release.json.new.12345"
 
   run install_fixture
@@ -1738,6 +1753,65 @@ EOF
   [ "${status}" -eq 0 ]
 }
 
+@test "cleanup record writers recover validated stale temporaries" {
+  run env HOME="${TEST_HOME}" XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      mkdir -p "${STATE_HOME}"
+      staged_root="${INSTALL_ROOT}.uninstall-123"
+      mkdir -p "${staged_root}"
+      printf "%s" "$(ownership_sentinel_content)" \
+        >"${staged_root}/${OWNERSHIP_SENTINEL_NAME}"
+      read -r device inode < <(stat -c "%d %i" -- "${staged_root}")
+      uninstall_temp="${UNINSTALL_CLEANUP_RECORD}.new.$$"
+      jq -n \
+        --arg manager_id "${MANAGER_ID}" \
+        --argjson schema_version "${OWNERSHIP_SCHEMA_VERSION}" \
+        --arg staged_root "${staged_root}" \
+        --arg device "${device}" \
+        --arg inode "${inode}" "{
+          schemaVersion: \$schema_version,
+          managerId: \$manager_id,
+          stagedInstallRoot: \$staged_root,
+          device: \$device,
+          inode: \$inode
+        }" >"${uninstall_temp}"
+      write_uninstall_cleanup_record "${staged_root}"
+      [[ -f "${UNINSTALL_CLEANUP_RECORD}" && ! -e "${uninstall_temp}" ]]
+      rm -f -- "${UNINSTALL_CLEANUP_RECORD}"
+
+      release_name="stale-release"
+      prune_temp="${RELEASE_PRUNE_CLEANUP_RECORD}.new.$$"
+      quarantine_name="$(
+        release_prune_quarantine_name "${release_name}" "${device}" "${inode}"
+      )"
+      metadata_sha256="$(
+        printf "metadata" | sha256sum | awk "{print \$1}"
+      )"
+      jq -n \
+        --arg manager_id "${MANAGER_ID}" \
+        --argjson schema_version "${OWNERSHIP_SCHEMA_VERSION}" \
+        --arg release_name "${release_name}" \
+        --arg quarantine_name "${quarantine_name}" \
+        --arg device "${device}" \
+        --arg inode "${inode}" \
+        --arg metadata_sha256 "${metadata_sha256}" "{
+          schemaVersion: \$schema_version,
+          managerId: \$manager_id,
+          releaseName: \$release_name,
+          quarantineName: \$quarantine_name,
+          device: \$device,
+          inode: \$inode,
+          metadataSha256: \$metadata_sha256
+        }" >"${prune_temp}"
+      write_release_prune_cleanup_record \
+        "${release_name}" "${device}" "${inode}" "${metadata_sha256}"
+      [[ -f "${RELEASE_PRUNE_CLEANUP_RECORD}" && ! -e "${prune_temp}" ]]
+    ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
+}
+
 @test "transaction backup clears its partial path when mkdir fails" {
   run env HOME="${TEST_HOME}" XDG_STATE_HOME="${TEST_HOME}/.local/state" \
     PATH="${MOCK_BIN}:${PATH}" bash -c '
@@ -1757,6 +1831,33 @@ EOF
     ' _ "${MANAGER}"
 
   [ "${status}" -eq 0 ]
+}
+
+@test "signals do not restore an incomplete transaction backup" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local current_before partial
+
+  install_fixture
+  current_before="$(readlink "${install_root}/current")"
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      acquire_lock
+      snapshot_path() {
+        kill -TERM "$$"
+      }
+      backup_transaction
+    ' _ "${MANAGER}"
+
+  [ "${status}" -eq 143 ]
+  [ "$(readlink "${install_root}/current")" = "${current_before}" ]
+  partial="$(find "${TEST_HOME}/.local/state" -maxdepth 1 \
+    -name 'devin-desktop-manager.transaction.new.*' -print -quit)"
+  [ -z "${partial}" ]
 }
 
 @test "the next mutation removes an orphan transaction partial before PID reuse" {
@@ -2768,6 +2869,28 @@ EOF
     [ -f "${cleanup_record}" ]
     rm -f -- "${cleanup_record}"
   done
+}
+
+@test "release prune recovery rejects malformed active links before cleanup" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local cleanup_record="${TEST_HOME}/.local/state/devin-desktop-manager.prune"
+  local source_dir stale_dir stale_name
+
+  install_fixture
+  source_dir="${install_root}/$(readlink "${install_root}/current")"
+  stale_dir="${install_root}/releases/stale-active-release"
+  cp -a -- "${source_dir}" "${stale_dir}"
+  stale_name="$(basename "${stale_dir}")"
+  record_prune_intent_for_release "${stale_dir}"
+  rm -f -- "${install_root}/current"
+  ln -s "releases/./${stale_name}" "${install_root}/current"
+
+  run manager_env update
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"current release link is invalid"* ]]
+  [ -d "${stale_dir}" ]
+  [ -f "${cleanup_record}" ]
 }
 
 @test "pending release prune recovery refuses to delete a running release" {
