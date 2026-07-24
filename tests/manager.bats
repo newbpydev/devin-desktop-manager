@@ -1812,6 +1812,38 @@ EOF
   [ "${status}" -eq 0 ]
 }
 
+@test "cleanup record writers reject unproven stale temporaries" {
+  run env HOME="${TEST_HOME}" XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      mkdir -p "${STATE_HOME}"
+      staged_root="${INSTALL_ROOT}.uninstall-123"
+      mkdir -p "${staged_root}"
+      printf "%s" "$(ownership_sentinel_content)" \
+        >"${staged_root}/${OWNERSHIP_SENTINEL_NAME}"
+      read -r device inode < <(stat -c "%d %i" -- "${staged_root}")
+
+      uninstall_temp="${UNINSTALL_CLEANUP_RECORD}.new.$$"
+      printf "user data\n" >"${uninstall_temp}"
+      ! write_uninstall_cleanup_record "${staged_root}"
+      [[ -f "${uninstall_temp}" &&
+        ! -e "${UNINSTALL_CLEANUP_RECORD}" ]]
+      rm -f -- "${uninstall_temp}"
+
+      prune_temp="${RELEASE_PRUNE_CLEANUP_RECORD}.new.$$"
+      printf "user data\n" >"${prune_temp}"
+      metadata_sha256="$(
+        printf "metadata" | sha256sum | awk "{print \$1}"
+      )"
+      ! write_release_prune_cleanup_record \
+        "stale-release" "${device}" "${inode}" "${metadata_sha256}"
+      [[ -f "${prune_temp}" &&
+        ! -e "${RELEASE_PRUNE_CLEANUP_RECORD}" ]]
+    ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
+}
+
 @test "transaction backup clears its partial path when mkdir fails" {
   run env HOME="${TEST_HOME}" XDG_STATE_HOME="${TEST_HOME}/.local/state" \
     PATH="${MOCK_BIN}:${PATH}" bash -c '
