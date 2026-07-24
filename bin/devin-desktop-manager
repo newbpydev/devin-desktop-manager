@@ -397,6 +397,7 @@ publish_cleanup_proof() {
   local temporary="${proof}.new.$$"
 
   [[ -f "${source}" && ! -L "${source}" ]] || return 1
+  recover_cleanup_proof_temporaries "${source}" "${proof}" || return 1
   [[ ! -e "${proof}" && ! -L "${proof}" &&
     ! -e "${temporary}" && ! -L "${temporary}" ]] || return 1
   CLEANUP_PROOF_TEMP="${temporary}"
@@ -408,6 +409,24 @@ publish_cleanup_proof() {
     return 1
   fi
   CLEANUP_PROOF_TEMP=""
+}
+
+recover_cleanup_proof_temporaries() {
+  local source="$1"
+  local proof="$2"
+  local temporary suffix
+
+  for temporary in "${proof}.new."*; do
+    [[ -e "${temporary}" || -L "${temporary}" ]] || continue
+    suffix="${temporary##*.new.}"
+    if ! [[ "${suffix}" =~ ^[0-9]+$ &&
+      -f "${temporary}" && ! -L "${temporary}" &&
+      "$(stat -c '%u' -- "${temporary}" 2>/dev/null)" == "${EUID}" ]] ||
+      ! cmp -s -- "${source}" "${temporary}"; then
+      return 1
+    fi
+    rm -f -- "${temporary}" || return 1
+  done
 }
 
 write_ownership_sentinel() {
@@ -2204,6 +2223,8 @@ backup_transaction() {
     return 1
   fi
   chmod 0700 "${TRANSACTION_BACKUP}"
+  ownership_sentinel_content >"${TRANSACTION_BACKUP}/owner" || return 1
+  chmod 0600 "${TRANSACTION_BACKUP}/owner" || return 1
 
   snapshot_path "${CURRENT_LINK}" current || return 1
   snapshot_path "${PREVIOUS_LINK}" previous || return 1
@@ -2240,8 +2261,6 @@ backup_transaction() {
     return 1
   record_preserved_transaction_snapshot "${LEGACY_MIME_FILE}" legacy-mime ||
     return 1
-  ownership_sentinel_content >"${TRANSACTION_BACKUP}/owner"
-  chmod 0600 "${TRANSACTION_BACKUP}/owner"
   mv -T -- "${partial}" "${TRANSACTION_JOURNAL}"
   TRANSACTION_BACKUP="${TRANSACTION_JOURNAL}"
 }
@@ -2253,10 +2272,12 @@ recover_transaction_partials() {
     [[ -e "${partial}" || -L "${partial}" ]] || continue
     name="$(basename "${partial}")"
     pid="${name##*.new.}"
-    [[ "${pid}" =~ ^[0-9]+$ &&
+    if ! [[ "${pid}" =~ ^[0-9]+$ &&
       -d "${partial}" && ! -L "${partial}" &&
       "$(stat -c '%u' -- "${partial}" 2>/dev/null)" == "${EUID}" ]] ||
+      ! transaction_directory_is_valid "${partial}"; then
       die "unfinished transaction temporary is unsafe: ${partial}"
+    fi
     info "removing an orphaned transaction temporary"
     rm -rf -- "${partial}" ||
       die "could not remove orphaned transaction temporary: ${partial}"
@@ -2657,6 +2678,10 @@ restore_staged_install_root() {
         empty_manager_install_root_is_valid "${recorded}" ||
         pre_activation_manager_install_root_is_valid "${recorded}" || return 1
     fi
+    if [[ -e "${INSTALL_ROOT}" || -L "${INSTALL_ROOT}" ]]; then
+      legacy_lock_bridge_is_valid "${recorded}" || return 1
+      remove_legacy_lock_bridge || return 1
+    fi
     [[ ! -e "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] || return 1
     mv -T -- "${recorded}" "${INSTALL_ROOT}" || return 1
   fi
@@ -2871,6 +2896,19 @@ finish_recorded_uninstall_cleanup() {
   fi
 
   if [[ ! -e "${staged_root}" && ! -L "${staged_root}" ]]; then
+    if [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" &&
+      "$(stat -c '%d %i' -- "${INSTALL_ROOT}" 2>/dev/null)" == \
+        "${device} ${inode}" ]] &&
+      {
+        manager_install_root_is_valid "${INSTALL_ROOT}" ||
+          empty_manager_install_root_is_valid "${INSTALL_ROOT}" ||
+          pre_activation_manager_install_root_is_valid "${INSTALL_ROOT}"
+      }; then
+      :
+    else
+      remove_legacy_lock_bridge ||
+        die "unfinished uninstall legacy lock bridge is unsafe: ${INSTALL_ROOT}"
+    fi
     rm -f -- "${UNINSTALL_CLEANUP_PROOF}" ||
       die "could not remove uninstall cleanup proof"
     rm -f -- "${UNINSTALL_CLEANUP_RECORD}" ||
@@ -2883,6 +2921,10 @@ finish_recorded_uninstall_cleanup() {
   staged_install_root_identity_matches \
     "${staged_root}" "${device}" "${inode}" ||
     die "unfinished uninstall cleanup root identity does not match: ${staged_root}"
+  if [[ -e "${INSTALL_ROOT}" || -L "${INSTALL_ROOT}" ]]; then
+    legacy_public_lock_bridge_is_valid ||
+      die "unfinished uninstall legacy lock bridge is unsafe: ${INSTALL_ROOT}"
+  fi
   sentinel="${staged_root}/${OWNERSHIP_SENTINEL_NAME}"
 
   if [[ -e "${sentinel}" || -L "${sentinel}" ]]; then
@@ -2921,6 +2963,8 @@ finish_recorded_uninstall_cleanup() {
   fi
   rmdir -- "${staged_root}" ||
     die "could not finish uninstall cleanup: ${staged_root}"
+  remove_legacy_lock_bridge ||
+    die "could not remove uninstall legacy lock bridge: ${INSTALL_ROOT}"
   rm -f -- "${UNINSTALL_CLEANUP_PROOF}" ||
     die "could not remove uninstall cleanup proof"
   rm -f -- "${UNINSTALL_CLEANUP_RECORD}" ||
@@ -3233,15 +3277,22 @@ validate_retained_or_reused_release() {
 }
 
 validate_linked_releases() {
+  local validate_ownership="${1:-true}"
   local current_dir previous_dir
 
-  current_dir="$(release_path "${CURRENT_LINK}")" ||
-    die "current release link is invalid: ${CURRENT_LINK}"
+  current_dir=""
+  if [[ -e "${CURRENT_LINK}" || -L "${CURRENT_LINK}" ]]; then
+    current_dir="$(release_path "${CURRENT_LINK}")" ||
+      die "current release link is invalid: ${CURRENT_LINK}"
+  fi
   previous_dir=""
   if [[ -e "${PREVIOUS_LINK}" || -L "${PREVIOUS_LINK}" ]]; then
     previous_dir="$(release_path "${PREVIOUS_LINK}")" ||
       die "previous release link is invalid: ${PREVIOUS_LINK}"
   fi
+  [[ -n "${current_dir}" || -z "${previous_dir}" ]] ||
+    die "previous release link exists without a current release: ${PREVIOUS_LINK}"
+  [[ "${validate_ownership}" == "true" ]] || return 0
   validate_retained_or_reused_release "${current_dir}"
   if [[ "${previous_dir}" != "${current_dir}" ]]; then
     validate_retained_or_reused_release "${previous_dir}"
@@ -3434,6 +3485,7 @@ command_update() {
   acquire_lock
   require_app_stopped
   validate_release_inventory_ownership
+  validate_linked_releases false
   manifest="$(fetch_manifest)"
 
   if manifest_matches_current "${manifest}"; then
@@ -3731,6 +3783,47 @@ remove_manager_command_if_owned() {
   warn "leaving non-manager-owned command in place: ${MANAGER_COMMAND}"
 }
 
+legacy_lock_bridge_is_valid() {
+  local staged_root="$1"
+  local public_lock="${INSTALL_ROOT}/.manager.lock"
+  local staged_lock="${staged_root}/.manager.lock"
+
+  legacy_public_lock_bridge_is_valid || return 1
+  [[ -f "${staged_lock}" && ! -L "${staged_lock}" &&
+    "${public_lock}" -ef "${staged_lock}" ]]
+}
+
+legacy_public_lock_bridge_is_valid() {
+  local public_lock="${INSTALL_ROOT}/.manager.lock"
+
+  [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" &&
+    -f "${public_lock}" && ! -L "${public_lock}" &&
+    "${public_lock}" -ef /proc/self/fd/8 ]] || return 1
+  directory_contains_only_entry "${INSTALL_ROOT}" "${public_lock}"
+}
+
+create_legacy_lock_bridge() {
+  local staged_root="$1"
+  local public_lock="${INSTALL_ROOT}/.manager.lock"
+
+  if ! mkdir -- "${INSTALL_ROOT}" ||
+    ! ln -- "${staged_root}/.manager.lock" "${public_lock}"; then
+    rm -f -- "${public_lock}" || true
+    rmdir -- "${INSTALL_ROOT}" 2>/dev/null || true
+    return 1
+  fi
+  legacy_lock_bridge_is_valid "${staged_root}"
+}
+
+remove_legacy_lock_bridge() {
+  local public_lock="${INSTALL_ROOT}/.manager.lock"
+
+  [[ -e "${INSTALL_ROOT}" || -L "${INSTALL_ROOT}" ]] || return 0
+  legacy_public_lock_bridge_is_valid || return 1
+  rm -f -- "${public_lock}" || return 1
+  rmdir -- "${INSTALL_ROOT}"
+}
+
 stage_install_root_for_uninstall() {
   local identity device inode
   local record temporary
@@ -3765,6 +3858,7 @@ stage_install_root_for_uninstall() {
     rm -f -- "${record}" || true
     return 1
   fi
+  create_legacy_lock_bridge "${STAGED_INSTALL_ROOT}" || return 1
   staged_install_root_identity_matches \
     "${STAGED_INSTALL_ROOT}" "${device}" "${inode}" || return 1
 }
@@ -3800,6 +3894,7 @@ command_uninstall() {
   require_app_stopped
   validate_state_or_absent
   validate_release_inventory_ownership
+  validate_linked_releases
 
   if [[ "${answer}" != "--yes" ]]; then
     if [[ ! -t 0 ]]; then

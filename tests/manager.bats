@@ -1336,6 +1336,27 @@ EOF
   [[ "${output}" == *"current release link is invalid"* ]]
 }
 
+@test "update rejects malformed current and previous links before activation" {
+  local second="${BATS_TEST_TMPDIR}/second.deb"
+  local second_build="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+
+  install_fixture
+  "${FIXTURE_BUILDER}" "${second}" safe "${second_build}" "3.4.28"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${second_build}/Devin-linux-x64-3.4.28.deb" \
+    "${second}" "3.4.28" "${second_build}" 1783378474000
+  ln -sfn "../broken-current" "${install_root}/current"
+  ln -s "../broken-previous" "${install_root}/previous"
+
+  run manager_env update
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"current release link is invalid"* ]]
+  [ "$(readlink "${install_root}/current")" = "../broken-current" ]
+  [ "$(readlink "${install_root}/previous")" = "../broken-previous" ]
+}
+
 @test "check distinguishes up-to-date and update-available installations" {
   local second="${BATS_TEST_TMPDIR}/second.deb"
   local second_build="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -1676,6 +1697,31 @@ EOF
   done
 }
 
+@test "cleanup proof publication recovers only a matching stale temporary" {
+  run env HOME="${TEST_HOME}" XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      mkdir -p "${STATE_HOME}"
+      source_record="${STATE_HOME}/cleanup-source"
+      proof="${STATE_HOME}/cleanup-proof"
+      temporary="${proof}.new.$$"
+      printf "manager proof\n" >"${source_record}"
+      cp -- "${source_record}" "${temporary}"
+      publish_cleanup_proof "${source_record}" "${proof}"
+      cmp -s -- "${source_record}" "${proof}"
+      [[ ! -e "${temporary}" && ! -L "${temporary}" ]]
+
+      rm -f -- "${proof}"
+      printf "user data\n" >"${temporary}"
+      if publish_cleanup_proof "${source_record}" "${proof}"; then
+        exit 1
+      fi
+      [[ "$(cat "${temporary}")" == "user data" && ! -e "${proof}" ]]
+    ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
+}
+
 @test "transaction backup clears its partial path when mkdir fails" {
   run env HOME="${TEST_HOME}" XDG_STATE_HOME="${TEST_HOME}/.local/state" \
     PATH="${MOCK_BIN}:${PATH}" bash -c '
@@ -1704,6 +1750,7 @@ EOF
       mkdir -p "${STATE_HOME}"
       partial="${TRANSACTION_JOURNAL}.new.$$"
       mkdir -p "${partial}"
+      printf "%s" "$(ownership_sentinel_content)" >"${partial}/owner"
       printf "orphaned\n" >"${partial}/partial"
       acquire_lock
       [[ ! -e "${partial}" && ! -L "${partial}" ]]
@@ -1712,6 +1759,19 @@ EOF
     ' _ "${MANAGER}"
 
   [ "${status}" -eq 0 ]
+}
+
+@test "orphan transaction recovery rejects an unproven directory" {
+  local partial="${TEST_HOME}/.local/state/devin-desktop-manager.transaction.new.12345"
+
+  mkdir -p "${partial}"
+  printf 'preserve user data\n' >"${partial}/keep.txt"
+
+  run manager_env update
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"unfinished transaction temporary is unsafe"* ]]
+  [ "$(cat "${partial}/keep.txt")" = "preserve user data" ]
 }
 
 @test "orphan transaction recovery rejects a symlink without touching its target" {
@@ -2823,6 +2883,35 @@ EOF
   [ -L "${manager_command}" ]
 }
 
+@test "staged uninstall keeps the public legacy lock held until rollback" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+
+  install_fixture
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      acquire_lock
+      backup_transaction
+      stage_install_root_for_uninstall
+      public_lock="${INSTALL_ROOT}/.manager.lock"
+      staged_lock="${STAGED_INSTALL_ROOT}/.manager.lock"
+      [[ -f "${public_lock}" && ! -L "${public_lock}" &&
+        "${public_lock}" -ef "${staged_lock}" ]]
+      if bash -c '\''exec 8>&-; flock -n "$1" true'\'' _ "${public_lock}"; then
+        exit 1
+      fi
+      restore_transaction
+      [[ -L "${CURRENT_LINK}" && ! -e "${STAGED_INSTALL_ROOT}" ]]
+    ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
+  [ -L "${install_root}/current" ]
+}
+
 @test "uninstall recovers verified current-manager temporaries before validation" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
   local current_target release_name staging integration
@@ -2878,10 +2967,10 @@ EOF
 
   [ "${status}" -ne 0 ]
   [ -d "${journal}" ]
-  [ ! -e "${install_root}" ]
   staged_root="$(find "${TEST_HOME}/.local/opt" -maxdepth 1 \
     -type d -name 'devin-desktop.uninstall-*' -print -quit)"
   [ -n "${staged_root}" ]
+  [ "${install_root}/.manager.lock" -ef "${staged_root}/.manager.lock" ]
 
   run install_fixture
 
@@ -2949,7 +3038,9 @@ EOF
   [ "${status}" -ne 0 ]
   [[ "${output}" == *"unfinished transaction recovery failed"* ]]
   [ -d "${journal}" ]
-  [ ! -e "${install_root}" ]
+  [ -f "${install_root}/.manager.lock" ]
+  [ -z "$(find "${install_root}" -mindepth 1 -maxdepth 1 \
+    ! -name .manager.lock -print -quit)" ]
 }
 
 @test "absent-root recovery takes the staged installation legacy lock" {
@@ -2966,7 +3057,7 @@ EOF
   staged_root="$(find "${TEST_HOME}/.local/opt" -maxdepth 1 \
     -type d -name 'devin-desktop.uninstall-*' -print -quit)"
   [ -n "${staged_root}" ]
-  [ ! -e "${install_root}" ]
+  [ "${install_root}/.manager.lock" -ef "${staged_root}/.manager.lock" ]
   ready="${BATS_TEST_TMPDIR}/staged-recovery-lock-ready"
   start_lock_holder "${staged_root}/.manager.lock" "${ready}"
 
@@ -2977,7 +3068,7 @@ EOF
   [[ "${output}" == *"another Devin Desktop manager operation is running"* ]]
   [ -d "${journal}" ]
   [ -d "${staged_root}" ]
-  [ ! -e "${install_root}" ]
+  [ "${install_root}/.manager.lock" -ef "${staged_root}/.manager.lock" ]
 }
 
 @test "transaction recovery rejects a partially deleted staged root" {
@@ -3002,7 +3093,7 @@ EOF
   [[ "${output}" == *"unfinished transaction recovery failed"* ]]
   [ -d "${journal}" ]
   [ -d "${staged_root}" ]
-  [ ! -e "${install_root}" ]
+  [ "${install_root}/.manager.lock" -ef "${staged_root}/.manager.lock" ]
 }
 
 @test "manager command removal happens after committed uninstall cleanup" {
