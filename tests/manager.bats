@@ -697,6 +697,20 @@ JSON
   [ "${status}" -eq 0 ]
 }
 
+@test "migration recovers a public pre-lock bootstrap root" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+
+  mkdir -p "${install_root}/releases"
+
+  run install_fixture
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"migrating verified public 0.1.0 installation"* ]]
+  [ -f "${install_root}/.manager.lock" ]
+  [ -f "${install_root}/.devin-desktop-manager-owned" ]
+  [ -L "${install_root}/current" ]
+}
+
 @test "owned installations keep taking the public manager lock" {
   local legacy_lock="${TEST_HOME}/.local/opt/devin-desktop/.manager.lock"
   local ready="${BATS_TEST_TMPDIR}/owned-legacy-lock.ready"
@@ -1729,7 +1743,8 @@ EOF
       source "$1"
       acquire_lock
       mkdir -p "$(dirname "${MAIN_DESKTOP}")"
-      printf "original\n" >"${MAIN_DESKTOP}"
+      printf "%s\noriginal\n" \
+        "${MANAGER_DESKTOP_MARKER}" >"${MAIN_DESKTOP}"
       backup_transaction
       printf "interrupted\n" >"${MAIN_DESKTOP}"
     ' _ "${MANAGER}"
@@ -1860,6 +1875,38 @@ EOF
   grep -Fqx \
     'x-scheme-handler/devin=user-after-crash.desktop;' "${DEFAULTS_FILE}"
   [ -d "${journal}" ]
+}
+
+@test "transaction recovery preserves user-owned files edited after a crash" {
+  local command="${TEST_HOME}/.local/bin/devin-desktop"
+  local desktop="${TEST_HOME}/.local/share/applications/devin-desktop-manager.desktop"
+  local journal="${TEST_HOME}/.local/state/devin-desktop-manager.transaction"
+
+  install_fixture
+  rm -f -- "${command}"
+  printf 'user before crash\n' >"${command}"
+  printf '# user before crash\n' >>"${desktop}"
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      acquire_lock
+      backup_transaction
+    ' _ "${MANAGER}"
+  [ "${status}" -eq 0 ]
+  [ -d "${journal}" ]
+
+  printf 'user after crash\n' >"${command}"
+  printf '# user after crash\n' >>"${desktop}"
+  run install_fixture
+
+  [ "${status}" -ne 0 ]
+  [ "$(cat "${command}")" = "user after crash" ]
+  grep -Fqx '# user after crash' "${desktop}"
+  [ ! -e "${journal}" ]
 }
 
 @test "association batches record each result before the next rewrite" {
@@ -2034,6 +2081,19 @@ EOF
   [ "${lines[-1]}" = "committed" ]
   [ "$(cat "${desktop}")" = "committed" ]
   [ ! -e "${discard}" ]
+}
+
+@test "transaction discard recovery rejects an unproven directory" {
+  local discard="${TEST_HOME}/.local/state/devin-desktop-manager.transaction.discard"
+
+  mkdir -p "${discard}"
+  printf 'preserve user data\n' >"${discard}/keep.txt"
+
+  run install_fixture
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"unfinished transaction discard is unsafe"* ]]
+  [ "$(cat "${discard}/keep.txt")" = "preserve user data" ]
 }
 
 @test "termination restores an active transaction before exiting" {
@@ -2652,6 +2712,7 @@ EOF
   "${quarantine_dir}/app/bin/devin-desktop" 30 &
   running_pid=$!
   sleep 0.1
+  rm -f -- "${quarantine_dir}/app/bin/devin-desktop"
   run manager_env update
   kill "${running_pid}" 2>/dev/null || true
   wait "${running_pid}" 2>/dev/null || true
@@ -2683,6 +2744,7 @@ EOF
   "${staged_app}" 30 &
   running_pid=$!
   sleep 0.1
+  rm -f -- "${staged_app}"
   run install_fixture
   kill "${running_pid}" 2>/dev/null || true
   wait "${running_pid}" 2>/dev/null || true

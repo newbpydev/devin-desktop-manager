@@ -711,6 +711,7 @@ legacy_state_is_valid() {
 
 legacy_install_root_is_valid() {
   local require_current="${1:-true}"
+  local require_lock="${2:-true}"
   local entry name
   local saw_lock=false saw_releases=false
 
@@ -756,7 +757,8 @@ legacy_install_root_is_valid() {
         ;;
     esac
   done < <(find "${INSTALL_ROOT}" -mindepth 1 -maxdepth 1 -print0)
-  [[ "${saw_releases}" == "true" && "${saw_lock}" == "true" ]] || return 1
+  [[ "${saw_releases}" == "true" ]] || return 1
+  [[ "${saw_lock}" == "true" || "${require_lock}" == "false" ]] || return 1
   legacy_release_inventory_is_valid "${require_current}"
 }
 
@@ -1156,7 +1158,15 @@ acquire_legacy_lock_if_needed() {
     return 0
   fi
   if [[ ! -e "${legacy_lock}" && ! -L "${legacy_lock}" ]]; then
-    directory_is_empty "${INSTALL_ROOT}" || return 0
+    if ! directory_is_empty "${INSTALL_ROOT}" &&
+      ! {
+        legacy_install_root_is_valid false false &&
+          legacy_cache_root_is_valid &&
+          legacy_pre_activation_state_root_is_valid &&
+          legacy_pre_activation_integration_is_absent
+      }; then
+      return 0
+    fi
     if ! (set -o noclobber; : >"${legacy_lock}") 2>/dev/null; then
       [[ -e "${legacy_lock}" || -L "${legacy_lock}" ]] ||
         die "could not create the public manager lock safely: ${legacy_lock}"
@@ -1243,6 +1253,7 @@ app_is_running() {
 
   for process_path in /proc/[0-9]*; do
     executable="$(readlink "${process_path}/exe" 2>/dev/null || true)"
+    executable="${executable% (deleted)}"
     case "${executable}" in
       "${RELEASES_DIR}"/*/app/devin-desktop|\
         "${RELEASES_DIR}"/*/app/bin/devin-desktop|\
@@ -2213,6 +2224,22 @@ backup_transaction() {
   snapshot_path "${DATA_HOME}/applications/mimeapps.list" applications-mimeapps ||
     return 1
   snapshot_path "${DATA_HOME}/mimeapps.list" data-mimeapps || return 1
+  record_preserved_transaction_snapshot "${APP_COMMAND}" app-command || return 1
+  record_preserved_transaction_snapshot \
+    "${MANAGER_COMMAND}" manager-command || return 1
+  record_preserved_transaction_snapshot "${MAIN_DESKTOP}" main-desktop ||
+    return 1
+  record_preserved_transaction_snapshot "${URL_DESKTOP}" url-desktop || return 1
+  record_preserved_transaction_snapshot "${ICON_FILE}" icon || return 1
+  record_preserved_transaction_snapshot "${MIME_FILE}" mime || return 1
+  record_preserved_transaction_snapshot \
+    "${LEGACY_MAIN_DESKTOP}" legacy-main || return 1
+  record_preserved_transaction_snapshot \
+    "${LEGACY_URL_DESKTOP}" legacy-url || return 1
+  record_preserved_transaction_snapshot "${LEGACY_ICON_FILE}" legacy-icon ||
+    return 1
+  record_preserved_transaction_snapshot "${LEGACY_MIME_FILE}" legacy-mime ||
+    return 1
   ownership_sentinel_content >"${TRANSACTION_BACKUP}/owner"
   chmod 0600 "${TRANSACTION_BACKUP}/owner"
   mv -T -- "${partial}" "${TRANSACTION_JOURNAL}"
@@ -2249,15 +2276,37 @@ transaction_created_path_is_manager_owned() {
         "$(readlink "${destination}")" == \
           "${CURRENT_LINK}/app/bin/devin-desktop" ]]
       ;;
-    main-desktop|url-desktop|legacy-main|legacy-url)
+    main-desktop)
+      if state_is_valid; then
+        managed_file_matches_state mainDesktop "${destination}"
+      else
+        legacy_desktop_owned "${destination}"
+      fi
+      ;;
+    url-desktop)
+      if state_is_valid; then
+        managed_file_matches_state urlDesktop "${destination}"
+      else
+        legacy_desktop_owned "${destination}"
+      fi
+      ;;
+    legacy-main|legacy-url)
       legacy_desktop_owned "${destination}"
       ;;
     icon)
-      asset_matches_release "${destination}" devin-desktop.png
+      if state_is_valid; then
+        managed_file_matches_state icon "${destination}"
+      else
+        asset_matches_release "${destination}" devin-desktop.png
+      fi
       ;;
     mime)
-      asset_matches_release \
-        "${destination}" devin-desktop-workspace.xml
+      if state_is_valid; then
+        managed_file_matches_state mime "${destination}"
+      else
+        asset_matches_release \
+          "${destination}" devin-desktop-workspace.xml
+      fi
       ;;
     legacy-icon)
       asset_matches_release "${destination}" devin-desktop.png
@@ -2281,6 +2330,20 @@ transaction_created_path_is_manager_owned() {
       return 1
       ;;
   esac
+}
+
+record_preserved_transaction_snapshot() {
+  local path="$1"
+  local name="$2"
+  local preserved="${TRANSACTION_BACKUP}/preserved"
+  local marker="${preserved}/${name}"
+
+  [[ -e "${path}" || -L "${path}" ]] || return 0
+  transaction_created_path_is_manager_owned "${path}" "${name}" && return 0
+  mkdir -p -- "${preserved}" || return 1
+  chmod 0700 "${preserved}" || return 1
+  : >"${marker}" || return 1
+  chmod 0600 "${marker}"
 }
 
 record_user_configuration_result() {
@@ -2390,11 +2453,17 @@ restore_path() {
   local destination="$1"
   local name="$2"
   local snapshot="${TRANSACTION_BACKUP}/${name}"
+  local preserved="${TRANSACTION_BACKUP}/preserved/${name}"
   local temporary="${destination}.restore.$$"
 
   rm -rf -- "${temporary}" || return 1
   if [[ -e "${snapshot}" || -L "${snapshot}" ]]; then
     if [[ "${TRANSACTION_DURABLE_RECOVERY}" == "true" ]]; then
+      if [[ -e "${preserved}" || -L "${preserved}" ]]; then
+        [[ -f "${preserved}" && ! -L "${preserved}" &&
+          ! -s "${preserved}" ]] || return 1
+        return 0
+      fi
       case "${name}" in
         config-mimeapps|applications-mimeapps|data-mimeapps)
           durable_user_configuration_matches_recorded_result \
@@ -2432,11 +2501,17 @@ restore_path() {
   fi
 }
 
+transaction_directory_is_valid() {
+  local root="$1"
+
+  [[ -d "${root}" && ! -L "${root}" &&
+    -f "${root}/owner" &&
+    ! -L "${root}/owner" ]] || return 1
+  [[ "$(cat "${root}/owner")" == "$(ownership_sentinel_content)" ]]
+}
+
 transaction_journal_is_valid() {
-  [[ -d "${TRANSACTION_BACKUP}" && ! -L "${TRANSACTION_BACKUP}" &&
-    -f "${TRANSACTION_BACKUP}/owner" &&
-    ! -L "${TRANSACTION_BACKUP}/owner" ]] || return 1
-  [[ "$(cat "${TRANSACTION_BACKUP}/owner")" == "$(ownership_sentinel_content)" ]]
+  transaction_directory_is_valid "${TRANSACTION_BACKUP}"
 }
 
 manager_install_root_is_valid() {
@@ -2656,7 +2731,7 @@ discard_transaction() {
 recover_pending_transaction_discard() {
   [[ ! -e "${TRANSACTION_DISCARD}" &&
     ! -L "${TRANSACTION_DISCARD}" ]] && return 0
-  [[ -d "${TRANSACTION_DISCARD}" && ! -L "${TRANSACTION_DISCARD}" ]] ||
+  transaction_directory_is_valid "${TRANSACTION_DISCARD}" ||
     die "unfinished transaction discard is unsafe: ${TRANSACTION_DISCARD}"
   info "finishing an interrupted transaction discard"
   rm -rf -- "${TRANSACTION_DISCARD}" ||
