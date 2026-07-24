@@ -734,6 +734,22 @@ JSON
   [ -z "${output}" ]
 }
 
+@test "migration removes an interrupted legacy state write temporary" {
+  local state_root="${TEST_HOME}/.local/state/devin-desktop-manager"
+  local temporary="${state_root}/state.json.new.12345"
+
+  install_fixture
+  downgrade_to_public_0_1_layout
+  printf 'partial state\n' >"${temporary}"
+
+  run install_fixture
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"migrating verified public 0.1.0 installation"* ]]
+  [ ! -e "${temporary}" ]
+  [ -f "${state_root}/state.json" ]
+}
+
 @test "migration removes interrupted legacy staging and link temporaries" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
   local current_target release_name staging integration
@@ -868,6 +884,57 @@ JSON
   [ -d "${release_before}" ]
   run find "${install_root}/releases" -mindepth 1 -maxdepth 1 -type d -print
   [ "$(printf '%s\n' "${output}" | sed '/^$/d' | wc -l)" -eq 1 ]
+}
+
+@test "migration resumes an empty public root left before the first download" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+
+  install_fixture
+  downgrade_to_public_0_1_layout
+  rm -f -- \
+    "${install_root}/current" \
+    "${install_root}/previous" \
+    "${TEST_HOME}/.local/bin/devin-desktop" \
+    "${TEST_HOME}/.local/state/devin-desktop-manager/state.json" \
+    "${TEST_HOME}/.local/share/applications/devin-desktop-manager.desktop" \
+    "${TEST_HOME}/.local/share/applications/devin-desktop-manager-url-handler.desktop" \
+    "${TEST_HOME}/.local/share/icons/hicolor/512x512/apps/devin-desktop-manager.png" \
+    "${TEST_HOME}/.local/share/mime/packages/devin-desktop-manager-workspace.xml" \
+    "${DEFAULTS_FILE}"
+  rm -rf -- "${install_root}/releases"/*
+
+  run install_fixture
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"migrating verified public 0.1.0 installation"* ]]
+  [ -L "${install_root}/current" ]
+  run find "${install_root}/releases" -mindepth 1 -maxdepth 1 -type d -print
+  [ "$(printf '%s\n' "${output}" | sed '/^$/d' | wc -l)" -eq 1 ]
+}
+
+@test "migration resumes a public release linked before state publication" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local state_temporary="${TEST_HOME}/.local/state/devin-desktop-manager/state.json.new.12345"
+
+  install_fixture
+  downgrade_to_public_0_1_layout
+  rm -f -- \
+    "${TEST_HOME}/.local/bin/devin-desktop" \
+    "${TEST_HOME}/.local/state/devin-desktop-manager/state.json" \
+    "${TEST_HOME}/.local/share/applications/devin-desktop-manager.desktop" \
+    "${TEST_HOME}/.local/share/applications/devin-desktop-manager-url-handler.desktop" \
+    "${TEST_HOME}/.local/share/icons/hicolor/512x512/apps/devin-desktop-manager.png" \
+    "${TEST_HOME}/.local/share/mime/packages/devin-desktop-manager-workspace.xml" \
+    "${DEFAULTS_FILE}"
+  printf 'partial state\n' >"${state_temporary}"
+
+  run install_fixture
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"migrating verified public 0.1.0 installation"* ]]
+  [ -L "${install_root}/current" ]
+  [ -f "${TEST_HOME}/.local/state/devin-desktop-manager/state.json" ]
+  [ ! -e "${state_temporary}" ]
 }
 
 @test "migration rejects a symlinked manager temporary without changing its target" {
@@ -1517,6 +1584,42 @@ EOF
   [ "${status}" -eq 0 ]
   [[ "${output}" == *"recovering an unfinished manager transaction"* ]]
   [ "${lines[-1]}" = "original" ]
+}
+
+@test "transaction recovery preserves a user file created after an absent snapshot" {
+  local mimeapps="${TEST_HOME}/.config/mimeapps.list"
+  local journal="${TEST_HOME}/.local/state/devin-desktop-manager.transaction"
+
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      acquire_lock
+      backup_transaction
+    ' _ "${MANAGER}"
+  [ "${status}" -eq 0 ]
+  [ -d "${journal}" ]
+
+  mkdir -p "$(dirname "${mimeapps}")"
+  printf 'user-created after crash\n' >"${mimeapps}"
+
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      acquire_lock
+    ' _ "${MANAGER}"
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"unfinished transaction recovery failed"* ]]
+  [ "$(cat "${mimeapps}")" = "user-created after crash" ]
+  [ -d "${journal}" ]
 }
 
 @test "transaction recovery takes an existing public manager lock" {

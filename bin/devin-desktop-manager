@@ -626,7 +626,7 @@ legacy_release_inventory_is_valid() {
     legacy_release_metadata_is_valid "${release_entry}" || return 1
     saw_release=true
   done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -print0)
-  [[ "${saw_release}" == "true" ]]
+  [[ "${saw_release}" == "true" || "${require_current}" == "false" ]]
 }
 
 legacy_state_is_valid() {
@@ -777,6 +777,9 @@ legacy_state_root_is_valid() {
     name="$(basename "${entry}")"
     case "${name}" in
       state.json|"${OWNERSHIP_SENTINEL_NAME}") ;;
+      state.json.new.*)
+        migration_temporary_is_valid "${entry}" "state.json.new" || return 1
+        ;;
       "${OWNERSHIP_SENTINEL_NAME}".new.*)
         migration_temporary_is_valid \
           "${entry}" "${OWNERSHIP_SENTINEL_NAME}.new" || return 1
@@ -800,6 +803,9 @@ legacy_pre_activation_state_root_is_valid() {
     name="$(basename "${entry}")"
     case "${name}" in
       "${OWNERSHIP_SENTINEL_NAME}") ;;
+      state.json.new.*)
+        migration_temporary_is_valid "${entry}" "state.json.new" || return 1
+        ;;
       "${OWNERSHIP_SENTINEL_NAME}".new.*)
         migration_temporary_is_valid \
           "${entry}" "${OWNERSHIP_SENTINEL_NAME}.new" || return 1
@@ -824,6 +830,39 @@ legacy_pre_activation_integration_is_absent() {
     "${LEGACY_MIME_FILE}"; do
     [[ ! -e "${path}" && ! -L "${path}" ]] || return 1
   done
+}
+
+legacy_post_link_integration_is_recoverable() {
+  local path
+
+  if [[ -e "${APP_COMMAND}" || -L "${APP_COMMAND}" ]]; then
+    [[ -L "${APP_COMMAND}" &&
+      "$(readlink "${APP_COMMAND}")" == \
+        "${CURRENT_LINK}/app/bin/devin-desktop" ]] || return 1
+  fi
+  for path in \
+    "${MAIN_DESKTOP}" \
+    "${URL_DESKTOP}" \
+    "${LEGACY_MAIN_DESKTOP}" \
+    "${LEGACY_URL_DESKTOP}"; do
+    if [[ -e "${path}" || -L "${path}" ]]; then
+      legacy_desktop_owned "${path}" || return 1
+    fi
+  done
+  if [[ -e "${ICON_FILE}" || -L "${ICON_FILE}" ]]; then
+    asset_matches_release "${ICON_FILE}" devin-desktop.png || return 1
+  fi
+  if [[ -e "${MIME_FILE}" || -L "${MIME_FILE}" ]]; then
+    asset_matches_release \
+      "${MIME_FILE}" devin-desktop-workspace.xml || return 1
+  fi
+  if [[ -e "${LEGACY_ICON_FILE}" || -L "${LEGACY_ICON_FILE}" ]]; then
+    asset_matches_release "${LEGACY_ICON_FILE}" devin-desktop.png || return 1
+  fi
+  if [[ -e "${LEGACY_MIME_FILE}" || -L "${LEGACY_MIME_FILE}" ]]; then
+    asset_matches_release \
+      "${LEGACY_MIME_FILE}" devin-desktop-workspace.xml || return 1
+  fi
 }
 
 upgrade_legacy_release_metadata() {
@@ -897,9 +936,16 @@ cleanup_install_temporaries() {
 }
 
 cleanup_legacy_migration_temporaries() {
+  local path
+
   cleanup_install_temporaries legacy || return 1
   cleanup_ownership_sentinel_temporaries "${CACHE_ROOT}" || return 1
-  cleanup_ownership_sentinel_temporaries "${STATE_DIR}"
+  cleanup_ownership_sentinel_temporaries "${STATE_DIR}" || return 1
+  for path in "${STATE_FILE}.new."*; do
+    [[ -e "${path}" || -L "${path}" ]] || continue
+    migration_temporary_is_valid "${path}" "state.json.new" || return 1
+    rm -f -- "${path}" || return 1
+  done
 }
 
 fresh_markerless_install_root_is_valid() {
@@ -949,6 +995,14 @@ migrate_legacy_layout_if_needed() {
       ! legacy_pre_activation_state_root_is_valid ||
       ! legacy_pre_activation_integration_is_absent; then
       die "public ${LEGACY_MANAGER_VERSION} pre-activation installation could not be safely verified; refusing ownership migration"
+    fi
+  elif [[ ! -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]]; then
+    pre_activation=true
+    if ! legacy_install_root_is_valid ||
+      ! legacy_cache_root_is_valid ||
+      ! legacy_pre_activation_state_root_is_valid ||
+      ! legacy_post_link_integration_is_recoverable; then
+      die "public ${LEGACY_MANAGER_VERSION} post-link installation could not be safely verified; refusing ownership migration"
     fi
   elif ! legacy_install_root_is_valid ||
     ! legacy_cache_root_is_valid ||
@@ -2088,6 +2142,53 @@ backup_transaction() {
   TRANSACTION_BACKUP="${TRANSACTION_JOURNAL}"
 }
 
+transaction_created_path_is_manager_owned() {
+  local destination="$1"
+  local name="$2"
+
+  case "${name}" in
+    current|previous)
+      release_target "${destination}" >/dev/null
+      ;;
+    app-command)
+      [[ -L "${destination}" &&
+        "$(readlink "${destination}")" == \
+          "${CURRENT_LINK}/app/bin/devin-desktop" ]]
+      ;;
+    main-desktop|url-desktop|legacy-main|legacy-url)
+      legacy_desktop_owned "${destination}"
+      ;;
+    icon)
+      asset_matches_release "${destination}" devin-desktop.png
+      ;;
+    mime)
+      asset_matches_release \
+        "${destination}" devin-desktop-workspace.xml
+      ;;
+    legacy-icon)
+      asset_matches_release "${destination}" devin-desktop.png
+      ;;
+    legacy-mime)
+      asset_matches_release \
+        "${destination}" devin-desktop-workspace.xml
+      ;;
+    state)
+      state_is_valid
+      ;;
+    state-owner)
+      [[ "${destination}" == "${STATE_DIR}/${OWNERSHIP_SENTINEL_NAME}" ]] &&
+        owned_root_is_valid "${STATE_DIR}"
+      ;;
+    cache-owner)
+      [[ "${destination}" == "${CACHE_ROOT}/${OWNERSHIP_SENTINEL_NAME}" ]] &&
+        owned_root_is_valid "${CACHE_ROOT}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 restore_path() {
   local destination="$1"
   local name="$2"
@@ -2105,7 +2206,9 @@ restore_path() {
       rm -rf -- "${temporary}" || true
       return 1
     }
-  else
+  elif [[ -e "${destination}" || -L "${destination}" ]]; then
+    transaction_created_path_is_manager_owned "${destination}" "${name}" ||
+      return 1
     rm -rf -- "${destination}" || return 1
   fi
 }
