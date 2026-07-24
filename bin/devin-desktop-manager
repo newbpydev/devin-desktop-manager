@@ -2788,7 +2788,7 @@ recover_pending_transaction() {
 }
 
 uninstall_cleanup_record_fields() {
-  local record="${1:-${UNINSTALL_CLEANUP_RECORD}}"
+  local record="$1"
 
   jq -er --arg manager_id "${MANAGER_ID}" \
     --argjson schema_version "${OWNERSHIP_SCHEMA_VERSION}" '
@@ -2858,7 +2858,9 @@ uninstall_cleanup_record_matches_root() {
   local expected_root="$1"
   local fields recorded_root device inode
 
-  fields="$(uninstall_cleanup_record_fields)" || return 1
+  fields="$(
+    uninstall_cleanup_record_fields "${UNINSTALL_CLEANUP_RECORD}"
+  )" || return 1
   IFS=$'\t' read -r recorded_root device inode <<<"${fields}"
   [[ "${recorded_root}" == "${expected_root}" ]] || return 1
   owned_root_is_valid "${recorded_root}" || return 1
@@ -2916,7 +2918,9 @@ finish_recorded_uninstall_cleanup() {
   [[ -f "${UNINSTALL_CLEANUP_RECORD}" &&
     ! -L "${UNINSTALL_CLEANUP_RECORD}" ]] ||
     die "unfinished uninstall cleanup record is invalid: ${UNINSTALL_CLEANUP_RECORD}"
-  fields="$(uninstall_cleanup_record_fields)" ||
+  fields="$(
+    uninstall_cleanup_record_fields "${UNINSTALL_CLEANUP_RECORD}"
+  )" ||
     die "unfinished uninstall cleanup record is invalid: ${UNINSTALL_CLEANUP_RECORD}"
   IFS=$'\t' read -r staged_root device inode <<<"${fields}"
   validate_staged_install_root_path "${staged_root}" ||
@@ -3041,7 +3045,7 @@ release_prune_quarantine_name() {
 }
 
 release_prune_cleanup_record_fields() {
-  local record="${1:-${RELEASE_PRUNE_CLEANUP_RECORD}}"
+  local record="$1"
 
   jq -er \
     --arg manager_id "${MANAGER_ID}" \
@@ -3150,7 +3154,9 @@ finish_recorded_release_prune() {
   [[ -f "${RELEASE_PRUNE_CLEANUP_RECORD}" &&
     ! -L "${RELEASE_PRUNE_CLEANUP_RECORD}" ]] ||
     die "unfinished release prune record is invalid: ${RELEASE_PRUNE_CLEANUP_RECORD}"
-  fields="$(release_prune_cleanup_record_fields)" ||
+  fields="$(
+    release_prune_cleanup_record_fields "${RELEASE_PRUNE_CLEANUP_RECORD}"
+  )" ||
     die "unfinished release prune record is invalid: ${RELEASE_PRUNE_CLEANUP_RECORD}"
   IFS=$'\t' read -r \
     release_name quarantine_name device inode metadata_sha256 <<<"${fields}"
