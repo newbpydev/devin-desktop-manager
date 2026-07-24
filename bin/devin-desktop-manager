@@ -1177,6 +1177,7 @@ acquire_lock() {
   [[ -f "${LOCK_FILE}" && ! -L "${LOCK_FILE}" &&
     "${LOCK_FILE}" -ef /proc/self/fd/9 ]] ||
     die "manager lock changed while it was being acquired: ${LOCK_FILE}"
+  recover_transaction_partials
   recover_pending_transaction_discard
   acquire_legacy_lock_if_needed
   recover_pending_transaction
@@ -2117,9 +2118,18 @@ write_state() {
 }
 
 refresh_desktop_caches() {
-  update-desktop-database "${DATA_HOME}/applications" || return 1
-  update-mime-database "${DATA_HOME}/mime" || return 1
-  if command -v kbuildsycoca6 >/dev/null 2>&1; then
+  local refreshed=false
+
+  if [[ -d "${DATA_HOME}/applications" ]]; then
+    update-desktop-database "${DATA_HOME}/applications" || return 1
+    refreshed=true
+  fi
+  if [[ -d "${DATA_HOME}/mime" ]]; then
+    update-mime-database "${DATA_HOME}/mime" || return 1
+    refreshed=true
+  fi
+  if [[ "${refreshed}" == "true" ]] &&
+    command -v kbuildsycoca6 >/dev/null 2>&1; then
     kbuildsycoca6 --noincremental >/dev/null ||
       warn "KDE cache refresh failed; log out and back in if the launcher is stale"
   fi
@@ -2195,6 +2205,23 @@ backup_transaction() {
   chmod 0600 "${TRANSACTION_BACKUP}/owner"
   mv -T -- "${partial}" "${TRANSACTION_JOURNAL}"
   TRANSACTION_BACKUP="${TRANSACTION_JOURNAL}"
+}
+
+recover_transaction_partials() {
+  local partial name pid
+
+  for partial in "${TRANSACTION_JOURNAL}".new.*; do
+    [[ -e "${partial}" || -L "${partial}" ]] || continue
+    name="$(basename "${partial}")"
+    pid="${name##*.new.}"
+    [[ "${pid}" =~ ^[0-9]+$ &&
+      -d "${partial}" && ! -L "${partial}" &&
+      "$(stat -c '%u' -- "${partial}" 2>/dev/null)" == "${EUID}" ]] ||
+      die "unfinished transaction temporary is unsafe: ${partial}"
+    info "removing an orphaned transaction temporary"
+    rm -rf -- "${partial}" ||
+      die "could not remove orphaned transaction temporary: ${partial}"
+  done
 }
 
 transaction_created_path_is_manager_owned() {
@@ -3345,6 +3372,7 @@ command_rollback() {
   metadata_build="$(jq -r '.build // empty' "${previous_path}/release.json")"
   metadata_product="$(jq -r '.productVersion // empty' "${previous_path}/release.json")"
   validate_release "${previous_path}" "${metadata_build}" "${metadata_product}"
+  validate_retained_or_reused_release "${previous_path}"
   build_integration_stage "${previous_path}"
   backup_transaction
 
@@ -3647,7 +3675,6 @@ perform_uninstall() {
   refresh_desktop_caches || return 1
   stage_install_root_for_uninstall || return 1
   rm -rf -- "${CACHE_ROOT}" "${STATE_DIR}" || return 1
-  remove_manager_command_if_owned || return 1
 }
 
 command_uninstall() {
@@ -3695,6 +3722,9 @@ command_uninstall() {
     finish_recorded_uninstall_cleanup false
   fi
   STAGED_INSTALL_ROOT=""
+  if ! remove_manager_command_if_owned; then
+    warn "could not remove the manager command; remove it manually: ${MANAGER_COMMAND}"
+  fi
   info "managed application removed; Devin CLI and user configuration were preserved"
 }
 

@@ -79,10 +79,16 @@ EOF
 EOF
   cat >"${MOCK_BIN}/update-desktop-database" <<'EOF'
 #!/usr/bin/env bash
+if [[ "${MOCK_CACHE_REQUIRE_DIRECTORY:-0}" == "1" ]]; then
+  [[ -d "$1" ]] || exit 75
+fi
 [[ "${MOCK_DESKTOP_CACHE_FAIL:-0}" != "1" ]]
 EOF
   cat >"${MOCK_BIN}/update-mime-database" <<'EOF'
 #!/usr/bin/env bash
+if [[ "${MOCK_CACHE_REQUIRE_DIRECTORY:-0}" == "1" ]]; then
+  [[ -d "$1" ]] || exit 75
+fi
 [[ "${MOCK_MIME_CACHE_FAIL:-0}" != "1" ]]
 EOF
   cat >"${MOCK_BIN}/kbuildsycoca6" <<'EOF'
@@ -1442,8 +1448,10 @@ EOF
     "${TEST_HOME}/.local/share/mime/packages/devin-desktop-manager-workspace.xml"
   rm -rf -- \
     "${TEST_HOME}/.cache/devin-desktop-manager" \
-    "${TEST_HOME}/.local/state/devin-desktop-manager"
+    "${TEST_HOME}/.local/state/devin-desktop-manager" \
+    "${TEST_HOME}/.local/share"
 
+  export MOCK_CACHE_REQUIRE_DIRECTORY=1
   run manager_env uninstall --yes
 
   [ "${status}" -eq 0 ]
@@ -1645,6 +1653,23 @@ EOF
       fi
       [[ "${saw_backup}" == "true" && -z "${TRANSACTION_BACKUP}" &&
         ! -e "${partial}" && ! -L "${partial}" ]]
+    ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
+}
+
+@test "the next mutation removes an orphan transaction partial before PID reuse" {
+  run env HOME="${TEST_HOME}" XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      mkdir -p "${STATE_HOME}"
+      partial="${TRANSACTION_JOURNAL}.new.$$"
+      mkdir -p "${partial}"
+      printf "orphaned\n" >"${partial}/partial"
+      acquire_lock
+      [[ ! -e "${partial}" && ! -L "${partial}" ]]
+      backup_transaction
+      [[ "${TRANSACTION_BACKUP}" == "${TRANSACTION_JOURNAL}" ]]
     ' _ "${MANAGER}"
 
   [ "${status}" -eq 0 ]
@@ -2143,6 +2168,34 @@ EOF
   [ "$(readlink "${TEST_HOME}/.local/opt/devin-desktop/current")" = "${current_before}" ]
 }
 
+@test "rollback refuses a previous release with damaged ownership metadata" {
+  local second="${BATS_TEST_TMPDIR}/second.deb"
+  local second_build="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local current_before previous_target previous_path temporary
+
+  install_fixture
+  "${FIXTURE_BUILDER}" "${second}" safe "${second_build}" "3.4.28"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${second_build}/Devin-linux-x64-3.4.28.deb" \
+    "${second}" "3.4.28" "${second_build}" 1783378474000
+  manager_env update
+  current_before="$(readlink "${install_root}/current")"
+  previous_target="$(readlink "${install_root}/previous")"
+  previous_path="${install_root}/${previous_target}"
+  temporary="${previous_path}/release.json.test"
+  jq '.artifactUrl = "https://example.invalid/foreign.deb"' \
+    "${previous_path}/release.json" >"${temporary}"
+  mv -Tf -- "${temporary}" "${previous_path}/release.json"
+
+  run manager_env rollback
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"retained or reused release is invalid"* ]]
+  [ "$(readlink "${install_root}/current")" = "${current_before}" ]
+  [ "$(readlink "${install_root}/previous")" = "${previous_target}" ]
+}
+
 @test "rollback refuses to retain a corrupted current release as previous" {
   local second="${BATS_TEST_TMPDIR}/second.deb"
   local second_build="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -2616,21 +2669,19 @@ EOF
   [ -f "${TEST_HOME}/.local/state/devin-desktop-manager/state.json" ]
 }
 
-@test "uninstall restores the installation when final command removal fails" {
+@test "uninstall commits before attempting final manager command removal" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
   local manager_command="${TEST_HOME}/.local/bin/devin-desktop-manager"
-  local current_before
 
   install_fixture
   ln -s "${MANAGER}" "${manager_command}"
-  current_before="$(readlink "${install_root}/current")"
 
   export MOCK_RM_FAIL_PATH="${manager_command}"
   run manager_env uninstall --yes
 
-  [ "${status}" -ne 0 ]
-  [ "$(readlink "${install_root}/current")" = "${current_before}" ]
-  [ -x "${install_root}/${current_before}/app/bin/devin-desktop" ]
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"could not remove the manager command"* ]]
+  [ ! -e "${install_root}" ]
   [ -L "${manager_command}" ]
 }
 
@@ -2816,22 +2867,24 @@ EOF
   [ ! -e "${install_root}" ]
 }
 
-@test "termination after manager command removal restores the full installation" {
+@test "manager command removal happens after committed uninstall cleanup" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
   local manager_command="${TEST_HOME}/.local/bin/devin-desktop-manager"
-  local current_before
+  local cleanup_record="${TEST_HOME}/.local/state/devin-desktop-manager.cleanup"
 
   install_fixture
   ln -s "${MANAGER}" "${manager_command}"
-  current_before="$(readlink "${install_root}/current")"
 
   export MOCK_RM_SIGNAL_AFTER_PATH="${manager_command}"
   run manager_env uninstall --yes
 
   [ "${status}" -eq 143 ]
-  [ -L "${manager_command}" ]
-  [ "$(readlink "${install_root}/current")" = "${current_before}" ]
-  [ -x "${install_root}/${current_before}/app/bin/devin-desktop" ]
+  [ ! -e "${manager_command}" ]
+  [ ! -e "${install_root}" ]
+  [ ! -e "${cleanup_record}" ]
+  run find "${TEST_HOME}/.local/opt" -maxdepth 1 \
+    -type d -name 'devin-desktop.uninstall-*' -print
+  [ -z "${output}" ]
 }
 
 @test "the next mutation finishes an interrupted committed uninstall cleanup" {
