@@ -1357,6 +1357,22 @@ EOF
   [ "$(readlink "${install_root}/previous")" = "../broken-previous" ]
 }
 
+@test "update rejects a previous release link without a current release" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local current_target
+
+  install_fixture
+  current_target="$(readlink "${install_root}/current")"
+  rm -f -- "${install_root}/current"
+  ln -s "${current_target}" "${install_root}/previous"
+
+  run install_fixture
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"previous release link exists without a current release"* ]]
+  [ "$(readlink "${install_root}/previous")" = "${current_target}" ]
+}
+
 @test "check distinguishes up-to-date and update-available installations" {
   local second="${BATS_TEST_TMPDIR}/second.deb"
   local second_build="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -2904,6 +2920,34 @@ EOF
       if bash -c '\''exec 8>&-; flock -n "$1" true'\'' _ "${public_lock}"; then
         exit 1
       fi
+      restore_transaction
+      [[ -L "${CURRENT_LINK}" && ! -e "${STAGED_INSTALL_ROOT}" ]]
+    ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
+  [ -L "${install_root}/current" ]
+}
+
+@test "failed legacy lock bridge publication cleans its placeholder" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+
+  install_fixture
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      acquire_lock
+      backup_transaction
+      ln() { return 1; }
+      if stage_install_root_for_uninstall; then
+        exit 1
+      fi
+      unset -f ln
+      [[ ! -e "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" &&
+        -d "${STAGED_INSTALL_ROOT}" ]]
       restore_transaction
       [[ -L "${CURRENT_LINK}" && ! -e "${STAGED_INSTALL_ROOT}" ]]
     ' _ "${MANAGER}"
