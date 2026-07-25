@@ -20,6 +20,7 @@ EOF
 @test "project keeps executable manager and release scripts" {
   [ -x "${PROJECT_ROOT}/bin/devin-desktop-manager" ]
   [ -x "${PROJECT_ROOT}/scripts/install-manager" ]
+  [ -x "${PROJECT_ROOT}/scripts/check-coverage" ]
   [ -x "${PROJECT_ROOT}/scripts/package-release" ]
   [ -x "${PROJECT_ROOT}/scripts/release-check" ]
 }
@@ -35,6 +36,36 @@ EOF
   [[ "${output}" == *"verify"* ]]
   [[ "${output}" == *"package"* ]]
   [[ "${output}" == *"release-check"* ]]
+}
+
+@test "coverage target enforces the public repository threshold" {
+  grep -Fq 'coverage:' "${PROJECT_ROOT}/Makefile"
+  grep -Fq 'COVERAGE_MINIMUM ?= 90' "${PROJECT_ROOT}/Makefile"
+  grep -Fq 'release-check: lint coverage' "${PROJECT_ROOT}/Makefile"
+  grep -Fq 'make coverage' "${PROJECT_ROOT}/CONTRIBUTING.md"
+  grep -Fq 'minimum_coverage ENV.fetch("COVERAGE_MINIMUM", "90")' \
+    "${PROJECT_ROOT}/.simplecov"
+}
+
+@test "coverage target rejects a stale result when the runner produces nothing" {
+  local coverage_dir="${BATS_TEST_TMPDIR}/coverage"
+
+  mkdir -p "${coverage_dir}"
+  cat >"${coverage_dir}/.resultset.json" <<'JSON'
+{
+  "stale": {
+    "coverage": {
+      "/project/bin/tool": [1, 1, 1, 1]
+    }
+  }
+}
+JSON
+
+  run make --no-print-directory -s -C "${PROJECT_ROOT}" \
+    BASHCOV=true COVERAGE_DIR="${coverage_dir}" COVERAGE_MINIMUM=100 coverage
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"result set is missing"* ]]
 }
 
 @test "lifecycle targets forward exactly one command to the manager" {
@@ -70,6 +101,11 @@ EOF
   [ -x "${installed}" ]
   [ ! -L "${installed}" ]
   [ "$("${installed}" --version)" = "devin-desktop-manager 0.1.0" ]
+
+  run make --no-print-directory -s -C "${PROJECT_ROOT}" \
+    HOME="${TEST_HOME}" MANAGER="${installed}" install-manager
+  [ "${status}" -eq 0 ]
+  [ -x "${installed}" ]
 }
 
 @test "install-manager migrates the project development symlink" {
@@ -99,6 +135,26 @@ EOF
   grep -q 'exit 0' "${installed}"
 }
 
+@test "install-manager validates its arguments and source identity" {
+  local installer="${PROJECT_ROOT}/scripts/install-manager"
+  local destination="${TEST_HOME}/.local/bin/devin-desktop-manager"
+  local unrelated="${BATS_TEST_TMPDIR}/unrelated"
+
+  run "${installer}"
+  [ "${status}" -eq 2 ]
+  [[ "${output}" == *"Usage: install-manager"* ]]
+
+  run "${installer}" "${BATS_TEST_TMPDIR}/missing" "${destination}"
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"source is not an executable file"* ]]
+
+  printf '#!/usr/bin/env bash\nexit 0\n' >"${unrelated}"
+  chmod 0755 "${unrelated}"
+  run "${installer}" "${unrelated}" "${destination}"
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"source does not identify this project"* ]]
+}
+
 @test "development link is explicit and resolves to project source" {
   local installed="${TEST_HOME}/.local/bin/devin-desktop-manager"
 
@@ -122,8 +178,10 @@ EOF
   cmp "${first}/devin-desktop-manager-0.1.0.tar.gz" \
     "${second}/devin-desktop-manager-0.1.0.tar.gz"
   cmp "${first}/SHA256SUMS" "${second}/SHA256SUMS"
-  tar -tzf "${first}/devin-desktop-manager-0.1.0.tar.gz" |
-    grep -qx 'devin-desktop-manager-0.1.0/bin/devin-desktop-manager'
+  tar -tzf "${first}/devin-desktop-manager-0.1.0.tar.gz" \
+    >"${BATS_TEST_TMPDIR}/archive-contents"
+  grep -qx 'devin-desktop-manager-0.1.0/bin/devin-desktop-manager' \
+    "${BATS_TEST_TMPDIR}/archive-contents"
 }
 
 @test "package excludes untracked files once the repository has a commit" {
@@ -149,4 +207,27 @@ EOF
   [ "${status}" -eq 0 ]
   [[ "${output}" == *"devin-desktop-manager-0.1.0/README.md"* ]]
   [[ "${output}" != *"untracked-secret.txt"* ]]
+}
+
+@test "package-release rejects usage version and empty repository errors" {
+  local packager="${PROJECT_ROOT}/scripts/package-release"
+  local repository="${BATS_TEST_TMPDIR}/empty-repository"
+  local dist_dir="${BATS_TEST_TMPDIR}/empty-dist"
+
+  run "${packager}"
+  [ "${status}" -eq 2 ]
+  [[ "${output}" == *"Usage: package-release"* ]]
+
+  run "${packager}" latest "${dist_dir}"
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"invalid release version"* ]]
+
+  mkdir -p "${repository}/scripts"
+  cp "${packager}" "${repository}/scripts/package-release"
+  git -C "${repository}" init --quiet
+  git -C "${repository}" -c user.name=Test -c user.email=test@example.invalid \
+    commit --quiet --allow-empty -m empty
+  run "${repository}/scripts/package-release" 0.1.0 "${dist_dir}"
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"no repository files found"* ]]
 }

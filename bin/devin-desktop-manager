@@ -11,6 +11,11 @@ umask 077
 readonly MANAGER_VERSION="0.1.0"
 readonly MANAGER_ID="io.github.newbpydev.devin-desktop-manager"
 readonly MANAGER_DESKTOP_MARKER="X-Devin-Desktop-Manager=true"
+readonly LEGACY_MANAGER_VERSION="0.1.0"
+readonly OWNERSHIP_SCHEMA_VERSION=1
+readonly RELEASE_METADATA_SCHEMA_VERSION=1
+readonly STATE_SCHEMA_VERSION=1
+readonly OWNERSHIP_SENTINEL_NAME=".devin-desktop-manager-owned"
 readonly MANIFEST_URL="https://windsurf-stable.codeium.com/api/update/linux-x64-deb/stable/latest"
 readonly MANIFEST_MAX_BYTES=1048576
 
@@ -25,6 +30,13 @@ readonly STATE_HOME="${XDG_STATE_HOME:-${HOME_DIR}/.local/state}"
 readonly CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME_DIR}/.config}"
 readonly STATE_DIR="${STATE_HOME}/devin-desktop-manager"
 readonly STATE_FILE="${STATE_DIR}/state.json"
+readonly LOCK_FILE="${STATE_HOME}/devin-desktop-manager.lock"
+readonly TRANSACTION_JOURNAL="${STATE_HOME}/devin-desktop-manager.transaction"
+readonly TRANSACTION_DISCARD="${TRANSACTION_JOURNAL}.discard"
+readonly UNINSTALL_CLEANUP_RECORD="${STATE_HOME}/devin-desktop-manager.cleanup"
+readonly UNINSTALL_CLEANUP_PROOF="${UNINSTALL_CLEANUP_RECORD}.proof"
+readonly RELEASE_PRUNE_CLEANUP_RECORD="${STATE_HOME}/devin-desktop-manager.prune"
+readonly RELEASE_PRUNE_CLEANUP_PROOF="${RELEASE_PRUNE_CLEANUP_RECORD}.proof"
 readonly BIN_DIR="${HOME_DIR}/.local/bin"
 readonly APP_COMMAND="${BIN_DIR}/devin-desktop"
 readonly MANAGER_COMMAND="${BIN_DIR}/devin-desktop-manager"
@@ -62,6 +74,14 @@ declare -ar CURL_SECURITY_OPTIONS=(
 STAGING_PATH=""
 INTEGRATION_STAGE=""
 TRANSACTION_BACKUP=""
+TRANSACTION_BACKUP_READY=false
+STAGED_INSTALL_ROOT=""
+TRANSACTION_RESTORING=false
+TRANSACTION_DISCARDING=false
+TRANSACTION_DURABLE_RECOVERY=false
+LEGACY_LOCK_HELD=false
+CLEANUP_PROOF_TEMP=""
+RESTORE_TEMP_ROOT=""
 
 info() {
   printf 'devin-desktop-manager: %s\n' "$*" >&2
@@ -79,10 +99,10 @@ die() {
 cleanup() {
   local path
 
-  for path in "${STAGING_PATH}" "${INTEGRATION_STAGE}" "${TRANSACTION_BACKUP}"; do
+  for path in "${STAGING_PATH}" "${INTEGRATION_STAGE}"; do
     [[ -n "${path}" && -e "${path}" ]] || continue
     case "${path}" in
-      "${INSTALL_ROOT}"/.staging-*|"${INSTALL_ROOT}"/.integration-*|/tmp/devin-desktop-manager.*)
+      "${INSTALL_ROOT}"/.staging-*|"${INSTALL_ROOT}"/.integration-*)
         rm -rf -- "${path}"
         ;;
       *)
@@ -90,9 +110,57 @@ cleanup() {
         ;;
     esac
   done
+  case "${TRANSACTION_BACKUP}" in
+    "${TRANSACTION_JOURNAL}".new.*)
+      rm -rf -- "${TRANSACTION_BACKUP}"
+      TRANSACTION_BACKUP=""
+      TRANSACTION_BACKUP_READY=false
+      ;;
+  esac
+  case "${CLEANUP_PROOF_TEMP}" in
+    "${UNINSTALL_CLEANUP_PROOF}.new.$$"|\
+      "${RELEASE_PRUNE_CLEANUP_PROOF}.new.$$")
+      rm -f -- "${CLEANUP_PROOF_TEMP}"
+      CLEANUP_PROOF_TEMP=""
+      ;;
+  esac
+  if [[ -n "${RESTORE_TEMP_ROOT}" ]]; then
+    case "$(basename "${RESTORE_TEMP_ROOT}")" in
+      .devin-desktop-manager-restore.*)
+        if [[ -d "${RESTORE_TEMP_ROOT}" && ! -L "${RESTORE_TEMP_ROOT}" && "$(stat -c '%u' -- "${RESTORE_TEMP_ROOT}" 2>/dev/null)" == "${EUID}" ]]; then
+          rm -rf -- "${RESTORE_TEMP_ROOT}"
+        else
+          warn "refusing to clean unsafe restore temporary: ${RESTORE_TEMP_ROOT}"
+        fi
+        ;;
+      *)
+        warn "refusing to clean unexpected restore temporary: ${RESTORE_TEMP_ROOT}"
+        ;;
+    esac
+    RESTORE_TEMP_ROOT=""
+  fi
 }
 
 trap cleanup EXIT
+
+handle_transaction_signal() {
+  local status="$1"
+
+  trap - INT TERM HUP
+  if [[ -n "${TRANSACTION_BACKUP}" &&
+    "${TRANSACTION_BACKUP_READY}" == "true" &&
+    "${TRANSACTION_RESTORING}" != "true" &&
+    "${TRANSACTION_DISCARDING}" != "true" ]]; then
+    warn "operation interrupted; restoring the previous managed state"
+    restore_transaction ||
+      warn "automatic recovery failed; the next manager mutation will retry it"
+  fi
+  exit "${status}"
+}
+
+trap 'handle_transaction_signal 130' INT
+trap 'handle_transaction_signal 143' TERM
+trap 'handle_transaction_signal 129' HUP
 
 usage() {
   cat <<'EOF'
@@ -173,7 +241,21 @@ validate_absolute_directory() {
     die "${name} contains an unsupported control character"
 }
 
+path_is_at_or_below() {
+  local candidate="$1"
+  local root="$2"
+  local resolved_candidate resolved_root
+
+  resolved_candidate="$(readlink -m -- "${candidate}")" || return 1
+  resolved_root="$(readlink -m -- "${root}")" || return 1
+  [[ "${resolved_candidate}" == "${resolved_root}" ||
+    "${resolved_candidate}" == "${resolved_root}/"* ]]
+}
+
 validate_environment() {
+  local xdg_name xdg_path resolved_xdg resolved_transaction_journal
+  local resolved_install_root removed_root state_artifact
+
   validate_absolute_directory HOME "${HOME_DIR}"
   validate_absolute_directory XDG_CACHE_HOME \
     "${XDG_CACHE_HOME:-${HOME_DIR}/.cache}"
@@ -183,6 +265,70 @@ validate_environment() {
     "${XDG_STATE_HOME:-${HOME_DIR}/.local/state}"
   validate_absolute_directory XDG_CONFIG_HOME \
     "${XDG_CONFIG_HOME:-${HOME_DIR}/.config}"
+  resolved_transaction_journal="$(readlink -m -- "${TRANSACTION_JOURNAL}")" ||
+    die "could not resolve the transaction journal path"
+  resolved_install_root="$(readlink -m -- "${INSTALL_ROOT}")" ||
+    die "could not resolve the installation root"
+  for xdg_name in \
+    XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CONFIG_HOME; do
+    case "${xdg_name}" in
+      XDG_CACHE_HOME) xdg_path="${XDG_CACHE_HOME:-${HOME_DIR}/.cache}" ;;
+      XDG_DATA_HOME) xdg_path="${DATA_HOME}" ;;
+      XDG_STATE_HOME) xdg_path="${STATE_HOME}" ;;
+      XDG_CONFIG_HOME) xdg_path="${CONFIG_HOME}" ;;
+    esac
+    resolved_xdg="$(readlink -m -- "${xdg_path}")" ||
+      die "could not resolve ${xdg_name}"
+    case "${resolved_xdg}" in
+      "${resolved_transaction_journal}.new."*|"${resolved_install_root}.uninstall-"*)
+        die "${xdg_name} must not be a manager temporary cleanup root or a directory beneath it"
+        ;;
+    esac
+    if path_is_at_or_below "${xdg_path}" "${INSTALL_ROOT}"; then
+      die "${xdg_name} must not be the installation root or a directory beneath it"
+    fi
+    for removed_root in "${CACHE_ROOT}" "${STATE_DIR}"; do
+      if path_is_at_or_below "${xdg_path}" "${removed_root}"; then
+        die "${xdg_name} must not be a manager root removed by uninstall or a directory beneath it"
+      fi
+    done
+    for state_artifact in \
+      "${LOCK_FILE}" \
+      "${TRANSACTION_JOURNAL}" \
+      "${TRANSACTION_DISCARD}" \
+      "${UNINSTALL_CLEANUP_RECORD}" \
+      "${UNINSTALL_CLEANUP_PROOF}" \
+      "${RELEASE_PRUNE_CLEANUP_RECORD}" \
+      "${RELEASE_PRUNE_CLEANUP_PROOF}"; do
+      if path_is_at_or_below "${xdg_path}" "${state_artifact}"; then
+        die "${xdg_name} must not be a removable manager state artifact or a directory beneath it"
+      fi
+    done
+  done
+  if path_is_at_or_below "${STATE_DIR}" "${CACHE_ROOT}" ||
+    path_is_at_or_below "${CACHE_ROOT}" "${STATE_DIR}"; then
+    die "manager cache and state roots must not overlap"
+  fi
+}
+
+validate_state_home_security() {
+  local owner permissions group_mode other_mode
+
+  [[ -d "${STATE_HOME}" && ! -L "${STATE_HOME}" ]] ||
+    die "XDG_STATE_HOME must be a non-symbolic directory: ${STATE_HOME}"
+  owner="$(stat -c '%u' -- "${STATE_HOME}")" ||
+    die "could not inspect XDG_STATE_HOME ownership: ${STATE_HOME}"
+  [[ "${owner}" == "${EUID}" ]] ||
+    die "XDG_STATE_HOME must be owned by the current user: ${STATE_HOME}"
+  permissions="$(stat -c '%a' -- "${STATE_HOME}")" ||
+    die "could not inspect XDG_STATE_HOME permissions: ${STATE_HOME}"
+  [[ "${permissions}" =~ ^[0-7]{3,4}$ ]] ||
+    die "XDG_STATE_HOME has unsupported permissions: ${STATE_HOME}"
+  permissions="${permissions: -3}"
+  group_mode="${permissions:1:1}"
+  other_mode="${permissions:2:1}"
+  (((group_mode & 2) == 0 && (other_mode & 2) == 0)) ||
+    die "XDG_STATE_HOME must not be writable by other users: ${STATE_HOME}"
 }
 
 ensure_not_root() {
@@ -203,19 +349,906 @@ ensure_user_namespaces() {
     die "unprivileged user namespaces are unavailable; refusing to use --no-sandbox"
 }
 
+ownership_sentinel_content() {
+  printf '%s schema=%s\n' "${MANAGER_ID}" "${OWNERSHIP_SCHEMA_VERSION}"
+}
+
+directory_is_empty() {
+  local path="$1"
+  local first_entry
+
+  first_entry="$(find "${path}" -mindepth 1 -maxdepth 1 -print -quit)" ||
+    return 1
+  [[ -z "${first_entry}" ]]
+}
+
+directory_can_be_listed() {
+  local path="$1"
+
+  find "${path}" -mindepth 1 -maxdepth 1 -print -quit >/dev/null
+}
+
+owned_root_is_valid() {
+  local root="$1"
+  local sentinel="${root}/${OWNERSHIP_SENTINEL_NAME}"
+
+  [[ -d "${root}" && ! -L "${root}" &&
+    -f "${sentinel}" && ! -L "${sentinel}" ]] || return 1
+  [[ "$(cat "${sentinel}")" == "$(ownership_sentinel_content)" ]]
+}
+
+directory_contains_only_entry() {
+  local root="$1"
+  local retained="$2"
+  local entry
+  local -a entries=()
+
+  directory_can_be_listed "${root}" || return 1
+  mapfile -d '' entries < <(
+    find "${root}" -mindepth 1 -maxdepth 1 -print0
+  )
+  for entry in "${entries[@]}"; do
+    [[ "${entry}" == "${retained}" ]] || return 1
+  done
+  [[ -e "${retained}" || -L "${retained}" ]]
+}
+
+remove_directory_entries_except() {
+  local root="$1"
+  local retained="$2"
+  local entry
+  local -a entries=()
+
+  directory_can_be_listed "${root}" || return 1
+  mapfile -d '' entries < <(
+    find "${root}" -mindepth 1 -maxdepth 1 -print0
+  )
+  for entry in "${entries[@]}"; do
+    [[ "${entry}" == "${retained}" ]] && continue
+    rm -rf -- "${entry}" || return 1
+  done
+  directory_contains_only_entry "${root}" "${retained}"
+}
+
+publish_cleanup_proof() {
+  local source="$1"
+  local proof="$2"
+  local temporary="${proof}.new.$$"
+
+  [[ -f "${source}" && ! -L "${source}" ]] || return 1
+  recover_cleanup_proof_temporaries "${source}" "${proof}" || return 1
+  [[ ! -e "${proof}" && ! -L "${proof}" &&
+    ! -e "${temporary}" && ! -L "${temporary}" ]] || return 1
+  CLEANUP_PROOF_TEMP="${temporary}"
+  if ! cp -- "${source}" "${temporary}" ||
+    ! chmod 0600 "${temporary}" ||
+    ! mv -Tf -- "${temporary}" "${proof}"; then
+    rm -f -- "${temporary}" || true
+    CLEANUP_PROOF_TEMP=""
+    return 1
+  fi
+  CLEANUP_PROOF_TEMP=""
+}
+
+recover_cleanup_proof_temporaries() {
+  local source="$1"
+  local proof="$2"
+  local temporary suffix
+
+  for temporary in "${proof}.new."*; do
+    [[ -e "${temporary}" || -L "${temporary}" ]] || continue
+    suffix="${temporary##*.new.}"
+    if ! [[ "${suffix}" =~ ^[0-9]+$ &&
+      -f "${temporary}" && ! -L "${temporary}" &&
+      "$(stat -c '%u' -- "${temporary}" 2>/dev/null)" == "${EUID}" ]] ||
+      ! cmp -s -- "${source}" "${temporary}"; then
+      return 1
+    fi
+    rm -f -- "${temporary}" || return 1
+  done
+}
+
+write_ownership_sentinel() {
+  local root="$1"
+  local sentinel="${root}/${OWNERSHIP_SENTINEL_NAME}"
+  local temporary="${sentinel}.new.$$"
+
+  if [[ -e "${sentinel}" || -L "${sentinel}" ]]; then
+    owned_root_is_valid "${root}" || return 1
+    return
+  fi
+  [[ ! -e "${temporary}" && ! -L "${temporary}" ]] || return 1
+  if ! printf '%s' "$(ownership_sentinel_content)" >"${temporary}" ||
+    ! chmod 0600 "${temporary}" ||
+    ! mv -Tf -- "${temporary}" "${sentinel}"; then
+    rm -f -- "${temporary}" || true
+    return 1
+  fi
+}
+
+ensure_owned_root() {
+  local root="$1"
+  local label="$2"
+
+  [[ ! -L "${root}" ]] || die "${label} must not be a symbolic link: ${root}"
+  if [[ -e "${root}" ]]; then
+    [[ -d "${root}" ]] || die "${label} is not a directory: ${root}"
+    if owned_root_is_valid "${root}" ||
+      root_contains_only_ownership_sentinel_temporaries "${root}"; then
+      cleanup_ownership_sentinel_temporaries "${root}" ||
+        die "could not safely recover an interrupted ${label} ownership marker: ${root}"
+    fi
+    if ! owned_root_is_valid "${root}"; then
+      directory_is_empty "${root}" ||
+        die "${label} is not owned by Devin Desktop Manager: ${root}"
+      write_ownership_sentinel "${root}" ||
+        die "could not mark ${label} as manager-owned: ${root}"
+    fi
+  else
+    mkdir -p -- "${root}"
+    write_ownership_sentinel "${root}" ||
+      die "could not mark ${label} as manager-owned: ${root}"
+  fi
+  chmod 0700 "${root}"
+}
+
+legacy_root_marker_is_compatible() {
+  local root="$1"
+  local sentinel="${root}/${OWNERSHIP_SENTINEL_NAME}"
+
+  if [[ -e "${sentinel}" || -L "${sentinel}" ]]; then
+    owned_root_is_valid "${root}"
+  fi
+}
+
+migration_temporary_is_valid() {
+  local path="$1"
+  local prefix="$2"
+  local name="${path##*/}"
+  local expected_prefix="${prefix}."
+  local suffix
+
+  [[ "${name}" == "${expected_prefix}"* ]] || return 1
+  suffix="${name#"${expected_prefix}"}"
+  [[ "${suffix}" =~ ^[0-9]+$ && -f "${path}" && ! -L "${path}" ]]
+}
+
+ownership_sentinel_temporary_is_valid() {
+  local path="$1"
+
+  migration_temporary_is_valid \
+    "${path}" "${OWNERSHIP_SENTINEL_NAME}.new" || return 1
+  [[ "$(cat "${path}")" == "$(ownership_sentinel_content)" ]]
+}
+
+cleanup_ownership_sentinel_temporaries() {
+  local root="$1"
+  local path
+
+  for path in "${root}/${OWNERSHIP_SENTINEL_NAME}.new."*; do
+    [[ -e "${path}" || -L "${path}" ]] || continue
+    ownership_sentinel_temporary_is_valid "${path}" || return 1
+    rm -f -- "${path}" || return 1
+  done
+}
+
+root_contains_only_ownership_sentinel_temporaries() {
+  local root="$1"
+  local path
+  local saw_temporary=false
+
+  directory_can_be_listed "${root}" || return 1
+  while IFS= read -r -d '' path; do
+    ownership_sentinel_temporary_is_valid "${path}" || return 1
+    saw_temporary=true
+  done < <(find "${root}" -mindepth 1 -maxdepth 1 -print0)
+  [[ "${saw_temporary}" == "true" ]]
+}
+
+legacy_staging_temporary_is_valid() {
+  local path="$1"
+  local name="${path##*/}"
+  local remainder release_name pid
+
+  [[ "${name}" == .staging-* ]] || return 1
+  remainder="${name#.staging-}"
+  [[ "${remainder}" == *-* ]] || return 1
+  pid="${remainder##*-}"
+  release_name="${remainder%-*}"
+  [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
+  is_safe_release_identifier "${release_name}" || return 1
+  [[ -d "${path}" && ! -L "${path}" ]]
+}
+
+legacy_integration_temporary_is_valid() {
+  local path="$1"
+  local name="${path##*/}"
+  local pid
+
+  [[ "${name}" == .integration-* ]] || return 1
+  pid="${name#.integration-}"
+  [[ "${pid}" =~ ^[0-9]+$ && -d "${path}" && ! -L "${path}" ]]
+}
+
+legacy_release_link_temporary_is_valid() {
+  local path="$1"
+  local prefix="$2"
+  local name="${path##*/}"
+  local expected_prefix="${prefix}."
+  local pid
+
+  [[ "${name}" == "${expected_prefix}"* ]] || return 1
+  pid="${name#"${expected_prefix}"}"
+  [[ "${pid}" =~ ^[0-9]+$ && -L "${path}" ]] || return 1
+  release_target "${path}" >/dev/null
+}
+
+legacy_release_metadata_is_valid() {
+  local release_dir="$1"
+  local expected_release_name="${2:-$(basename "${release_dir}")}"
+  local metadata="${release_dir}/release.json"
+  local entry name
+  local version build product_version sha256 artifact_url expected_id
+  local url_prefix="https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/"
+
+  [[ -d "${release_dir}" && ! -L "${release_dir}" ]] || return 1
+  directory_can_be_listed "${release_dir}" || return 1
+  [[ -f "${metadata}" && ! -L "${metadata}" ]] || return 1
+  jq -e \
+    --arg manager_id "${MANAGER_ID}" \
+    --argjson schema_version "${RELEASE_METADATA_SCHEMA_VERSION}" '
+    type == "object" and
+    (
+      del(.schemaVersion, .managerId) | keys | sort
+    ) == [
+      "artifactUrl",
+      "build",
+      "installedAt",
+      "productVersion",
+      "releaseTimestamp",
+      "sha256",
+      "windsurfVersion"
+    ] and
+    (
+      (
+        (has("schemaVersion") | not) and
+        (has("managerId") | not)
+      ) or (
+        .schemaVersion == $schema_version and
+        .managerId == $manager_id
+      )
+    ) and
+    (.windsurfVersion | type == "string") and
+    (.productVersion | type == "string") and
+    (.build | type == "string") and
+    (.artifactUrl | type == "string") and
+    (.sha256 | type == "string") and
+    (.releaseTimestamp | type == "number") and
+    (.installedAt | type == "string")
+  ' "${metadata}" >/dev/null 2>&1 || return 1
+
+  version="$(jq -r '.windsurfVersion' "${metadata}")"
+  product_version="$(jq -r '.productVersion' "${metadata}")"
+  build="$(jq -r '.build' "${metadata}")"
+  sha256="$(jq -r '.sha256' "${metadata}")"
+  artifact_url="$(jq -r '.artifactUrl' "${metadata}")"
+  is_safe_release_identifier "${version}" || return 1
+  is_safe_release_identifier "${product_version}" || return 1
+  is_safe_release_identifier "${build}" || return 1
+  [[ "${sha256}" =~ ^[0-9a-f]{64}$ ]] || return 1
+  [[ "${artifact_url}" == \
+    "${url_prefix}${build}/Devin-linux-x64-${version}.deb" ]] || return 1
+  expected_id="$(release_identifier "${version}" "${build}" "${sha256}")" ||
+    return 1
+  [[ "${expected_release_name}" == "${expected_id}" ]] || return 1
+
+  [[ -d "${release_dir}/app" && ! -L "${release_dir}/app" ]] || return 1
+  [[ -d "${release_dir}/integration" &&
+    ! -L "${release_dir}/integration" ]] || return 1
+  [[ -x "${release_dir}/app/devin-desktop" &&
+    ! -L "${release_dir}/app/devin-desktop" ]] || return 1
+  [[ -x "${release_dir}/app/bin/devin-desktop" &&
+    ! -L "${release_dir}/app/bin/devin-desktop" ]] || return 1
+  [[ -f "${release_dir}/integration/devin-desktop.png" &&
+    ! -L "${release_dir}/integration/devin-desktop.png" ]] || return 1
+  [[ -f "${release_dir}/integration/devin-desktop-workspace.xml" &&
+    ! -L "${release_dir}/integration/devin-desktop-workspace.xml" ]] || return 1
+
+  while IFS= read -r -d '' entry; do
+    name="$(basename "${entry}")"
+    case "${name}" in
+      app|integration)
+        [[ -d "${entry}" && ! -L "${entry}" ]] || return 1
+        ;;
+      release.json)
+        [[ -f "${entry}" && ! -L "${entry}" ]] || return 1
+        ;;
+      release.json.new.*)
+        migration_temporary_is_valid "${entry}" "release.json.new" || return 1
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  done < <(find "${release_dir}" -mindepth 1 -maxdepth 1 -print0)
+}
+
+legacy_release_inventory_is_valid() {
+  local require_current="${1:-true}"
+  local release_entry
+  local saw_release=false
+
+  [[ -d "${RELEASES_DIR}" && ! -L "${RELEASES_DIR}" ]] || return 1
+  directory_can_be_listed "${RELEASES_DIR}" || return 1
+  if [[ -e "${CURRENT_LINK}" || -L "${CURRENT_LINK}" ]]; then
+    release_target "${CURRENT_LINK}" >/dev/null || return 1
+  else
+    [[ "${require_current}" == "false" ]] || return 1
+    [[ ! -e "${PREVIOUS_LINK}" && ! -L "${PREVIOUS_LINK}" ]] || return 1
+  fi
+  if [[ -e "${PREVIOUS_LINK}" || -L "${PREVIOUS_LINK}" ]]; then
+    release_target "${PREVIOUS_LINK}" >/dev/null || return 1
+  fi
+
+  while IFS= read -r -d '' release_entry; do
+    [[ -d "${release_entry}" && ! -L "${release_entry}" ]] || return 1
+    legacy_release_metadata_is_valid "${release_entry}" || return 1
+    saw_release=true
+  done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -print0)
+  [[ "${saw_release}" == "true" || "${require_current}" == "false" ]]
+}
+
+legacy_state_is_valid() {
+  local original
+
+  state_is_valid || return 1
+  jq -e \
+    --arg manager_version "${LEGACY_MANAGER_VERSION}" \
+    --argjson schema_version "${STATE_SCHEMA_VERSION}" \
+    --arg mime_devin "${MIME_DEVIN}" \
+    --arg mime_windsurf "${MIME_WINDSURF}" \
+    --arg mime_workspace "${MIME_WORKSPACE}" \
+    --arg main_path "${MAIN_DESKTOP}" \
+    --arg url_path "${URL_DESKTOP}" \
+    --arg icon_path "${ICON_FILE}" \
+    --arg mime_path "${MIME_FILE}" \
+    --arg command_path "${APP_COMMAND}" \
+    --arg command_target "${CURRENT_LINK}/app/bin/devin-desktop" '
+      (keys | sort) == [
+        "appCommand",
+        "managedFiles",
+        "managerVersion",
+        "originalDefaults",
+        "schemaVersion"
+      ] and
+      .schemaVersion == $schema_version and
+      .managerVersion == $manager_version and
+      (.originalDefaults | keys | sort) ==
+        ([$mime_devin, $mime_windsurf, $mime_workspace] | sort) and
+      ([.originalDefaults[] | type] | all(. == "string")) and
+      (.managedFiles | keys | sort) ==
+        ["icon", "mainDesktop", "mime", "urlDesktop"] and
+      .managedFiles.mainDesktop.path == $main_path and
+      .managedFiles.urlDesktop.path == $url_path and
+      .managedFiles.icon.path == $icon_path and
+      .managedFiles.mime.path == $mime_path and
+      .appCommand == {
+        path: $command_path,
+        target: $command_target
+      }
+    ' "${STATE_FILE}" >/dev/null 2>&1 || return 1
+
+  for original in \
+    "$(jq -r --arg mime "${MIME_DEVIN}" '.originalDefaults[$mime]' "${STATE_FILE}")" \
+    "$(jq -r --arg mime "${MIME_WINDSURF}" '.originalDefaults[$mime]' "${STATE_FILE}")" \
+    "$(jq -r --arg mime "${MIME_WORKSPACE}" '.originalDefaults[$mime]' "${STATE_FILE}")"; do
+    is_safe_desktop_id "${original}" || return 1
+  done
+  managed_file_matches_state mainDesktop "${MAIN_DESKTOP}" || return 1
+  managed_file_matches_state urlDesktop "${URL_DESKTOP}" || return 1
+  managed_file_matches_state icon "${ICON_FILE}" || return 1
+  managed_file_matches_state mime "${MIME_FILE}" || return 1
+  [[ -L "${APP_COMMAND}" &&
+    "$(readlink "${APP_COMMAND}")" == \
+      "${CURRENT_LINK}/app/bin/devin-desktop" ]]
+}
+
+legacy_install_root_is_valid() {
+  local require_current="${1:-true}"
+  local require_lock="${2:-true}"
+  local entry name
+  local saw_lock=false saw_releases=false
+
+  [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] || return 1
+  directory_can_be_listed "${INSTALL_ROOT}" || return 1
+  while IFS= read -r -d '' entry; do
+    name="$(basename "${entry}")"
+    case "${name}" in
+      releases)
+        [[ -d "${entry}" && ! -L "${entry}" ]] || return 1
+        saw_releases=true
+        ;;
+      current|previous)
+        [[ -L "${entry}" ]] || return 1
+        ;;
+      .manager.lock)
+        [[ -f "${entry}" && ! -L "${entry}" ]] || return 1
+        saw_lock=true
+        ;;
+      "${OWNERSHIP_SENTINEL_NAME}")
+        owned_root_is_valid "${INSTALL_ROOT}" || return 1
+        ;;
+      "${OWNERSHIP_SENTINEL_NAME}".new.*)
+        ownership_sentinel_temporary_is_valid "${entry}" || return 1
+        ;;
+      .staging-*)
+        legacy_staging_temporary_is_valid "${entry}" || return 1
+        ;;
+      .integration-*)
+        legacy_integration_temporary_is_valid "${entry}" || return 1
+        ;;
+      .current.new.*)
+        legacy_release_link_temporary_is_valid \
+          "${entry}" ".current.new" || return 1
+        ;;
+      .previous.new.*)
+        legacy_release_link_temporary_is_valid \
+          "${entry}" ".previous.new" || return 1
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  done < <(find "${INSTALL_ROOT}" -mindepth 1 -maxdepth 1 -print0)
+  [[ "${saw_releases}" == "true" ]] || return 1
+  [[ "${saw_lock}" == "true" || "${require_lock}" == "false" ]] || return 1
+  legacy_release_inventory_is_valid "${require_current}"
+}
+
+legacy_cache_root_is_valid() {
+  local entry name release_id
+
+  if [[ ! -e "${CACHE_ROOT}" && ! -L "${CACHE_ROOT}" ]]; then
+    return 0
+  fi
+  [[ -d "${CACHE_ROOT}" && ! -L "${CACHE_ROOT}" ]] || return 1
+  directory_can_be_listed "${CACHE_ROOT}" || return 1
+  legacy_root_marker_is_compatible "${CACHE_ROOT}" || return 1
+  while IFS= read -r -d '' entry; do
+    name="$(basename "${entry}")"
+    case "${name}" in
+      "${OWNERSHIP_SENTINEL_NAME}")
+        ;;
+      "${OWNERSHIP_SENTINEL_NAME}".new.*)
+        ownership_sentinel_temporary_is_valid "${entry}" || return 1
+        ;;
+      Devin-linux-x64-*.deb|Devin-linux-x64-*.deb.part)
+        [[ -f "${entry}" && ! -L "${entry}" ]] || return 1
+        release_id="${name#Devin-linux-x64-}"
+        release_id="${release_id%.part}"
+        release_id="${release_id%.deb}"
+        is_safe_release_identifier "${release_id}" || return 1
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  done < <(find "${CACHE_ROOT}" -mindepth 1 -maxdepth 1 -print0)
+}
+
+legacy_state_root_is_valid() {
+  local entry name
+
+  [[ -d "${STATE_DIR}" && ! -L "${STATE_DIR}" ]] || return 1
+  directory_can_be_listed "${STATE_DIR}" || return 1
+  legacy_root_marker_is_compatible "${STATE_DIR}" || return 1
+  while IFS= read -r -d '' entry; do
+    name="$(basename "${entry}")"
+    case "${name}" in
+      state.json|"${OWNERSHIP_SENTINEL_NAME}") ;;
+      state.json.new.*)
+        migration_temporary_is_valid "${entry}" "state.json.new" || return 1
+        ;;
+      "${OWNERSHIP_SENTINEL_NAME}".new.*)
+        ownership_sentinel_temporary_is_valid "${entry}" || return 1
+        ;;
+      *) return 1 ;;
+    esac
+  done < <(find "${STATE_DIR}" -mindepth 1 -maxdepth 1 -print0)
+  legacy_state_is_valid
+}
+
+legacy_pre_activation_state_root_is_valid() {
+  local entry name
+
+  if [[ ! -e "${STATE_DIR}" && ! -L "${STATE_DIR}" ]]; then
+    return 0
+  fi
+  [[ -d "${STATE_DIR}" && ! -L "${STATE_DIR}" ]] || return 1
+  directory_can_be_listed "${STATE_DIR}" || return 1
+  legacy_root_marker_is_compatible "${STATE_DIR}" || return 1
+  while IFS= read -r -d '' entry; do
+    name="$(basename "${entry}")"
+    case "${name}" in
+      "${OWNERSHIP_SENTINEL_NAME}") ;;
+      state.json.new.*)
+        migration_temporary_is_valid "${entry}" "state.json.new" || return 1
+        ;;
+      "${OWNERSHIP_SENTINEL_NAME}".new.*)
+        ownership_sentinel_temporary_is_valid "${entry}" || return 1
+        ;;
+      *) return 1 ;;
+    esac
+  done < <(find "${STATE_DIR}" -mindepth 1 -maxdepth 1 -print0)
+}
+
+legacy_pre_activation_integration_is_absent() {
+  local path
+
+  for path in \
+    "${APP_COMMAND}" \
+    "${MAIN_DESKTOP}" \
+    "${URL_DESKTOP}" \
+    "${ICON_FILE}" \
+    "${MIME_FILE}" \
+    "${LEGACY_MAIN_DESKTOP}" \
+    "${LEGACY_URL_DESKTOP}" \
+    "${LEGACY_ICON_FILE}" \
+    "${LEGACY_MIME_FILE}"; do
+    [[ ! -e "${path}" && ! -L "${path}" ]] || return 1
+  done
+}
+
+legacy_post_link_integration_is_recoverable() {
+  local path
+
+  if [[ -e "${APP_COMMAND}" || -L "${APP_COMMAND}" ]]; then
+    [[ -L "${APP_COMMAND}" &&
+      "$(readlink "${APP_COMMAND}")" == \
+        "${CURRENT_LINK}/app/bin/devin-desktop" ]] || return 1
+  fi
+  for path in \
+    "${MAIN_DESKTOP}" \
+    "${URL_DESKTOP}" \
+    "${LEGACY_MAIN_DESKTOP}" \
+    "${LEGACY_URL_DESKTOP}"; do
+    if [[ -e "${path}" || -L "${path}" ]]; then
+      legacy_desktop_owned "${path}" || return 1
+    fi
+  done
+  if [[ -e "${ICON_FILE}" || -L "${ICON_FILE}" ]]; then
+    asset_matches_release "${ICON_FILE}" devin-desktop.png || return 1
+  fi
+  if [[ -e "${MIME_FILE}" || -L "${MIME_FILE}" ]]; then
+    asset_matches_release \
+      "${MIME_FILE}" devin-desktop-workspace.xml || return 1
+  fi
+  if [[ -e "${LEGACY_ICON_FILE}" || -L "${LEGACY_ICON_FILE}" ]]; then
+    asset_matches_release "${LEGACY_ICON_FILE}" devin-desktop.png || return 1
+  fi
+  if [[ -e "${LEGACY_MIME_FILE}" || -L "${LEGACY_MIME_FILE}" ]]; then
+    asset_matches_release \
+      "${LEGACY_MIME_FILE}" devin-desktop-workspace.xml || return 1
+  fi
+}
+
+legacy_post_link_defaults_are_unclaimed() {
+  local mime_type current
+
+  for mime_type in \
+    "${MIME_DEVIN}" \
+    "${MIME_WINDSURF}" \
+    "${MIME_WORKSPACE}"; do
+    current="$(query_default "${mime_type}")" || return 1
+    case "${current}" in
+      "${MAIN_DESKTOP_ID}"|"${URL_DESKTOP_ID}"|\
+        "${LEGACY_MAIN_DESKTOP_ID}"|"${LEGACY_URL_DESKTOP_ID}")
+        return 1
+        ;;
+    esac
+  done
+}
+
+upgrade_legacy_release_metadata() {
+  local release_dir="$1"
+  local metadata="${release_dir}/release.json"
+  local temporary="${metadata}.new.$$"
+
+  jq \
+    --arg manager_id "${MANAGER_ID}" \
+    --argjson schema_version "${RELEASE_METADATA_SCHEMA_VERSION}" '
+    . + {
+      schemaVersion: $schema_version,
+      managerId: $manager_id
+    }
+  ' "${metadata}" >"${temporary}" || return 1
+  chmod 0600 "${temporary}" || return 1
+  mv -Tf -- "${temporary}" "${metadata}"
+}
+
+cleanup_install_temporaries() {
+  local mode="${1:-owned}"
+  local path release_dir
+
+  cleanup_ownership_sentinel_temporaries "${INSTALL_ROOT}" || return 1
+
+  if [[ -e "${RELEASES_DIR}" || -L "${RELEASES_DIR}" ]]; then
+    [[ -d "${RELEASES_DIR}" && ! -L "${RELEASES_DIR}" ]] || return 1
+    directory_can_be_listed "${RELEASES_DIR}" || return 1
+    for release_dir in "${RELEASES_DIR}"/*; do
+      [[ -e "${release_dir}" || -L "${release_dir}" ]] || continue
+      [[ -d "${release_dir}" && ! -L "${release_dir}" ]] || return 1
+      for path in "${release_dir}"/release.json.new.*; do
+        [[ -e "${path}" || -L "${path}" ]] || continue
+        if [[ "${mode}" == "legacy" ]]; then
+          legacy_release_metadata_is_valid "${release_dir}" || return 1
+        else
+          release_directory_has_ownership_metadata "${release_dir}" || return 1
+        fi
+        migration_temporary_is_valid "${path}" "release.json.new" || return 1
+        rm -f -- "${path}" || return 1
+      done
+    done
+  fi
+
+  for path in "${INSTALL_ROOT}"/.staging-*; do
+    [[ -e "${path}" || -L "${path}" ]] || continue
+    legacy_staging_temporary_is_valid "${path}" || return 1
+    rm -rf -- "${path}" || return 1
+  done
+  for path in "${INSTALL_ROOT}"/.integration-*; do
+    [[ -e "${path}" || -L "${path}" ]] || continue
+    legacy_integration_temporary_is_valid "${path}" || return 1
+    rm -rf -- "${path}" || return 1
+  done
+  for path in \
+    "${INSTALL_ROOT}"/.current.new.* \
+    "${INSTALL_ROOT}"/.previous.new.*; do
+    [[ -e "${path}" || -L "${path}" ]] || continue
+    case "$(basename "${path}")" in
+      .current.new.*)
+        legacy_release_link_temporary_is_valid \
+          "${path}" ".current.new" || return 1
+        ;;
+      .previous.new.*)
+        legacy_release_link_temporary_is_valid \
+          "${path}" ".previous.new" || return 1
+        ;;
+    esac
+    rm -f -- "${path}" || return 1
+  done
+}
+
+cleanup_legacy_migration_temporaries() {
+  local path
+
+  cleanup_install_temporaries legacy || return 1
+  cleanup_ownership_sentinel_temporaries "${CACHE_ROOT}" || return 1
+  cleanup_ownership_sentinel_temporaries "${STATE_DIR}" || return 1
+  for path in "${STATE_FILE}.new."*; do
+    [[ -e "${path}" || -L "${path}" ]] || continue
+    migration_temporary_is_valid "${path}" "state.json.new" || return 1
+    rm -f -- "${path}" || return 1
+  done
+}
+
+fresh_markerless_install_root_is_valid() {
+  local legacy_lock="${INSTALL_ROOT}/.manager.lock"
+  local unexpected
+
+  [[ "${LEGACY_LOCK_HELD}" == "true" ]] || return 1
+  [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" &&
+    -f "${legacy_lock}" && ! -L "${legacy_lock}" &&
+    "${legacy_lock}" -ef /proc/self/fd/8 ]] || return 1
+  unexpected="$({
+    find "${INSTALL_ROOT}" -mindepth 1 -maxdepth 1 \
+      ! -name '.manager.lock' \
+      ! -name "${OWNERSHIP_SENTINEL_NAME}.new.*" \
+      -print -quit
+  })" || return 1
+  [[ -z "${unexpected}" ]]
+}
+
+migrate_legacy_layout_if_needed() {
+  local sentinel="${INSTALL_ROOT}/${OWNERSHIP_SENTINEL_NAME}"
+  local release_dir
+  local pre_activation=false
+
+  [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] || return 0
+  if fresh_markerless_install_root_is_valid; then
+    cleanup_ownership_sentinel_temporaries "${INSTALL_ROOT}" ||
+      die "could not safely recover an interrupted installation root ownership marker: ${INSTALL_ROOT}"
+    write_ownership_sentinel "${INSTALL_ROOT}" ||
+      die "could not mark the fresh installation root as manager-owned: ${INSTALL_ROOT}"
+    return 0
+  fi
+  if root_contains_only_ownership_sentinel_temporaries "${INSTALL_ROOT}"; then
+    cleanup_ownership_sentinel_temporaries "${INSTALL_ROOT}" ||
+      die "could not safely recover an interrupted installation root ownership marker: ${INSTALL_ROOT}"
+  fi
+  if [[ -e "${sentinel}" || -L "${sentinel}" ]] ||
+    directory_is_empty "${INSTALL_ROOT}"; then
+    return 0
+  fi
+
+  if [[ ! -e "${CURRENT_LINK}" && ! -L "${CURRENT_LINK}" &&
+    ! -e "${PREVIOUS_LINK}" && ! -L "${PREVIOUS_LINK}" ]]; then
+    pre_activation=true
+    if ! legacy_install_root_is_valid false ||
+      ! legacy_cache_root_is_valid ||
+      ! legacy_pre_activation_state_root_is_valid ||
+      ! legacy_pre_activation_integration_is_absent; then
+      die "public ${LEGACY_MANAGER_VERSION} pre-activation installation could not be safely verified; refusing ownership migration"
+    fi
+  elif [[ ! -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]]; then
+    pre_activation=true
+    if ! legacy_install_root_is_valid ||
+      ! legacy_cache_root_is_valid ||
+      ! legacy_pre_activation_state_root_is_valid ||
+      ! legacy_post_link_integration_is_recoverable ||
+      ! legacy_post_link_defaults_are_unclaimed; then
+      die "public ${LEGACY_MANAGER_VERSION} post-link installation could not be safely verified; refusing ownership migration"
+    fi
+  elif ! legacy_install_root_is_valid ||
+    ! legacy_cache_root_is_valid ||
+    ! legacy_state_root_is_valid; then
+    die "public ${LEGACY_MANAGER_VERSION} installation could not be safely verified; refusing ownership migration"
+  fi
+
+  if [[ "${pre_activation}" == "false" ]]; then
+    require_app_stopped
+  fi
+
+  info "migrating verified public ${LEGACY_MANAGER_VERSION} installation to ownership schema ${OWNERSHIP_SCHEMA_VERSION}"
+  cleanup_legacy_migration_temporaries ||
+    die "could not clean an interrupted ownership migration"
+  while IFS= read -r -d '' release_dir; do
+    upgrade_legacy_release_metadata "${release_dir}" ||
+      die "could not upgrade legacy release metadata: ${release_dir}"
+  done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -type d -print0)
+  if [[ ! -e "${CACHE_ROOT}" && ! -L "${CACHE_ROOT}" ]]; then
+    mkdir -p -- "${CACHE_ROOT}" ||
+      die "could not recreate the legacy cache root"
+    chmod 0700 "${CACHE_ROOT}" ||
+      die "could not secure the legacy cache root"
+  fi
+  if [[ ! -e "${STATE_DIR}" && ! -L "${STATE_DIR}" ]]; then
+    mkdir -p -- "${STATE_DIR}" ||
+      die "could not recreate the legacy state root"
+    chmod 0700 "${STATE_DIR}" ||
+      die "could not secure the legacy state root"
+  fi
+  write_ownership_sentinel "${CACHE_ROOT}" ||
+    die "could not mark the legacy cache as manager-owned"
+  write_ownership_sentinel "${STATE_DIR}" ||
+    die "could not mark the legacy state as manager-owned"
+  write_ownership_sentinel "${INSTALL_ROOT}" ||
+    die "could not mark the legacy installation as manager-owned"
+  if [[ "${pre_activation}" == "false" ]]; then
+    prune_releases ||
+      die "could not prune superseded releases after ownership migration"
+  fi
+}
+
 ensure_layout() {
-  mkdir -p -- "${INSTALL_ROOT}" "${RELEASES_DIR}" "${CACHE_ROOT}" \
-    "${BIN_DIR}" "${STATE_DIR}"
-  chmod 0700 "${INSTALL_ROOT}" "${RELEASES_DIR}" "${CACHE_ROOT}" "${STATE_DIR}"
+  migrate_legacy_layout_if_needed
+  if owned_root_is_valid "${INSTALL_ROOT}"; then
+    cleanup_install_temporaries ||
+      die "could not safely recover interrupted installation temporaries"
+  fi
+  ensure_owned_root "${INSTALL_ROOT}" "installation root"
+  [[ ! -L "${RELEASES_DIR}" ]] ||
+    die "release directory must not be a symbolic link: ${RELEASES_DIR}"
+  mkdir -p -- "${RELEASES_DIR}" "${BIN_DIR}"
+  [[ -d "${RELEASES_DIR}" ]] ||
+    die "release path is not a directory: ${RELEASES_DIR}"
+  ensure_owned_root "${CACHE_ROOT}" "cache root"
+  ensure_owned_root "${STATE_DIR}" "state root"
+  chmod 0700 "${RELEASES_DIR}"
+}
+
+acquire_existing_legacy_lock() {
+  local legacy_lock="$1"
+
+  [[ -f "${legacy_lock}" && ! -L "${legacy_lock}" ]] ||
+    die "legacy manager lock must be a non-symbolic regular file: ${legacy_lock}"
+
+  if ! exec 8<"${legacy_lock}"; then
+    die "could not open the legacy manager lock safely: ${legacy_lock}"
+  fi
+  [[ -f "${legacy_lock}" && ! -L "${legacy_lock}" &&
+    "${legacy_lock}" -ef /proc/self/fd/8 ]] ||
+    die "legacy manager lock changed while it was being opened: ${legacy_lock}"
+  flock -n 8 || die "another Devin Desktop manager operation is running"
+  [[ -f "${legacy_lock}" && ! -L "${legacy_lock}" &&
+    "${legacy_lock}" -ef /proc/self/fd/8 ]] ||
+    die "legacy manager lock changed while it was being acquired: ${legacy_lock}"
+  LEGACY_LOCK_HELD=true
+}
+
+acquire_legacy_lock_if_needed() {
+  local legacy_lock="${INSTALL_ROOT}/.manager.lock"
+  local sentinel="${INSTALL_ROOT}/${OWNERSHIP_SENTINEL_NAME}"
+  local install_parent
+
+  if [[ -e "${TRANSACTION_JOURNAL}" || -L "${TRANSACTION_JOURNAL}" ]]; then
+    if [[ -e "${INSTALL_ROOT}" || -L "${INSTALL_ROOT}" ]]; then
+      [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] ||
+        die "installation root is unsafe during transaction recovery: ${INSTALL_ROOT}"
+      acquire_existing_legacy_lock "${legacy_lock}"
+    fi
+    return 0
+  fi
+  install_parent="$(dirname "${INSTALL_ROOT}")"
+
+  if [[ ! -e "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]]; then
+    mkdir -p -- "${install_parent}"
+    mkdir -- "${INSTALL_ROOT}" 2>/dev/null || true
+  fi
+  [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] || return 0
+  if [[ -e "${sentinel}" || -L "${sentinel}" ]]; then
+    owned_root_is_valid "${INSTALL_ROOT}" || return 0
+    if [[ ! -e "${legacy_lock}" && ! -L "${legacy_lock}" ]]; then
+      if ! (set -o noclobber; : >"${legacy_lock}") 2>/dev/null; then
+        [[ -e "${legacy_lock}" || -L "${legacy_lock}" ]] ||
+          die "could not create the public manager lock safely: ${legacy_lock}"
+      fi
+    fi
+    acquire_existing_legacy_lock "${legacy_lock}"
+    return 0
+  fi
+  if [[ ! -e "${legacy_lock}" && ! -L "${legacy_lock}" ]]; then
+    if ! directory_is_empty "${INSTALL_ROOT}" &&
+      ! {
+        legacy_install_root_is_valid false false &&
+          legacy_cache_root_is_valid &&
+          legacy_pre_activation_state_root_is_valid &&
+          legacy_pre_activation_integration_is_absent
+      }; then
+      return 0
+    fi
+    if ! (set -o noclobber; : >"${legacy_lock}") 2>/dev/null; then
+      [[ -e "${legacy_lock}" || -L "${legacy_lock}" ]] ||
+        die "could not create the public manager lock safely: ${legacy_lock}"
+    fi
+  fi
+  acquire_existing_legacy_lock "${legacy_lock}"
 }
 
 acquire_lock() {
-  ensure_layout
-  exec 9>"${INSTALL_ROOT}/.manager.lock"
+  local lock_links
+
+  require_commands stat
+  mkdir -p -- "${STATE_HOME}"
+  validate_state_home_security
+  if [[ ! -e "${LOCK_FILE}" && ! -L "${LOCK_FILE}" ]]; then
+    (set -o noclobber; : >"${LOCK_FILE}") 2>/dev/null ||
+      die "could not create the manager lock safely: ${LOCK_FILE}"
+  fi
+  [[ -f "${LOCK_FILE}" && ! -L "${LOCK_FILE}" ]] ||
+    die "manager lock must be a non-symbolic regular file: ${LOCK_FILE}"
+  lock_links="$(stat -c '%h' -- "${LOCK_FILE}")" ||
+    die "could not inspect the manager lock: ${LOCK_FILE}"
+  [[ "${lock_links}" == "1" ]] ||
+    die "manager lock must not have hard links: ${LOCK_FILE}"
+  exec 9<>"${LOCK_FILE}" || die "could not open the manager lock: ${LOCK_FILE}"
+  [[ -f "${LOCK_FILE}" && ! -L "${LOCK_FILE}" &&
+    "${LOCK_FILE}" -ef /proc/self/fd/9 ]] ||
+    die "manager lock changed while it was being opened: ${LOCK_FILE}"
   flock -n 9 || die "another Devin Desktop manager operation is running"
+  [[ -f "${LOCK_FILE}" && ! -L "${LOCK_FILE}" &&
+    "${LOCK_FILE}" -ef /proc/self/fd/9 ]] ||
+    die "manager lock changed while it was being acquired: ${LOCK_FILE}"
+  recover_transaction_partials
+  recover_pending_transaction_discard
+  acquire_legacy_lock_if_needed
+  recover_pending_transaction
+  recover_pending_uninstall_cleanup
+  recover_pending_release_prune
+  ensure_layout
 }
 
-release_target() {
+release_link_target() {
   local link_path="$1"
   local target release_name
 
@@ -224,6 +1257,14 @@ release_target() {
   [[ "${target}" == releases/* && "${target}" != *"/"*"/"* ]] || return 1
   release_name="${target#releases/}"
   is_safe_release_identifier "${release_name}" || return 1
+  printf '%s\n' "${target}"
+}
+
+release_target() {
+  local link_path="$1"
+  local target
+
+  target="$(release_link_target "${link_path}")" || return 1
   [[ -d "${INSTALL_ROOT}/${target}" ]] || return 1
   printf '%s\n' "${target}"
 }
@@ -252,8 +1293,14 @@ app_is_running() {
 
   for process_path in /proc/[0-9]*; do
     executable="$(readlink "${process_path}/exe" 2>/dev/null || true)"
+    executable="${executable% (deleted)}"
     case "${executable}" in
-      "${RELEASES_DIR}"/*/app/devin-desktop) return 0 ;;
+      "${RELEASES_DIR}"/*/app/devin-desktop|\
+        "${RELEASES_DIR}"/*/app/bin/devin-desktop|\
+        "${INSTALL_ROOT}"/.release-prune-*/app/devin-desktop|\
+        "${INSTALL_ROOT}"/.release-prune-*/app/bin/devin-desktop|\
+        "${INSTALL_ROOT}".uninstall-*/releases/*/app/devin-desktop|\
+        "${INSTALL_ROOT}".uninstall-*/releases/*/app/bin/devin-desktop) return 0 ;;
     esac
   done
 
@@ -276,8 +1323,11 @@ release_identifier() {
   local version="$1"
   local build="$2"
   local sha256="$3"
+  local identifier
 
-  printf '%s-%s-%s\n' "${version}" "${build:0:12}" "${sha256:0:12}"
+  identifier="${version:0:102}-${build:0:12}-${sha256:0:12}"
+  is_safe_release_identifier "${identifier}" || return 1
+  printf '%s\n' "${identifier}"
 }
 
 fetch_manifest() {
@@ -646,6 +1696,8 @@ write_release_metadata() {
 
   installed_at="$(date --utc +'%Y-%m-%dT%H:%M:%SZ')"
   jq -n \
+    --arg managerId "${MANAGER_ID}" \
+    --argjson schemaVersion "${RELEASE_METADATA_SCHEMA_VERSION}" \
     --arg windsurfVersion "$(jq -r '.windsurfVersion' <<<"${manifest}")" \
     --arg productVersion "$(jq -r '.productVersion' <<<"${manifest}")" \
     --arg build "$(jq -r '.version' <<<"${manifest}")" \
@@ -654,6 +1706,8 @@ write_release_metadata() {
     --argjson releaseTimestamp "$(jq -r '.timestamp' <<<"${manifest}")" \
     --arg installedAt "${installed_at}" \
     '{
+      schemaVersion: $schemaVersion,
+      managerId: $managerId,
       windsurfVersion: $windsurfVersion,
       productVersion: $productVersion,
       build: $build,
@@ -721,8 +1775,8 @@ set_managed_link() {
 
 state_is_valid() {
   [[ -f "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || return 1
-  jq -e '
-    .schemaVersion == 1 and
+  jq -e --argjson schema_version "${STATE_SCHEMA_VERSION}" '
+    .schemaVersion == $schema_version and
     (.managerVersion | type == "string") and
     (.originalDefaults | type == "object") and
     (.managedFiles | type == "object")
@@ -756,6 +1810,7 @@ ensure_regular_path_manageable() {
   local path="$1"
   local key="$2"
   local marker_allowed="${3:-false}"
+  local release_asset="${4:-}"
 
   [[ -e "${path}" || -L "${path}" ]] || return 0
   [[ -f "${path}" && ! -L "${path}" ]] ||
@@ -768,6 +1823,10 @@ ensure_regular_path_manageable() {
   fi
   if [[ "${marker_allowed}" == "true" ]] &&
     grep -qx "${MANAGER_DESKTOP_MARKER}" "${path}"; then
+    return 0
+  fi
+  if [[ -n "${release_asset}" ]] &&
+    asset_matches_release "${path}" "${release_asset}"; then
     return 0
   fi
 
@@ -787,8 +1846,10 @@ ensure_integration_manageable() {
   ensure_app_command_manageable
   ensure_regular_path_manageable "${MAIN_DESKTOP}" mainDesktop true
   ensure_regular_path_manageable "${URL_DESKTOP}" urlDesktop true
-  ensure_regular_path_manageable "${ICON_FILE}" icon false
-  ensure_regular_path_manageable "${MIME_FILE}" mime false
+  ensure_regular_path_manageable \
+    "${ICON_FILE}" icon false devin-desktop.png
+  ensure_regular_path_manageable \
+    "${MIME_FILE}" mime false devin-desktop-workspace.xml
 }
 
 write_desktop_entries() {
@@ -891,7 +1952,22 @@ atomic_app_link() {
 }
 
 query_default() {
-  xdg-mime query default "$1" 2>/dev/null || true
+  local current status
+
+  if current="$(xdg-mime query default "$1" 2>/dev/null)"; then
+    printf '%s\n' "${current}"
+    return 0
+  else
+    status=$?
+  fi
+  if [[ "${status}" -eq 4 && -z "${current}" &&
+    "${KDE_SESSION_VERSION:-}" =~ ^[1-5]$ &&
+    ("${XDG_CURRENT_DESKTOP:-}" == "KDE" ||
+      -n "${KDE_FULL_SESSION:-}") ]]; then
+    printf '\n'
+    return 0
+  fi
+  return "${status}"
 }
 
 normalize_original_default() {
@@ -924,7 +2000,7 @@ original_default() {
     return
   fi
 
-  current="$(query_default "${mime_type}")"
+  current="$(query_default "${mime_type}")" || return 1
   normalize_original_default "${current}"
 }
 
@@ -940,19 +2016,19 @@ register_one_association() {
   local force="$3"
   local current
 
-  current="$(query_default "${mime_type}")"
+  current="$(query_default "${mime_type}")" || return 1
   if [[ "${force}" == "true" ]]; then
-    xdg-mime default "${desktop_id}" "${mime_type}"
-    return
+    xdg-mime default "${desktop_id}" "${mime_type}" || return 1
+    return 0
   fi
 
   case "${current}" in
     ""|"${desktop_id}")
-      xdg-mime default "${desktop_id}" "${mime_type}"
+      xdg-mime default "${desktop_id}" "${mime_type}" || return 1
       ;;
     "${LEGACY_MAIN_DESKTOP_ID}"|"${LEGACY_URL_DESKTOP_ID}")
       if legacy_desktop_id_owned "${current}"; then
-        xdg-mime default "${desktop_id}" "${mime_type}"
+        xdg-mime default "${desktop_id}" "${mime_type}" || return 1
       else
         warn "leaving existing default for ${mime_type} unchanged: ${current}"
       fi
@@ -968,9 +2044,13 @@ register_associations() {
 
   register_one_association "${MIME_DEVIN}" "${URL_DESKTOP_ID}" "${force}" ||
     return 1
+  record_user_configuration_results || return 1
   register_one_association "${MIME_WINDSURF}" "${URL_DESKTOP_ID}" "${force}" ||
     return 1
-  register_one_association "${MIME_WORKSPACE}" "${MAIN_DESKTOP_ID}" "${force}"
+  record_user_configuration_results || return 1
+  register_one_association "${MIME_WORKSPACE}" "${MAIN_DESKTOP_ID}" "${force}" ||
+    return 1
+  record_user_configuration_results
 }
 
 legacy_desktop_owned() {
@@ -1026,18 +2106,18 @@ remove_legacy_integration() {
     legacy_assets_owned=true
   fi
   if legacy_desktop_owned "${LEGACY_MAIN_DESKTOP}"; then
-    rm -f -- "${LEGACY_MAIN_DESKTOP}"
+    rm -f -- "${LEGACY_MAIN_DESKTOP}" || return 1
   fi
   if legacy_desktop_owned "${LEGACY_URL_DESKTOP}"; then
-    rm -f -- "${LEGACY_URL_DESKTOP}"
+    rm -f -- "${LEGACY_URL_DESKTOP}" || return 1
   fi
   if [[ "${legacy_assets_owned}" == "true" ]] &&
     asset_matches_release "${LEGACY_ICON_FILE}" devin-desktop.png; then
-    rm -f -- "${LEGACY_ICON_FILE}"
+    rm -f -- "${LEGACY_ICON_FILE}" || return 1
   fi
   if [[ "${legacy_assets_owned}" == "true" ]] &&
     asset_matches_release "${LEGACY_MIME_FILE}" devin-desktop-workspace.xml; then
-    rm -f -- "${LEGACY_MIME_FILE}"
+    rm -f -- "${LEGACY_MIME_FILE}" || return 1
   fi
 }
 
@@ -1063,6 +2143,7 @@ write_state() {
   mkdir -p "${STATE_DIR}"
   jq -n \
     --arg managerVersion "${MANAGER_VERSION}" \
+    --argjson schemaVersion "${STATE_SCHEMA_VERSION}" \
     --arg devin "${original_devin}" \
     --arg windsurf "${original_windsurf}" \
     --arg workspace "${original_workspace}" \
@@ -1080,7 +2161,7 @@ write_state() {
     --arg mimeWindsurf "${MIME_WINDSURF}" \
     --arg mimeWorkspace "${MIME_WORKSPACE}" \
     '{
-      schemaVersion: 1,
+      schemaVersion: $schemaVersion,
       managerVersion: $managerVersion,
       originalDefaults: {
         ($mimeDevin): $devin,
@@ -1100,9 +2181,18 @@ write_state() {
 }
 
 refresh_desktop_caches() {
-  update-desktop-database "${DATA_HOME}/applications" || return 1
-  update-mime-database "${DATA_HOME}/mime" || return 1
-  if command -v kbuildsycoca6 >/dev/null 2>&1; then
+  local refreshed=false
+
+  if [[ -d "${DATA_HOME}/applications" ]]; then
+    update-desktop-database "${DATA_HOME}/applications" || return 1
+    refreshed=true
+  fi
+  if [[ -d "${DATA_HOME}/mime" ]]; then
+    update-mime-database "${DATA_HOME}/mime" || return 1
+    refreshed=true
+  fi
+  if [[ "${refreshed}" == "true" ]] &&
+    command -v kbuildsycoca6 >/dev/null 2>&1; then
     kbuildsycoca6 --noincremental >/dev/null ||
       warn "KDE cache refresh failed; log out and back in if the launcher is stale"
   fi
@@ -1111,9 +2201,9 @@ refresh_desktop_caches() {
 install_integration_from_stage() {
   local original_devin original_windsurf original_workspace
 
-  original_devin="$(original_default "${MIME_DEVIN}")"
-  original_windsurf="$(original_default "${MIME_WINDSURF}")"
-  original_workspace="$(original_default "${MIME_WORKSPACE}")"
+  original_devin="$(original_default "${MIME_DEVIN}")" || return 1
+  original_windsurf="$(original_default "${MIME_WINDSURF}")" || return 1
+  original_workspace="$(original_default "${MIME_WORKSPACE}")" || return 1
 
   atomic_app_link || return 1
   atomic_copy "${INTEGRATION_STAGE}/${MAIN_DESKTOP_ID}" "${MAIN_DESKTOP}" 0644 ||
@@ -1135,87 +2225,1228 @@ snapshot_path() {
   local name="$2"
 
   if [[ -e "${source}" || -L "${source}" ]]; then
-    cp -a -- "${source}" "${TRANSACTION_BACKUP}/${name}"
+    cp -a -- "${source}" "${TRANSACTION_BACKUP}/${name}" || return 1
   fi
 }
 
 backup_transaction() {
-  TRANSACTION_BACKUP="$(mktemp -d /tmp/devin-desktop-manager.XXXXXX)"
-  chmod 0700 "${TRANSACTION_BACKUP}"
+  local partial="${TRANSACTION_JOURNAL}.new.$$"
 
-  snapshot_path "${CURRENT_LINK}" current
-  snapshot_path "${PREVIOUS_LINK}" previous
-  snapshot_path "${APP_COMMAND}" app-command
-  snapshot_path "${MAIN_DESKTOP}" main-desktop
-  snapshot_path "${URL_DESKTOP}" url-desktop
-  snapshot_path "${ICON_FILE}" icon
-  snapshot_path "${MIME_FILE}" mime
-  snapshot_path "${STATE_FILE}" state
-  snapshot_path "${LEGACY_MAIN_DESKTOP}" legacy-main
-  snapshot_path "${LEGACY_URL_DESKTOP}" legacy-url
-  snapshot_path "${LEGACY_ICON_FILE}" legacy-icon
-  snapshot_path "${LEGACY_MIME_FILE}" legacy-mime
-  snapshot_path "${CONFIG_HOME}/mimeapps.list" config-mimeapps
-  snapshot_path "${DATA_HOME}/applications/mimeapps.list" applications-mimeapps
-  snapshot_path "${DATA_HOME}/mimeapps.list" data-mimeapps
+  TRANSACTION_BACKUP_READY=false
+  [[ ! -e "${TRANSACTION_JOURNAL}" && ! -L "${TRANSACTION_JOURNAL}" ]] ||
+    die "an unfinished manager transaction requires recovery"
+  [[ ! -e "${TRANSACTION_DISCARD}" && ! -L "${TRANSACTION_DISCARD}" ]] ||
+    die "an unfinished manager transaction discard requires cleanup"
+  [[ ! -e "${partial}" && ! -L "${partial}" ]] ||
+    die "temporary transaction path already exists: ${partial}"
+  TRANSACTION_BACKUP="${partial}"
+  if ! mkdir -p -- "${partial}"; then
+    TRANSACTION_BACKUP=""
+    return 1
+  fi
+  chmod 0700 "${TRANSACTION_BACKUP}"
+  ownership_sentinel_content >"${TRANSACTION_BACKUP}/owner" || return 1
+  chmod 0600 "${TRANSACTION_BACKUP}/owner" || return 1
+
+  snapshot_path "${CURRENT_LINK}" current || return 1
+  snapshot_path "${PREVIOUS_LINK}" previous || return 1
+  snapshot_path "${APP_COMMAND}" app-command || return 1
+  snapshot_path "${MANAGER_COMMAND}" manager-command || return 1
+  snapshot_path "${MAIN_DESKTOP}" main-desktop || return 1
+  snapshot_path "${URL_DESKTOP}" url-desktop || return 1
+  snapshot_path "${ICON_FILE}" icon || return 1
+  snapshot_path "${MIME_FILE}" mime || return 1
+  snapshot_path "${STATE_FILE}" state || return 1
+  snapshot_path "${STATE_DIR}/${OWNERSHIP_SENTINEL_NAME}" state-owner || return 1
+  snapshot_path "${CACHE_ROOT}/${OWNERSHIP_SENTINEL_NAME}" cache-owner || return 1
+  snapshot_path "${LEGACY_MAIN_DESKTOP}" legacy-main || return 1
+  snapshot_path "${LEGACY_URL_DESKTOP}" legacy-url || return 1
+  snapshot_path "${LEGACY_ICON_FILE}" legacy-icon || return 1
+  snapshot_path "${LEGACY_MIME_FILE}" legacy-mime || return 1
+  snapshot_path "${CONFIG_HOME}/mimeapps.list" config-mimeapps || return 1
+  snapshot_path "${DATA_HOME}/applications/mimeapps.list" applications-mimeapps ||
+    return 1
+  snapshot_path "${DATA_HOME}/mimeapps.list" data-mimeapps || return 1
+  record_preserved_transaction_snapshot "${APP_COMMAND}" app-command || return 1
+  record_preserved_transaction_snapshot \
+    "${MANAGER_COMMAND}" manager-command || return 1
+  record_preserved_transaction_snapshot "${MAIN_DESKTOP}" main-desktop ||
+    return 1
+  record_preserved_transaction_snapshot "${URL_DESKTOP}" url-desktop || return 1
+  record_preserved_transaction_snapshot "${ICON_FILE}" icon || return 1
+  record_preserved_transaction_snapshot "${MIME_FILE}" mime || return 1
+  record_preserved_transaction_snapshot \
+    "${LEGACY_MAIN_DESKTOP}" legacy-main || return 1
+  record_preserved_transaction_snapshot \
+    "${LEGACY_URL_DESKTOP}" legacy-url || return 1
+  record_preserved_transaction_snapshot "${LEGACY_ICON_FILE}" legacy-icon ||
+    return 1
+  record_preserved_transaction_snapshot "${LEGACY_MIME_FILE}" legacy-mime ||
+    return 1
+  mv -T -- "${partial}" "${TRANSACTION_JOURNAL}"
+  TRANSACTION_BACKUP="${TRANSACTION_JOURNAL}"
+  TRANSACTION_BACKUP_READY=true
+}
+
+recover_transaction_partials() {
+  local partial name pid
+
+  for partial in "${TRANSACTION_JOURNAL}".new.*; do
+    [[ -e "${partial}" || -L "${partial}" ]] || continue
+    name="$(basename "${partial}")"
+    pid="${name##*.new.}"
+    if ! [[ "${pid}" =~ ^[0-9]+$ &&
+      -d "${partial}" && ! -L "${partial}" &&
+      "$(stat -c '%u' -- "${partial}" 2>/dev/null)" == "${EUID}" ]] ||
+      ! transaction_directory_is_valid "${partial}"; then
+      die "unfinished transaction temporary is unsafe: ${partial}"
+    fi
+    info "removing an orphaned transaction temporary"
+    rm -rf -- "${partial}" ||
+      die "could not remove orphaned transaction temporary: ${partial}"
+  done
+}
+
+transaction_created_path_is_manager_owned() {
+  local destination="$1"
+  local name="$2"
+
+  case "${name}" in
+    current|previous)
+      release_target "${destination}" >/dev/null
+      ;;
+    app-command)
+      [[ -L "${destination}" &&
+        "$(readlink "${destination}")" == \
+          "${CURRENT_LINK}/app/bin/devin-desktop" ]]
+      ;;
+    main-desktop)
+      if state_is_valid; then
+        managed_file_matches_state mainDesktop "${destination}"
+      else
+        legacy_desktop_owned "${destination}"
+      fi
+      ;;
+    url-desktop)
+      if state_is_valid; then
+        managed_file_matches_state urlDesktop "${destination}"
+      else
+        legacy_desktop_owned "${destination}"
+      fi
+      ;;
+    legacy-main|legacy-url)
+      legacy_desktop_owned "${destination}"
+      ;;
+    icon)
+      if state_is_valid; then
+        managed_file_matches_state icon "${destination}"
+      else
+        asset_matches_release "${destination}" devin-desktop.png
+      fi
+      ;;
+    mime)
+      if state_is_valid; then
+        managed_file_matches_state mime "${destination}"
+      else
+        asset_matches_release \
+          "${destination}" devin-desktop-workspace.xml
+      fi
+      ;;
+    legacy-icon)
+      asset_matches_release "${destination}" devin-desktop.png
+      ;;
+    legacy-mime)
+      asset_matches_release \
+        "${destination}" devin-desktop-workspace.xml
+      ;;
+    state)
+      state_is_valid
+      ;;
+    state-owner)
+      [[ "${destination}" == "${STATE_DIR}/${OWNERSHIP_SENTINEL_NAME}" ]] &&
+        owned_root_is_valid "${STATE_DIR}"
+      ;;
+    cache-owner)
+      [[ "${destination}" == "${CACHE_ROOT}/${OWNERSHIP_SENTINEL_NAME}" ]] &&
+        owned_root_is_valid "${CACHE_ROOT}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+record_preserved_transaction_snapshot() {
+  local path="$1"
+  local name="$2"
+  local preserved="${TRANSACTION_BACKUP}/preserved"
+  local marker="${preserved}/${name}"
+
+  [[ -e "${path}" || -L "${path}" ]] || return 0
+  transaction_created_path_is_manager_owned "${path}" "${name}" && return 0
+  mkdir -p -- "${preserved}" || return 1
+  chmod 0700 "${preserved}" || return 1
+  : >"${marker}" || return 1
+  chmod 0600 "${marker}"
+}
+
+record_user_configuration_result() {
+  local path="$1"
+  local name="$2"
+  local results="${TRANSACTION_BACKUP}/results"
+  local result="${results}/${name}.result"
+  local temporary="${result}.new.$$"
+  local hash proof
+
+  mkdir -p -- "${results}" || return 1
+  chmod 0700 "${results}" || return 1
+  rm -f -- "${temporary}" || return 1
+  if [[ -e "${path}" || -L "${path}" ]]; then
+    [[ -f "${path}" && ! -L "${path}" ]] || return 1
+    hash="$(sha256sum "${path}" | awk '{print $1}')" || return 1
+    [[ "${hash}" =~ ^[0-9a-f]{64}$ ]] || return 1
+    proof="sha256 ${hash}"
+  else
+    proof="absent"
+  fi
+  if ! printf '%s\n' "${proof}" >"${temporary}" ||
+    ! chmod 0600 "${temporary}" ||
+    ! mv -Tf -- "${temporary}" "${result}"; then
+    rm -f -- "${temporary}" || true
+    return 1
+  fi
+}
+
+record_user_configuration_results() {
+  [[ -n "${TRANSACTION_BACKUP}" ]] || return 0
+
+  record_user_configuration_result \
+    "${CONFIG_HOME}/mimeapps.list" config-mimeapps || return 1
+  record_user_configuration_result \
+    "${DATA_HOME}/applications/mimeapps.list" applications-mimeapps || return 1
+  record_user_configuration_result \
+    "${DATA_HOME}/mimeapps.list" data-mimeapps
+}
+
+record_user_configuration_path_result() {
+  local path="$1"
+
+  [[ -n "${TRANSACTION_BACKUP}" ]] || return 0
+  case "${path}" in
+    "${CONFIG_HOME}/mimeapps.list")
+      record_user_configuration_result "${path}" config-mimeapps
+      ;;
+    "${DATA_HOME}/applications/mimeapps.list")
+      record_user_configuration_result "${path}" applications-mimeapps
+      ;;
+    "${DATA_HOME}/mimeapps.list")
+      record_user_configuration_result "${path}" data-mimeapps
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+durable_user_configuration_matches_recorded_result() {
+  local destination="$1"
+  local name="$2"
+  local results="${TRANSACTION_BACKUP}/results"
+  local result_file="${results}/${name}.result"
+  local hash_file="${results}/${name}.sha256"
+  local absent_file="${results}/${name}.absent"
+  local proof expected_hash current_hash
+
+  if [[ -e "${result_file}" || -L "${result_file}" ]]; then
+    [[ -f "${result_file}" && ! -L "${result_file}" ]] || return 1
+    proof="$(cat "${result_file}")" || return 1
+    case "${proof}" in
+      absent)
+        [[ ! -e "${destination}" && ! -L "${destination}" ]]
+        ;;
+      "sha256 "*)
+        expected_hash="${proof#sha256 }"
+        [[ "${expected_hash}" =~ ^[0-9a-f]{64}$ &&
+          -f "${destination}" && ! -L "${destination}" ]] || return 1
+        current_hash="$(sha256sum "${destination}" | awk '{print $1}')" ||
+          return 1
+        [[ "${current_hash}" == "${expected_hash}" ]]
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  elif [[ -e "${hash_file}" || -L "${hash_file}" ]]; then
+    [[ -f "${hash_file}" && ! -L "${hash_file}" &&
+      ! -e "${absent_file}" && ! -L "${absent_file}" &&
+      -f "${destination}" && ! -L "${destination}" ]] || return 1
+    expected_hash="$(cat "${hash_file}")"
+    [[ "${expected_hash}" =~ ^[0-9a-f]{64}$ ]] || return 1
+    current_hash="$(sha256sum "${destination}" | awk '{print $1}')" || return 1
+    [[ "${current_hash}" == "${expected_hash}" ]]
+  elif [[ -e "${absent_file}" || -L "${absent_file}" ]]; then
+    [[ -f "${absent_file}" && ! -L "${absent_file}" &&
+      ! -s "${absent_file}" &&
+      ! -e "${destination}" && ! -L "${destination}" ]]
+  else
+    return 1
+  fi
 }
 
 restore_path() {
   local destination="$1"
   local name="$2"
+  local snapshot="${TRANSACTION_BACKUP}/${name}"
+  local preserved="${TRANSACTION_BACKUP}/preserved/${name}"
+  local parent temporary
 
-  rm -rf -- "${destination}"
-  if [[ -e "${TRANSACTION_BACKUP}/${name}" ||
-    -L "${TRANSACTION_BACKUP}/${name}" ]]; then
-    mkdir -p -- "$(dirname "${destination}")"
-    cp -a -- "${TRANSACTION_BACKUP}/${name}" "${destination}"
+  if [[ -e "${snapshot}" || -L "${snapshot}" ]]; then
+    if [[ "${TRANSACTION_DURABLE_RECOVERY}" == "true" ]]; then
+      if [[ -e "${preserved}" || -L "${preserved}" ]]; then
+        [[ -f "${preserved}" && ! -L "${preserved}" &&
+          ! -s "${preserved}" ]] || return 1
+        return 0
+      fi
+      case "${name}" in
+        config-mimeapps|applications-mimeapps|data-mimeapps)
+          durable_user_configuration_matches_recorded_result \
+            "${destination}" "${name}" || {
+              [[ -f "${snapshot}" && ! -L "${snapshot}" &&
+                -f "${destination}" && ! -L "${destination}" ]] || return 1
+              cmp -s -- "${snapshot}" "${destination}" || return 1
+              return 0
+            }
+          ;;
+      esac
+    fi
+    parent="$(dirname "${destination}")"
+    mkdir -p -- "${parent}" || return 1
+    RESTORE_TEMP_ROOT="$(
+      mktemp -d -- "${parent}/.devin-desktop-manager-restore.XXXXXXXX"
+    )" || return 1
+    temporary="${RESTORE_TEMP_ROOT}/payload"
+    cp -a -- "${snapshot}" "${temporary}" || {
+      rm -rf -- "${RESTORE_TEMP_ROOT}" || true
+      RESTORE_TEMP_ROOT=""
+      return 1
+    }
+    mv -Tf -- "${temporary}" "${destination}" || {
+      rm -rf -- "${RESTORE_TEMP_ROOT}" || true
+      RESTORE_TEMP_ROOT=""
+      return 1
+    }
+    rmdir -- "${RESTORE_TEMP_ROOT}" || return 1
+    RESTORE_TEMP_ROOT=""
+  elif [[ -e "${destination}" || -L "${destination}" ]]; then
+    case "${name}" in
+      config-mimeapps|applications-mimeapps|data-mimeapps)
+        if durable_user_configuration_matches_recorded_result \
+          "${destination}" "${name}"; then
+          rm -rf -- "${destination}" || return 1
+          return 0
+        fi
+        ;;
+    esac
+    transaction_created_path_is_manager_owned "${destination}" "${name}" ||
+      return 1
+    rm -rf -- "${destination}" || return 1
   fi
 }
 
+transaction_directory_is_valid() {
+  local root="$1"
+
+  [[ -d "${root}" && ! -L "${root}" &&
+    -f "${root}/owner" &&
+    ! -L "${root}/owner" ]] || return 1
+  [[ "$(cat "${root}/owner")" == "$(ownership_sentinel_content)" ]]
+}
+
+transaction_journal_is_valid() {
+  transaction_directory_is_valid "${TRANSACTION_BACKUP}"
+}
+
+manager_install_root_is_valid() {
+  local root="$1"
+  local releases="${root}/releases"
+  local current="${root}/current"
+  local previous="${root}/previous"
+  local entry name target release_dir
+  local saw_releases=false saw_current=false saw_lock=false
+
+  owned_root_is_valid "${root}" || return 1
+  directory_can_be_listed "${root}" || return 1
+  while IFS= read -r -d '' entry; do
+    name="$(basename "${entry}")"
+    case "${name}" in
+      "${OWNERSHIP_SENTINEL_NAME}") ;;
+      releases)
+        [[ -d "${entry}" && ! -L "${entry}" ]] || return 1
+        saw_releases=true
+        ;;
+      current)
+        [[ -L "${entry}" ]] || return 1
+        saw_current=true
+        ;;
+      previous)
+        [[ -L "${entry}" ]] || return 1
+        ;;
+      .manager.lock)
+        [[ -f "${entry}" && ! -L "${entry}" ]] || return 1
+        saw_lock=true
+        ;;
+      *) return 1 ;;
+    esac
+  done < <(find "${root}" -mindepth 1 -maxdepth 1 -print0)
+  [[ "${saw_releases}" == "true" && "${saw_current}" == "true" &&
+    "${saw_lock}" == "true" ]] || return 1
+  directory_can_be_listed "${releases}" || return 1
+
+  for entry in "${current}" "${previous}"; do
+    [[ -e "${entry}" || -L "${entry}" ]] || continue
+    [[ -L "${entry}" ]] || return 1
+    target="$(readlink "${entry}")"
+    [[ "${target}" == releases/* && "${target}" != *"/"*"/"* ]] ||
+      return 1
+    is_safe_release_identifier "${target#releases/}" || return 1
+    [[ -d "${root}/${target}" && ! -L "${root}/${target}" ]] || return 1
+  done
+  while IFS= read -r -d '' release_dir; do
+    release_directory_is_owned "${release_dir}" || return 1
+  done < <(find "${releases}" -mindepth 1 -maxdepth 1 -print0)
+}
+
+empty_manager_install_root_is_valid() {
+  local root="$1"
+  local releases="${root}/releases"
+  local legacy_lock="${root}/.manager.lock"
+  local entry name
+
+  owned_root_is_valid "${root}" || return 1
+  [[ -d "${releases}" && ! -L "${releases}" &&
+    -f "${legacy_lock}" && ! -L "${legacy_lock}" ]] || return 1
+  directory_is_empty "${releases}" || return 1
+  directory_can_be_listed "${root}" || return 1
+  while IFS= read -r -d '' entry; do
+    name="$(basename "${entry}")"
+    case "${name}" in
+      "${OWNERSHIP_SENTINEL_NAME}"|releases|.manager.lock) ;;
+      *) return 1 ;;
+    esac
+  done < <(find "${root}" -mindepth 1 -maxdepth 1 -print0)
+  [[ ! -e "${root}/current" && ! -L "${root}/current" &&
+    ! -e "${root}/previous" && ! -L "${root}/previous" ]]
+}
+
+pre_activation_manager_install_root_is_valid() {
+  local root="$1"
+  local releases="${root}/releases"
+  local legacy_lock="${root}/.manager.lock"
+  local entry name release_dir
+  local saw_release=false
+
+  owned_root_is_valid "${root}" || return 1
+  [[ -d "${releases}" && ! -L "${releases}" &&
+    -f "${legacy_lock}" && ! -L "${legacy_lock}" ]] || return 1
+  directory_can_be_listed "${root}" || return 1
+  while IFS= read -r -d '' entry; do
+    name="$(basename "${entry}")"
+    case "${name}" in
+      "${OWNERSHIP_SENTINEL_NAME}"|releases|.manager.lock) ;;
+      *) return 1 ;;
+    esac
+  done < <(find "${root}" -mindepth 1 -maxdepth 1 -print0)
+  [[ ! -e "${root}/current" && ! -L "${root}/current" &&
+    ! -e "${root}/previous" && ! -L "${root}/previous" ]] || return 1
+  directory_can_be_listed "${releases}" || return 1
+  while IFS= read -r -d '' release_dir; do
+    release_directory_is_owned "${release_dir}" || return 1
+    saw_release=true
+  done < <(find "${releases}" -mindepth 1 -maxdepth 1 -print0)
+  [[ "${saw_release}" == "true" ]]
+}
+
+restore_staged_install_root() {
+  local recorded="" device="" inode=""
+  local record="${TRANSACTION_BACKUP}/staged-install-root"
+
+  if [[ -e "${record}" || -L "${record}" ]]; then
+    [[ -f "${record}" && ! -L "${record}" ]] || return 1
+    jq -e '
+      type == "object" and
+      (keys | sort) == ["device", "inode", "stagedInstallRoot"] and
+      (.stagedInstallRoot | type == "string") and
+      (.device | type == "string") and
+      (.device | test("^[0-9]+$")) and
+      (.inode | type == "string") and
+      (.inode | test("^[0-9]+$"))
+    ' "${record}" >/dev/null 2>&1 || return 1
+    recorded="$(jq -r '.stagedInstallRoot' "${record}")"
+    device="$(jq -r '.device' "${record}")"
+    inode="$(jq -r '.inode' "${record}")"
+    validate_staged_install_root_path "${recorded}" || return 1
+    if [[ ! -e "${recorded}" && ! -L "${recorded}" ]]; then
+      [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] || return 1
+      [[ "$(stat -c '%d %i' -- "${INSTALL_ROOT}" 2>/dev/null)" == \
+        "${device} ${inode}" ]] || return 1
+      manager_install_root_is_valid "${INSTALL_ROOT}" ||
+        empty_manager_install_root_is_valid "${INSTALL_ROOT}" ||
+        pre_activation_manager_install_root_is_valid "${INSTALL_ROOT}" || return 1
+      return 0
+    fi
+    [[ -d "${recorded}" && ! -L "${recorded}" ]] || return 1
+    staged_install_root_identity_matches \
+      "${recorded}" "${device}" "${inode}" || return 1
+    if [[ "${LEGACY_LOCK_HELD}" != "true" ]]; then
+      acquire_existing_legacy_lock "${recorded}/.manager.lock"
+      staged_install_root_identity_matches \
+        "${recorded}" "${device}" "${inode}" || return 1
+    fi
+    if [[ -e "${INSTALL_ROOT}" || -L "${INSTALL_ROOT}" ]]; then
+      restore_staged_install_pair "${recorded}" || return 1
+    else
+      owned_root_is_valid "${recorded}" || return 1
+      manager_install_root_is_valid "${recorded}" ||
+        empty_manager_install_root_is_valid "${recorded}" ||
+        pre_activation_manager_install_root_is_valid "${recorded}" || return 1
+      mv -T -- "${recorded}" "${INSTALL_ROOT}" || return 1
+    fi
+  elif [[ -n "${STAGED_INSTALL_ROOT}" ]] &&
+    [[ -e "${STAGED_INSTALL_ROOT}" || -L "${STAGED_INSTALL_ROOT}" ]]; then
+    discard_unrecorded_staged_install_root "${STAGED_INSTALL_ROOT}" || return 1
+  fi
+  STAGED_INSTALL_ROOT=""
+}
+
 restore_transaction() {
-  restore_path "${CURRENT_LINK}" current
-  restore_path "${PREVIOUS_LINK}" previous
-  restore_path "${APP_COMMAND}" app-command
-  restore_path "${MAIN_DESKTOP}" main-desktop
-  restore_path "${URL_DESKTOP}" url-desktop
-  restore_path "${ICON_FILE}" icon
-  restore_path "${MIME_FILE}" mime
-  restore_path "${STATE_FILE}" state
-  restore_path "${LEGACY_MAIN_DESKTOP}" legacy-main
-  restore_path "${LEGACY_URL_DESKTOP}" legacy-url
-  restore_path "${LEGACY_ICON_FILE}" legacy-icon
-  restore_path "${LEGACY_MIME_FILE}" legacy-mime
-  restore_path "${CONFIG_HOME}/mimeapps.list" config-mimeapps
-  restore_path "${DATA_HOME}/applications/mimeapps.list" applications-mimeapps
-  restore_path "${DATA_HOME}/mimeapps.list" data-mimeapps
+  local failed=0
+
+  transaction_journal_is_valid || return 1
+  TRANSACTION_RESTORING=true
+  if ! restore_staged_install_root; then
+    TRANSACTION_RESTORING=false
+    return 1
+  fi
+  restore_path "${ICON_FILE}" icon || failed=1
+  restore_path "${MIME_FILE}" mime || failed=1
+  restore_path "${LEGACY_ICON_FILE}" legacy-icon || failed=1
+  restore_path "${LEGACY_MIME_FILE}" legacy-mime || failed=1
+  restore_path "${CURRENT_LINK}" current || failed=1
+  restore_path "${PREVIOUS_LINK}" previous || failed=1
+  restore_path "${APP_COMMAND}" app-command || failed=1
+  restore_path "${MANAGER_COMMAND}" manager-command || failed=1
+  restore_path "${MAIN_DESKTOP}" main-desktop || failed=1
+  restore_path "${URL_DESKTOP}" url-desktop || failed=1
+  restore_path "${STATE_DIR}/${OWNERSHIP_SENTINEL_NAME}" state-owner || failed=1
+  restore_path "${CACHE_ROOT}/${OWNERSHIP_SENTINEL_NAME}" cache-owner || failed=1
+  restore_path "${STATE_FILE}" state || failed=1
+  restore_path "${LEGACY_MAIN_DESKTOP}" legacy-main || failed=1
+  restore_path "${LEGACY_URL_DESKTOP}" legacy-url || failed=1
+  restore_path "${CONFIG_HOME}/mimeapps.list" config-mimeapps || failed=1
+  restore_path "${DATA_HOME}/applications/mimeapps.list" applications-mimeapps ||
+    failed=1
+  restore_path "${DATA_HOME}/mimeapps.list" data-mimeapps || failed=1
 
   if command -v update-desktop-database >/dev/null 2>&1 &&
     command -v update-mime-database >/dev/null 2>&1; then
     update-desktop-database "${DATA_HOME}/applications" >/dev/null 2>&1 || true
     update-mime-database "${DATA_HOME}/mime" >/dev/null 2>&1 || true
   fi
+  TRANSACTION_RESTORING=false
+  ((failed == 0)) || return 1
+  discard_transaction
 }
 
 discard_transaction() {
-  rm -rf -- "${TRANSACTION_BACKUP}"
-  TRANSACTION_BACKUP=""
-  rm -rf -- "${INTEGRATION_STAGE}"
+  if [[ -n "${TRANSACTION_BACKUP}" ]]; then
+    if [[ "${TRANSACTION_BACKUP}" == "${TRANSACTION_JOURNAL}" ]]; then
+      [[ ! -e "${TRANSACTION_DISCARD}" &&
+        ! -L "${TRANSACTION_DISCARD}" ]] || return 1
+      TRANSACTION_DISCARDING=true
+      if ! mv -T -- "${TRANSACTION_JOURNAL}" "${TRANSACTION_DISCARD}"; then
+        TRANSACTION_DISCARDING=false
+        return 1
+      fi
+      TRANSACTION_BACKUP=""
+      TRANSACTION_BACKUP_READY=false
+      if ! rm -rf -- "${TRANSACTION_DISCARD}"; then
+        warn "committed transaction discard will be finished on the next manager mutation"
+      fi
+      TRANSACTION_DISCARDING=false
+    else
+      rm -rf -- "${TRANSACTION_BACKUP}" || return 1
+      TRANSACTION_BACKUP=""
+      TRANSACTION_BACKUP_READY=false
+    fi
+  fi
+  if [[ -n "${INTEGRATION_STAGE}" ]]; then
+    rm -rf -- "${INTEGRATION_STAGE}" || return 1
+  fi
   INTEGRATION_STAGE=""
 }
 
-prune_releases() {
-  local current_target previous_target release_dir relative
+recover_pending_transaction_discard() {
+  [[ ! -e "${TRANSACTION_DISCARD}" &&
+    ! -L "${TRANSACTION_DISCARD}" ]] && return 0
+  transaction_directory_is_valid "${TRANSACTION_DISCARD}" ||
+    die "unfinished transaction discard is unsafe: ${TRANSACTION_DISCARD}"
+  info "finishing an interrupted transaction discard"
+  rm -rf -- "${TRANSACTION_DISCARD}" ||
+    die "could not finish transaction discard: ${TRANSACTION_DISCARD}"
+}
 
-  current_target="$(release_target "${CURRENT_LINK}" || true)"
-  previous_target="$(release_target "${PREVIOUS_LINK}" || true)"
+recover_pending_transaction() {
+  [[ ! -e "${TRANSACTION_JOURNAL}" && ! -L "${TRANSACTION_JOURNAL}" ]] ||
+    {
+      TRANSACTION_BACKUP="${TRANSACTION_JOURNAL}"
+      TRANSACTION_BACKUP_READY=true
+      TRANSACTION_DURABLE_RECOVERY=true
+      warn "recovering an unfinished manager transaction"
+      if ! restore_transaction; then
+        TRANSACTION_DURABLE_RECOVERY=false
+        die "unfinished transaction recovery failed; preserved at ${TRANSACTION_JOURNAL}"
+      fi
+      TRANSACTION_DURABLE_RECOVERY=false
+    }
+}
+
+uninstall_cleanup_record_fields() {
+  local record="$1"
+
+  jq -er --arg manager_id "${MANAGER_ID}" \
+    --argjson schema_version "${OWNERSHIP_SCHEMA_VERSION}" '
+      select(
+        .schemaVersion == $schema_version and
+        .managerId == $manager_id and
+        (.stagedInstallRoot | type == "string") and
+        (.device | type == "string") and
+        (.device | test("^[0-9]+$")) and
+        (.inode | type == "string") and
+        (.inode | test("^[0-9]+$"))
+      )
+      | [.stagedInstallRoot, .device, .inode]
+      | @tsv
+    ' "${record}" 2>/dev/null
+}
+
+recover_cleanup_record_temporaries() {
+  local record="$1"
+  local validator="$2"
+  local temporary suffix
+  shift 2
+
+  for temporary in "${record}.new."*; do
+    [[ -e "${temporary}" || -L "${temporary}" ]] || continue
+    suffix="${temporary##*.new.}"
+    if ! [[ "${suffix}" =~ ^[0-9]+$ &&
+      -f "${temporary}" && ! -L "${temporary}" &&
+      "$(stat -c '%u' -- "${temporary}" 2>/dev/null)" == "${EUID}" ]] ||
+      ! "${validator}" "${temporary}" "$@" >/dev/null; then
+      return 1
+    fi
+    rm -f -- "${temporary}" || return 1
+  done
+}
+
+validate_staged_install_root_path() {
+  local path="$1"
+  local suffix
+
+  [[ "${path}" == "${INSTALL_ROOT}.uninstall-"* ]] || return 1
+  suffix="${path#"${INSTALL_ROOT}.uninstall-"}"
+  [[ "${suffix}" =~ ^[0-9]+$ ]]
+}
+
+staged_install_root_identity() {
+  local staged_root="$1"
+  local identity
+
+  validate_staged_install_root_path "${staged_root}" || return 1
+  [[ -d "${staged_root}" && ! -L "${staged_root}" ]] || return 1
+  identity="$(stat -c '%d %i' -- "${staged_root}" 2>/dev/null)" || return 1
+  [[ "${identity}" =~ ^[0-9]+\ [0-9]+$ ]] || return 1
+  printf '%s\n' "${identity}"
+}
+
+staged_install_root_identity_matches() {
+  local staged_root="$1"
+  local device="$2"
+  local inode="$3"
+  local identity
+
+  identity="$(staged_install_root_identity "${staged_root}")" || return 1
+  [[ "${identity}" == "${device} ${inode}" ]]
+}
+
+uninstall_cleanup_record_temporary_matches() {
+  local record="$1"
+  local expected_root="$2"
+  local expected_device="$3"
+  local expected_inode="$4"
+  local fields staged_root device inode
+
+  fields="$(uninstall_cleanup_record_fields "${record}")" || return 1
+  IFS=$'\t' read -r staged_root device inode <<<"${fields}"
+  [[ "${staged_root}" == "${expected_root}" &&
+    "${device}" == "${expected_device}" &&
+    "${inode}" == "${expected_inode}" ]] || return 1
+  validate_staged_install_root_path "${staged_root}" || return 1
+  owned_root_is_valid "${staged_root}" || return 1
+  staged_install_root_identity_matches \
+    "${staged_root}" "${device}" "${inode}"
+}
+
+uninstall_cleanup_record_matches_root() {
+  local expected_root="$1"
+  local fields recorded_root device inode
+
+  fields="$(
+    uninstall_cleanup_record_fields "${UNINSTALL_CLEANUP_RECORD}"
+  )" || return 1
+  IFS=$'\t' read -r recorded_root device inode <<<"${fields}"
+  [[ "${recorded_root}" == "${expected_root}" ]] || return 1
+  owned_root_is_valid "${recorded_root}" || return 1
+  staged_install_root_identity_matches \
+    "${recorded_root}" "${device}" "${inode}"
+}
+
+uninstall_cleanup_proof_is_valid() {
+  [[ -f "${UNINSTALL_CLEANUP_PROOF}" &&
+    ! -L "${UNINSTALL_CLEANUP_PROOF}" ]] || return 1
+  [[ "$(cat "${UNINSTALL_CLEANUP_PROOF}")" == \
+    "$(ownership_sentinel_content)" ]]
+}
+
+write_uninstall_cleanup_record() {
+  local staged_root="$1"
+  local temporary="${UNINSTALL_CLEANUP_RECORD}.new.$$"
+  local identity device inode
+
+  validate_staged_install_root_path "${staged_root}" || return 1
+  owned_root_is_valid "${staged_root}" || return 1
+  identity="$(staged_install_root_identity "${staged_root}")" || return 1
+  read -r device inode <<<"${identity}"
+  recover_cleanup_record_temporaries \
+    "${UNINSTALL_CLEANUP_RECORD}" \
+    uninstall_cleanup_record_temporary_matches \
+    "${staged_root}" "${device}" "${inode}" || return 1
+  [[ ! -e "${UNINSTALL_CLEANUP_RECORD}" &&
+    ! -L "${UNINSTALL_CLEANUP_RECORD}" &&
+    ! -e "${UNINSTALL_CLEANUP_PROOF}" &&
+    ! -L "${UNINSTALL_CLEANUP_PROOF}" ]] || return 1
+  [[ ! -e "${temporary}" && ! -L "${temporary}" ]] || return 1
+  if ! jq -n \
+    --arg manager_id "${MANAGER_ID}" \
+    --argjson schema_version "${OWNERSHIP_SCHEMA_VERSION}" \
+    --arg staged_root "${staged_root}" \
+    --arg device "${device}" \
+    --arg inode "${inode}" \
+    '{schemaVersion: $schema_version, managerId: $manager_id, stagedInstallRoot: $staged_root, device: $device, inode: $inode}' \
+    >"${temporary}" ||
+    ! chmod 0600 "${temporary}" ||
+    ! mv -Tf -- "${temporary}" "${UNINSTALL_CLEANUP_RECORD}"; then
+    rm -f -- "${temporary}" || true
+    return 1
+  fi
+}
+
+finish_recorded_uninstall_cleanup() {
+  local interrupted="$1"
+  local fields staged_root device inode
+  local sentinel
+
+  [[ -f "${UNINSTALL_CLEANUP_RECORD}" &&
+    ! -L "${UNINSTALL_CLEANUP_RECORD}" ]] ||
+    die "unfinished uninstall cleanup record is invalid: ${UNINSTALL_CLEANUP_RECORD}"
+  fields="$(
+    uninstall_cleanup_record_fields "${UNINSTALL_CLEANUP_RECORD}"
+  )" ||
+    die "unfinished uninstall cleanup record is invalid: ${UNINSTALL_CLEANUP_RECORD}"
+  IFS=$'\t' read -r staged_root device inode <<<"${fields}"
+  validate_staged_install_root_path "${staged_root}" ||
+    die "unfinished uninstall cleanup path is unsafe: ${staged_root}"
+  if [[ -e "${UNINSTALL_CLEANUP_PROOF}" ||
+    -L "${UNINSTALL_CLEANUP_PROOF}" ]]; then
+    uninstall_cleanup_proof_is_valid ||
+      die "unfinished uninstall cleanup proof is invalid: ${UNINSTALL_CLEANUP_PROOF}"
+  fi
+
+  if [[ ! -e "${staged_root}" && ! -L "${staged_root}" ]]; then
+    if manager_install_root_is_valid "${INSTALL_ROOT}" ||
+      empty_manager_install_root_is_valid "${INSTALL_ROOT}" ||
+      pre_activation_manager_install_root_is_valid "${INSTALL_ROOT}"; then
+      :
+    else
+      remove_legacy_lock_bridge ||
+        die "unfinished uninstall legacy lock bridge is unsafe: ${INSTALL_ROOT}"
+    fi
+    rm -f -- "${UNINSTALL_CLEANUP_PROOF}" ||
+      die "could not remove uninstall cleanup proof"
+    rm -f -- "${UNINSTALL_CLEANUP_RECORD}" ||
+      die "could not remove uninstall cleanup record"
+    return 0
+  fi
+
+  [[ -d "${staged_root}" && ! -L "${staged_root}" ]] ||
+    die "unfinished uninstall cleanup root is unsafe: ${staged_root}"
+  staged_install_root_identity_matches \
+    "${staged_root}" "${device}" "${inode}" ||
+    die "unfinished uninstall cleanup root identity does not match: ${staged_root}"
+  if [[ -e "${INSTALL_ROOT}" || -L "${INSTALL_ROOT}" ]]; then
+    legacy_public_lock_bridge_is_valid ||
+      die "unfinished uninstall legacy lock bridge is unsafe: ${INSTALL_ROOT}"
+  fi
+  sentinel="${staged_root}/${OWNERSHIP_SENTINEL_NAME}"
+
+  if [[ -e "${sentinel}" || -L "${sentinel}" ]]; then
+    owned_root_is_valid "${staged_root}" ||
+      die "unfinished uninstall cleanup root is not manager-owned: ${staged_root}"
+    if [[ ! -e "${UNINSTALL_CLEANUP_PROOF}" &&
+      ! -L "${UNINSTALL_CLEANUP_PROOF}" ]]; then
+      publish_cleanup_proof "${sentinel}" "${UNINSTALL_CLEANUP_PROOF}" ||
+        die "could not preserve uninstall cleanup proof"
+    fi
+    uninstall_cleanup_proof_is_valid ||
+      die "unfinished uninstall cleanup proof is invalid: ${UNINSTALL_CLEANUP_PROOF}"
+    remove_directory_entries_except "${staged_root}" "${sentinel}" ||
+      die "could not empty uninstall cleanup root safely: ${staged_root}"
+    owned_root_is_valid "${staged_root}" ||
+      die "unfinished uninstall cleanup ownership proof changed: ${staged_root}"
+    staged_install_root_identity_matches \
+      "${staged_root}" "${device}" "${inode}" ||
+      die "unfinished uninstall cleanup root identity changed: ${staged_root}"
+    rm -f -- "${sentinel}" ||
+      die "could not remove uninstall cleanup ownership proof: ${sentinel}"
+  else
+    uninstall_cleanup_proof_is_valid ||
+      die "unfinished uninstall cleanup root lost its ownership proof: ${staged_root}"
+    directory_is_empty "${staged_root}" ||
+      die "unfinished uninstall cleanup root contains unverified data: ${staged_root}"
+  fi
+
+  directory_is_empty "${staged_root}" ||
+    die "unfinished uninstall cleanup root could not be emptied: ${staged_root}"
+  staged_install_root_identity_matches \
+    "${staged_root}" "${device}" "${inode}" ||
+    die "unfinished uninstall cleanup root identity changed: ${staged_root}"
+  if [[ "${interrupted}" == "true" ]]; then
+    info "finishing an interrupted uninstall cleanup"
+  fi
+  rmdir -- "${staged_root}" ||
+    die "could not finish uninstall cleanup: ${staged_root}"
+  remove_legacy_lock_bridge ||
+    die "could not remove uninstall legacy lock bridge: ${INSTALL_ROOT}"
+  rm -f -- "${UNINSTALL_CLEANUP_PROOF}" ||
+    die "could not remove uninstall cleanup proof"
+  rm -f -- "${UNINSTALL_CLEANUP_RECORD}" ||
+    die "could not remove uninstall cleanup record"
+}
+
+recover_pending_uninstall_cleanup() {
+  [[ ! -e "${UNINSTALL_CLEANUP_RECORD}" &&
+    ! -L "${UNINSTALL_CLEANUP_RECORD}" ]] && return 0
+  require_app_stopped
+  finish_recorded_uninstall_cleanup true
+}
+
+release_directory_identity() {
+  local release_dir="$1"
+  local identity
+
+  [[ -d "${release_dir}" && ! -L "${release_dir}" ]] || return 1
+  identity="$(stat -c '%d %i' -- "${release_dir}" 2>/dev/null)" || return 1
+  [[ "${identity}" =~ ^[0-9]+\ [0-9]+$ ]] || return 1
+  printf '%s\n' "${identity}"
+}
+
+release_directory_identity_matches() {
+  local release_dir="$1"
+  local device="$2"
+  local inode="$3"
+  local identity
+
+  identity="$(release_directory_identity "${release_dir}")" || return 1
+  [[ "${identity}" == "${device} ${inode}" ]]
+}
+
+release_prune_quarantine_name() {
+  local release_name="$1"
+  local device="$2"
+  local inode="$3"
+
+  is_safe_release_identifier "${release_name}" || return 1
+  [[ "${device}" =~ ^[0-9]+$ && "${inode}" =~ ^[0-9]+$ ]] || return 1
+  printf '.release-prune-%s-%s-%s\n' "${release_name}" "${device}" "${inode}"
+}
+
+release_prune_cleanup_record_fields() {
+  local record="$1"
+
+  jq -er \
+    --arg manager_id "${MANAGER_ID}" \
+    --argjson schema_version "${OWNERSHIP_SCHEMA_VERSION}" '
+      select(
+        type == "object" and
+        (keys | sort) == [
+          "device",
+          "inode",
+          "managerId",
+          "metadataSha256",
+          "quarantineName",
+          "releaseName",
+          "schemaVersion"
+        ] and
+        .schemaVersion == $schema_version and
+        .managerId == $manager_id and
+        (.releaseName | type == "string") and
+        (.quarantineName | type == "string") and
+        (.device | type == "string") and
+        (.device | test("^[0-9]+$")) and
+        (.inode | type == "string") and
+        (.inode | test("^[0-9]+$")) and
+        (.metadataSha256 | type == "string") and
+        (.metadataSha256 | test("^[0-9a-f]{64}$"))
+      )
+      | [
+          .releaseName,
+          .quarantineName,
+          .device,
+          .inode,
+          .metadataSha256
+        ]
+      | @tsv
+    ' "${record}" 2>/dev/null
+}
+
+release_prune_cleanup_record_temporary_matches() {
+  local record="$1"
+  local expected_release_name="$2"
+  local expected_quarantine_name="$3"
+  local expected_device="$4"
+  local expected_inode="$5"
+  local expected_metadata_sha256="$6"
+  local fields release_name quarantine_name device inode metadata_sha256
+  local derived_quarantine
+
+  fields="$(release_prune_cleanup_record_fields "${record}")" || return 1
+  IFS=$'\t' read -r \
+    release_name quarantine_name device inode metadata_sha256 <<<"${fields}"
+  [[ "${release_name}" == "${expected_release_name}" &&
+    "${quarantine_name}" == "${expected_quarantine_name}" &&
+    "${device}" == "${expected_device}" &&
+    "${inode}" == "${expected_inode}" &&
+    "${metadata_sha256}" == "${expected_metadata_sha256}" ]] || return 1
+  derived_quarantine="$(
+    release_prune_quarantine_name "${release_name}" "${device}" "${inode}"
+  )" || return 1
+  [[ "${quarantine_name}" == "${derived_quarantine}" ]]
+}
+
+write_release_prune_cleanup_record() {
+  local release_name="$1"
+  local device="$2"
+  local inode="$3"
+  local metadata_sha256="$4"
+  local quarantine_name
+  local temporary="${RELEASE_PRUNE_CLEANUP_RECORD}.new.$$"
+
+  quarantine_name="$(
+    release_prune_quarantine_name "${release_name}" "${device}" "${inode}"
+  )" || return 1
+  [[ "${metadata_sha256}" =~ ^[0-9a-f]{64}$ ]] || return 1
+  recover_cleanup_record_temporaries \
+    "${RELEASE_PRUNE_CLEANUP_RECORD}" \
+    release_prune_cleanup_record_temporary_matches \
+    "${release_name}" "${quarantine_name}" "${device}" "${inode}" \
+    "${metadata_sha256}" || return 1
+  [[ ! -e "${RELEASE_PRUNE_CLEANUP_RECORD}" &&
+    ! -L "${RELEASE_PRUNE_CLEANUP_RECORD}" &&
+    ! -e "${RELEASE_PRUNE_CLEANUP_PROOF}" &&
+    ! -L "${RELEASE_PRUNE_CLEANUP_PROOF}" ]] || return 1
+  [[ ! -e "${temporary}" && ! -L "${temporary}" ]] || return 1
+  if ! jq -n \
+    --arg manager_id "${MANAGER_ID}" \
+    --argjson schema_version "${OWNERSHIP_SCHEMA_VERSION}" \
+    --arg release_name "${release_name}" \
+    --arg quarantine_name "${quarantine_name}" \
+    --arg device "${device}" \
+    --arg inode "${inode}" \
+    --arg metadata_sha256 "${metadata_sha256}" \
+    '{schemaVersion: $schema_version, managerId: $manager_id,
+      releaseName: $release_name, quarantineName: $quarantine_name,
+      device: $device, inode: $inode, metadataSha256: $metadata_sha256}' \
+    >"${temporary}" ||
+    ! chmod 0600 "${temporary}" ||
+    ! mv -Tf -- "${temporary}" "${RELEASE_PRUNE_CLEANUP_RECORD}"; then
+    rm -f -- "${temporary}" || true
+    return 1
+  fi
+}
+
+release_prune_cleanup_proof_is_valid() {
+  local expected_sha256="$1"
+
+  [[ -f "${RELEASE_PRUNE_CLEANUP_PROOF}" &&
+    ! -L "${RELEASE_PRUNE_CLEANUP_PROOF}" ]] || return 1
+  [[ "$(sha256sum "${RELEASE_PRUNE_CLEANUP_PROOF}" | awk '{print $1}')" == \
+    "${expected_sha256}" ]]
+}
+
+release_metadata_matches_hash() {
+  local release_dir="$1"
+  local expected_sha256="$2"
+  local metadata="${release_dir}/release.json"
+
+  [[ -f "${metadata}" && ! -L "${metadata}" ]] || return 1
+  [[ "$(sha256sum "${metadata}" | awk '{print $1}')" == \
+    "${expected_sha256}" ]]
+}
+
+finish_recorded_release_prune() {
+  local interrupted="$1"
+  local fields release_name quarantine_name device inode metadata_sha256
+  local expected_quarantine release_dir quarantine_dir relative
+  local current_target previous_target metadata
+
+  [[ -f "${RELEASE_PRUNE_CLEANUP_RECORD}" &&
+    ! -L "${RELEASE_PRUNE_CLEANUP_RECORD}" ]] ||
+    die "unfinished release prune record is invalid: ${RELEASE_PRUNE_CLEANUP_RECORD}"
+  fields="$(
+    release_prune_cleanup_record_fields "${RELEASE_PRUNE_CLEANUP_RECORD}"
+  )" ||
+    die "unfinished release prune record is invalid: ${RELEASE_PRUNE_CLEANUP_RECORD}"
+  IFS=$'\t' read -r \
+    release_name quarantine_name device inode metadata_sha256 <<<"${fields}"
+  is_safe_release_identifier "${release_name}" ||
+    die "unfinished release prune path is unsafe: ${release_name}"
+  expected_quarantine="$(
+    release_prune_quarantine_name "${release_name}" "${device}" "${inode}"
+  )" || die "unfinished release prune identity is invalid"
+  [[ "${quarantine_name}" == "${expected_quarantine}" ]] ||
+    die "unfinished release prune quarantine is invalid: ${quarantine_name}"
+  owned_root_is_valid "${INSTALL_ROOT}" ||
+    die "unfinished release prune installation root is not manager-owned: ${INSTALL_ROOT}"
+  [[ -d "${RELEASES_DIR}" && ! -L "${RELEASES_DIR}" ]] ||
+    die "unfinished release prune directory is unsafe: ${RELEASES_DIR}"
+
+  release_dir="${RELEASES_DIR}/${release_name}"
+  quarantine_dir="${INSTALL_ROOT}/${quarantine_name}"
+  metadata="${quarantine_dir}/release.json"
+  relative="releases/${release_name}"
+  current_target="$(release_link_target "${CURRENT_LINK}" || true)"
+  previous_target="$(release_link_target "${PREVIOUS_LINK}" || true)"
+  [[ "${relative}" != "${current_target}" &&
+    "${relative}" != "${previous_target}" ]] ||
+    die "unfinished release prune targets an active release: ${release_dir}"
+
+  if [[ -e "${quarantine_dir}" || -L "${quarantine_dir}" ]]; then
+    release_directory_identity_matches \
+      "${quarantine_dir}" "${device}" "${inode}" ||
+      die "unfinished release prune quarantine identity does not match: ${quarantine_dir}"
+  elif [[ -e "${release_dir}" || -L "${release_dir}" ]]; then
+    release_directory_identity_matches \
+      "${release_dir}" "${device}" "${inode}" ||
+      die "unfinished release prune directory identity does not match: ${release_dir}"
+    release_directory_is_owned "${release_dir}" ||
+      die "unfinished release prune directory is not a fully valid manager release: ${release_dir}"
+    release_metadata_matches_hash "${release_dir}" "${metadata_sha256}" ||
+      die "unfinished release prune metadata does not match: ${release_dir}"
+    mv -Tn -- "${release_dir}" "${quarantine_dir}" ||
+      die "could not quarantine release for pruning: ${release_dir}"
+    [[ ! -e "${release_dir}" && ! -L "${release_dir}" ]] ||
+      die "could not quarantine release for pruning: ${release_dir}"
+    release_directory_identity_matches \
+      "${quarantine_dir}" "${device}" "${inode}" ||
+      die "quarantined release identity does not match: ${quarantine_dir}"
+  else
+    if [[ -e "${RELEASE_PRUNE_CLEANUP_PROOF}" ||
+      -L "${RELEASE_PRUNE_CLEANUP_PROOF}" ]]; then
+      release_prune_cleanup_proof_is_valid "${metadata_sha256}" ||
+        die "unfinished release prune proof is invalid: ${RELEASE_PRUNE_CLEANUP_PROOF}"
+      rm -f -- "${RELEASE_PRUNE_CLEANUP_PROOF}" ||
+        die "could not remove release prune cleanup proof"
+    fi
+    rm -f -- "${RELEASE_PRUNE_CLEANUP_RECORD}" ||
+      die "could not remove release prune cleanup record"
+    return 0
+  fi
+
+  release_directory_identity_matches \
+    "${quarantine_dir}" "${device}" "${inode}" ||
+    die "unfinished release prune quarantine identity does not match: ${quarantine_dir}"
+  if [[ ! -e "${RELEASE_PRUNE_CLEANUP_PROOF}" &&
+    ! -L "${RELEASE_PRUNE_CLEANUP_PROOF}" ]]; then
+    release_directory_is_owned_at_name \
+      "${quarantine_dir}" "${release_name}" ||
+      die "unfinished release prune quarantine is not a fully valid manager release: ${quarantine_dir}"
+    release_metadata_matches_hash "${quarantine_dir}" "${metadata_sha256}" ||
+      die "unfinished release prune metadata does not match: ${quarantine_dir}"
+    publish_cleanup_proof "${metadata}" "${RELEASE_PRUNE_CLEANUP_PROOF}" ||
+      die "could not preserve release prune cleanup proof"
+  fi
+  release_prune_cleanup_proof_is_valid "${metadata_sha256}" ||
+    die "unfinished release prune proof is invalid: ${RELEASE_PRUNE_CLEANUP_PROOF}"
+  if [[ "${interrupted}" == "true" ]]; then
+    info "finishing an interrupted release prune"
+  fi
+  if [[ -e "${metadata}" || -L "${metadata}" ]]; then
+    release_metadata_matches_hash "${quarantine_dir}" "${metadata_sha256}" ||
+      die "unfinished release prune metadata changed: ${quarantine_dir}"
+    remove_directory_entries_except "${quarantine_dir}" "${metadata}" ||
+      die "could not empty release prune quarantine safely: ${quarantine_dir}"
+    release_directory_identity_matches \
+      "${quarantine_dir}" "${device}" "${inode}" ||
+      die "unfinished release prune quarantine identity changed: ${quarantine_dir}"
+    release_metadata_matches_hash "${quarantine_dir}" "${metadata_sha256}" ||
+      die "unfinished release prune metadata changed: ${quarantine_dir}"
+    rm -f -- "${metadata}" ||
+      die "could not remove release prune metadata proof: ${metadata}"
+  else
+    directory_is_empty "${quarantine_dir}" ||
+      die "unfinished release prune quarantine contains unverified data: ${quarantine_dir}"
+  fi
+  directory_is_empty "${quarantine_dir}" ||
+    die "unfinished release prune quarantine could not be emptied: ${quarantine_dir}"
+  release_directory_identity_matches \
+    "${quarantine_dir}" "${device}" "${inode}" ||
+    die "unfinished release prune quarantine identity changed: ${quarantine_dir}"
+  rmdir -- "${quarantine_dir}" ||
+    die "could not finish release prune: ${quarantine_dir}"
+  rm -f -- "${RELEASE_PRUNE_CLEANUP_PROOF}" ||
+    die "could not remove release prune cleanup proof"
+  rm -f -- "${RELEASE_PRUNE_CLEANUP_RECORD}" ||
+    die "could not remove release prune cleanup record"
+}
+
+recover_pending_release_prune() {
+  [[ ! -e "${RELEASE_PRUNE_CLEANUP_RECORD}" &&
+    ! -L "${RELEASE_PRUNE_CLEANUP_RECORD}" ]] && return 0
+  require_app_stopped
+  validate_linked_releases false
+  finish_recorded_release_prune true
+}
+
+release_directory_has_ownership_metadata() {
+  local release_dir="$1"
+
+  [[ -d "${release_dir}" && ! -L "${release_dir}" &&
+    -f "${release_dir}/release.json" &&
+    ! -L "${release_dir}/release.json" ]] || return 1
+  jq -e \
+    --arg manager_id "${MANAGER_ID}" \
+    --argjson schema_version "${RELEASE_METADATA_SCHEMA_VERSION}" '
+    type == "object" and
+    .schemaVersion == $schema_version and
+    .managerId == $manager_id and
+    (.windsurfVersion | type == "string") and
+    (.build | type == "string") and
+    (.sha256 | type == "string") and
+    (.sha256 | test("^[0-9a-f]{64}$"))
+  ' "${release_dir}/release.json" >/dev/null 2>&1
+}
+
+release_directory_is_owned_at_name() {
+  local release_dir="$1"
+  local release_name="$2"
+
+  release_directory_has_ownership_metadata "${release_dir}" || return 1
+  legacy_release_metadata_is_valid "${release_dir}" "${release_name}"
+}
+
+release_directory_is_owned() {
+  local release_dir="$1"
+
+  release_directory_is_owned_at_name \
+    "${release_dir}" "$(basename "${release_dir}")"
+}
+
+validate_release_inventory_ownership() {
+  local release_dir
 
   while IFS= read -r -d '' release_dir; do
+    release_directory_has_ownership_metadata "${release_dir}" ||
+      die "unowned release directory requires manual review: ${release_dir}"
+  done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -print0)
+}
+
+validate_retained_or_reused_release() {
+  local release_dir="$1"
+
+  [[ -n "${release_dir}" ]] || return 0
+  release_directory_is_owned "${release_dir}" ||
+    die "retained or reused release is invalid: ${release_dir}"
+}
+
+validate_linked_releases() {
+  local validate_ownership="${1:-true}"
+  local current_dir previous_dir
+
+  current_dir=""
+  if [[ -e "${CURRENT_LINK}" || -L "${CURRENT_LINK}" ]]; then
+    current_dir="$(release_path "${CURRENT_LINK}")" ||
+      die "current release link is invalid: ${CURRENT_LINK}"
+  fi
+  previous_dir=""
+  if [[ -e "${PREVIOUS_LINK}" || -L "${PREVIOUS_LINK}" ]]; then
+    previous_dir="$(release_path "${PREVIOUS_LINK}")" ||
+      die "previous release link is invalid: ${PREVIOUS_LINK}"
+  fi
+  [[ -n "${current_dir}" || -z "${previous_dir}" ]] ||
+    die "previous release link exists without a current release: ${PREVIOUS_LINK}"
+  [[ "${validate_ownership}" == "true" ]] || return 0
+  validate_retained_or_reused_release "${current_dir}"
+  if [[ "${previous_dir}" != "${current_dir}" ]]; then
+    validate_retained_or_reused_release "${previous_dir}"
+  fi
+}
+
+validate_releases_prunable_after_activation() {
+  local destination="$1"
+  local future_current future_previous release_dir relative
+
+  future_current="releases/$(basename "${destination}")"
+  future_previous="$(release_link_target "${CURRENT_LINK}" || true)"
+  while IFS= read -r -d '' release_dir; do
     relative="releases/$(basename "${release_dir}")"
-    if [[ "${relative}" != "${current_target}" && "${relative}" != "${previous_target}" ]]; then
-      info "removing superseded release $(basename "${release_dir}")"
-      rm -rf -- "${release_dir}"
+    if [[ "${relative}" != "${future_current}" &&
+      "${relative}" != "${future_previous}" ]]; then
+      release_directory_is_owned "${release_dir}" ||
+        die "refusing to activate while an unowned release would be pruned: ${release_dir}"
     fi
-  done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -type d -print0)
+  done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -print0)
+}
+
+prune_releases() {
+  local current_target previous_target release_dir release_name relative
+  local identity device inode quarantine_name quarantine_dir metadata_sha256
+
+  current_target="$(release_link_target "${CURRENT_LINK}" || true)"
+  previous_target="$(release_link_target "${PREVIOUS_LINK}" || true)"
+
+  while IFS= read -r -d '' release_dir; do
+    release_name="$(basename "${release_dir}")"
+    relative="releases/${release_name}"
+    if [[ "${relative}" != "${current_target}" && "${relative}" != "${previous_target}" ]]; then
+      release_directory_is_owned "${release_dir}" ||
+        die "refusing to prune an unowned release directory: ${release_dir}"
+      info "removing superseded release ${release_name}"
+      identity="$(release_directory_identity "${release_dir}")" || return 1
+      read -r device inode <<<"${identity}"
+      quarantine_name="$(
+        release_prune_quarantine_name "${release_name}" "${device}" "${inode}"
+      )" || return 1
+      quarantine_dir="${INSTALL_ROOT}/${quarantine_name}"
+      [[ ! -e "${quarantine_dir}" && ! -L "${quarantine_dir}" ]] ||
+        die "release prune quarantine already exists: ${quarantine_dir}"
+      metadata_sha256="$(
+        sha256sum "${release_dir}/release.json" | awk '{print $1}'
+      )" || return 1
+      [[ "${metadata_sha256}" =~ ^[0-9a-f]{64}$ ]] || return 1
+      write_release_prune_cleanup_record \
+        "${release_name}" "${device}" "${inode}" "${metadata_sha256}" || return 1
+      finish_recorded_release_prune false
+    fi
+  done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -print0)
 }
 
 activate_release() {
@@ -1354,6 +3585,8 @@ command_update() {
   ensure_user_namespaces
   acquire_lock
   require_app_stopped
+  validate_release_inventory_ownership
+  validate_linked_releases false
   manifest="$(fetch_manifest)"
 
   if manifest_matches_current "${manifest}"; then
@@ -1363,13 +3596,18 @@ command_update() {
       "${destination}" \
       "$(jq -r '.version' <<<"${manifest}")" \
       "$(jq -r '.productVersion' <<<"${manifest}")"
+    validate_linked_releases
     activate_with_integration "${destination}"
     command_status
     return
   fi
 
   reject_manifest_downgrade "${manifest}"
+  validate_retained_or_reused_release \
+    "$(release_path "${CURRENT_LINK}" 2>/dev/null || true)"
   destination="$(download_release "${manifest}")"
+  validate_retained_or_reused_release "${destination}"
+  validate_releases_prunable_after_activation "${destination}"
   activate_with_integration "${destination}"
 
   prune_releases
@@ -1379,7 +3617,7 @@ command_update() {
 
 command_rollback() {
   local current_target previous_target previous_path
-  local metadata_build metadata_product
+  local current_path metadata_build metadata_product
 
   require_release_commands
   require_commands flock unshare
@@ -1393,10 +3631,13 @@ command_rollback() {
     die "no active release is installed"
   previous_target="$(release_target "${PREVIOUS_LINK}")" ||
     die "no previous release is available"
+  current_path="${INSTALL_ROOT}/${current_target}"
   previous_path="${INSTALL_ROOT}/${previous_target}"
+  validate_retained_or_reused_release "${current_path}"
   metadata_build="$(jq -r '.build // empty' "${previous_path}/release.json")"
   metadata_product="$(jq -r '.productVersion // empty' "${previous_path}/release.json")"
   validate_release "${previous_path}" "${metadata_build}" "${metadata_product}"
+  validate_retained_or_reused_release "${previous_path}"
   build_integration_stage "${previous_path}"
   backup_transaction
 
@@ -1476,13 +3717,13 @@ command_doctor() {
   [[ "$(stat -c '%a' "${STATE_FILE}" 2>/dev/null || true)" == "600" ]] ||
     failures+=("manager state permissions are not 0600")
 
-  handler="$(query_default "${MIME_DEVIN}")"
+  handler="$(query_default "${MIME_DEVIN}")" || return 1
   [[ "${handler}" == "${URL_DESKTOP_ID}" ]] ||
     warnings+=("Devin URL default is ${handler:-unset}; run set-defaults to change it")
-  handler="$(query_default "${MIME_WINDSURF}")"
+  handler="$(query_default "${MIME_WINDSURF}")" || return 1
   [[ "${handler}" == "${URL_DESKTOP_ID}" ]] ||
     warnings+=("Windsurf URL default is ${handler:-unset}; run set-defaults to change it")
-  handler="$(query_default "${MIME_WORKSPACE}")"
+  handler="$(query_default "${MIME_WORKSPACE}")" || return 1
   [[ "${handler}" == "${MAIN_DESKTOP_ID}" ]] ||
     warnings+=("workspace default is ${handler:-unset}; run set-defaults to change it")
 
@@ -1534,8 +3775,9 @@ rewrite_mimeapps_without_handler() {
     }
     { print }
   ' "${file}" >"${temporary}" || return 1
-  chmod --reference="${file}" "${temporary}"
-  mv -Tf -- "${temporary}" "${file}"
+  chmod --reference="${file}" "${temporary}" || return 1
+  mv -Tf -- "${temporary}" "${file}" || return 1
+  record_user_configuration_path_result "${file}"
 }
 
 remove_handler_from_user_defaults() {
@@ -1547,7 +3789,8 @@ remove_handler_from_user_defaults() {
     "${CONFIG_HOME}/mimeapps.list" \
     "${DATA_HOME}/applications/mimeapps.list" \
     "${DATA_HOME}/mimeapps.list"; do
-    rewrite_mimeapps_without_handler "${file}" "${mime_type}" "${desktop_id}"
+    rewrite_mimeapps_without_handler "${file}" "${mime_type}" "${desktop_id}" ||
+      return 1
   done
 }
 
@@ -1557,7 +3800,7 @@ restore_one_association() {
   local original="$3"
   local current
 
-  current="$(query_default "${mime_type}")"
+  current="$(query_default "${mime_type}")" || return 1
   if [[ "${current}" == "${desktop_id}" ]] ||
     legacy_desktop_id_owned "${current}"; then
     remove_handler_from_user_defaults "${mime_type}" "${desktop_id}" || return 1
@@ -1565,7 +3808,8 @@ restore_one_association() {
       remove_handler_from_user_defaults "${mime_type}" "${current}" || return 1
     fi
     if [[ -n "${original}" ]]; then
-      xdg-mime default "${original}" "${mime_type}"
+      xdg-mime default "${original}" "${mime_type}" || return 1
+      record_user_configuration_results || return 1
     fi
   else
     remove_handler_from_user_defaults "${mime_type}" "${desktop_id}" || return 1
@@ -1587,26 +3831,34 @@ restore_associations() {
 
   restore_one_association "${MIME_DEVIN}" "${URL_DESKTOP_ID}" "${original_devin}" ||
     return 1
+  record_user_configuration_results || return 1
   restore_one_association "${MIME_WINDSURF}" "${URL_DESKTOP_ID}" "${original_windsurf}" ||
     return 1
-  restore_one_association "${MIME_WORKSPACE}" "${MAIN_DESKTOP_ID}" "${original_workspace}"
+  record_user_configuration_results || return 1
+  restore_one_association "${MIME_WORKSPACE}" "${MAIN_DESKTOP_ID}" "${original_workspace}" ||
+    return 1
+  record_user_configuration_results
 }
 
 remove_managed_regular_file() {
   local path="$1"
   local key="$2"
   local marker_allowed="${3:-false}"
+  local release_asset="${4:-}"
 
   [[ -e "${path}" || -L "${path}" ]] || return 0
   if state_is_valid; then
     if managed_file_matches_state "${key}" "${path}"; then
-      rm -f -- "${path}"
+      rm -f -- "${path}" || return 1
     else
       warn "leaving modified or non-manager-owned path in place: ${path}"
     fi
   elif [[ "${marker_allowed}" == "true" && -f "${path}" && ! -L "${path}" ]] &&
     grep -qx "${MANAGER_DESKTOP_MARKER}" "${path}"; then
-    rm -f -- "${path}"
+    rm -f -- "${path}" || return 1
+  elif [[ -n "${release_asset}" ]] &&
+    asset_matches_release "${path}" "${release_asset}"; then
+    rm -f -- "${path}" || return 1
   else
     warn "leaving modified or non-manager-owned path in place: ${path}"
   fi
@@ -1618,18 +3870,213 @@ remove_manager_command_if_owned() {
   if [[ -L "${MANAGER_COMMAND}" ]]; then
     case "$(readlink -f "${MANAGER_COMMAND}" 2>/dev/null || true)" in
       "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)")
-        rm -f -- "${MANAGER_COMMAND}"
-        return
+        rm -f -- "${MANAGER_COMMAND}" || return 1
+        return 0
         ;;
     esac
   elif [[ -f "${MANAGER_COMMAND}" ]] &&
     grep -Fqx "readonly MANAGER_ID=\"${MANAGER_ID}\"" \
       "${MANAGER_COMMAND}"; then
-    rm -f -- "${MANAGER_COMMAND}"
-    return
+    rm -f -- "${MANAGER_COMMAND}" || return 1
+    return 0
   fi
 
   warn "leaving non-manager-owned command in place: ${MANAGER_COMMAND}"
+}
+
+legacy_lock_bridge_is_valid() {
+  local staged_root="$1"
+  local public_lock="${INSTALL_ROOT}/.manager.lock"
+  local staged_lock="${staged_root}/.manager.lock"
+
+  legacy_public_lock_bridge_is_valid || return 1
+  [[ -f "${staged_lock}" && ! -L "${staged_lock}" &&
+    "${public_lock}" -ef "${staged_lock}" ]]
+}
+
+legacy_public_lock_bridge_is_valid() {
+  local public_lock="${INSTALL_ROOT}/.manager.lock"
+
+  [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" &&
+    -f "${public_lock}" && ! -L "${public_lock}" &&
+    "${public_lock}" -ef /proc/self/fd/8 ]] || return 1
+  directory_contains_only_entry "${INSTALL_ROOT}" "${public_lock}"
+}
+
+staged_install_pair_is_valid() {
+  local staged_root="$1"
+  local public_lock="${INSTALL_ROOT}/.manager.lock"
+  local staged_lock="${staged_root}/.manager.lock"
+  local root entry name target release_dir
+  local sentinel="" releases="" current="" previous=""
+  declare -A paths=()
+
+  [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" &&
+    -d "${staged_root}" && ! -L "${staged_root}" &&
+    -f "${public_lock}" && ! -L "${public_lock}" &&
+    -f "${staged_lock}" && ! -L "${staged_lock}" &&
+    "${public_lock}" -ef "${staged_lock}" &&
+    "${public_lock}" -ef /proc/self/fd/8 ]] || return 1
+
+  for root in "${INSTALL_ROOT}" "${staged_root}"; do
+    directory_can_be_listed "${root}" || return 1
+    while IFS= read -r -d '' entry; do
+      name="$(basename "${entry}")"
+      case "${name}" in
+        .manager.lock)
+          ;;
+        "${OWNERSHIP_SENTINEL_NAME}"|releases|current|previous)
+          [[ -z "${paths[${name}]+present}" ]] || return 1
+          paths["${name}"]="${entry}"
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+    done < <(find "${root}" -mindepth 1 -maxdepth 1 -print0)
+  done
+
+  sentinel="${paths[${OWNERSHIP_SENTINEL_NAME}]:-}"
+  releases="${paths[releases]:-}"
+  current="${paths[current]:-}"
+  previous="${paths[previous]:-}"
+  [[ -n "${sentinel}" && -f "${sentinel}" && ! -L "${sentinel}" &&
+    "$(cat "${sentinel}")" == "$(ownership_sentinel_content)" &&
+    -n "${releases}" && -d "${releases}" && ! -L "${releases}" ]] ||
+    return 1
+  [[ -n "${current}" || -z "${previous}" ]] || return 1
+
+  for entry in "${current}" "${previous}"; do
+    [[ -n "${entry}" ]] || continue
+    [[ -L "${entry}" ]] || return 1
+    target="$(readlink "${entry}")"
+    [[ "${target}" == releases/* && "${target}" != *"/"*"/"* ]] ||
+      return 1
+    is_safe_release_identifier "${target#releases/}" || return 1
+    [[ -d "${releases}/${target#releases/}" &&
+      ! -L "${releases}/${target#releases/}" ]] || return 1
+  done
+  directory_can_be_listed "${releases}" || return 1
+  while IFS= read -r -d '' release_dir; do
+    release_directory_is_owned "${release_dir}" || return 1
+  done < <(find "${releases}" -mindepth 1 -maxdepth 1 -print0)
+}
+
+restore_staged_install_pair() {
+  local staged_root="$1"
+  local staged_lock="${staged_root}/.manager.lock"
+  local entry name destination
+
+  staged_install_pair_is_valid "${staged_root}" || return 1
+  while IFS= read -r -d '' entry; do
+    name="$(basename "${entry}")"
+    [[ "${name}" != ".manager.lock" ]] || continue
+    destination="${INSTALL_ROOT}/${name}"
+    [[ ! -e "${destination}" && ! -L "${destination}" ]] || return 1
+    mv -T -- "${entry}" "${destination}" || return 1
+  done < <(find "${staged_root}" -mindepth 1 -maxdepth 1 -print0)
+  staged_install_pair_is_valid "${staged_root}" || return 1
+  rm -f -- "${staged_lock}" || return 1
+  rmdir -- "${staged_root}" || return 1
+  manager_install_root_is_valid "${INSTALL_ROOT}" ||
+    empty_manager_install_root_is_valid "${INSTALL_ROOT}" ||
+    pre_activation_manager_install_root_is_valid "${INSTALL_ROOT}"
+}
+
+discard_unrecorded_staged_install_root() {
+  local staged_root="$1"
+  local staged_lock="${staged_root}/.manager.lock"
+  local public_lock="${INSTALL_ROOT}/.manager.lock"
+
+  validate_staged_install_root_path "${staged_root}" || return 1
+  [[ -d "${staged_root}" && ! -L "${staged_root}" ]] || return 1
+  manager_install_root_is_valid "${INSTALL_ROOT}" ||
+    empty_manager_install_root_is_valid "${INSTALL_ROOT}" ||
+    pre_activation_manager_install_root_is_valid "${INSTALL_ROOT}" || return 1
+  if directory_is_empty "${staged_root}"; then
+    rmdir -- "${staged_root}"
+    return
+  fi
+  [[ -f "${staged_lock}" && ! -L "${staged_lock}" &&
+    -f "${public_lock}" && ! -L "${public_lock}" &&
+    "${staged_lock}" -ef "${public_lock}" &&
+    "${public_lock}" -ef /proc/self/fd/8 ]] || return 1
+  directory_contains_only_entry "${staged_root}" "${staged_lock}" || return 1
+  rm -f -- "${staged_lock}" || return 1
+  rmdir -- "${staged_root}"
+}
+
+create_legacy_lock_bridge() {
+  local staged_root="$1"
+  local public_lock="${INSTALL_ROOT}/.manager.lock"
+  local staged_lock="${staged_root}/.manager.lock"
+
+  if ! mkdir -- "${staged_root}" ||
+    ! ln -- "${public_lock}" "${staged_lock}"; then
+    rm -f -- "${staged_lock}" || true
+    rmdir -- "${staged_root}" 2>/dev/null || true
+    return 1
+  fi
+  [[ -f "${staged_lock}" && ! -L "${staged_lock}" &&
+    "${staged_lock}" -ef "${public_lock}" &&
+    "${public_lock}" -ef /proc/self/fd/8 ]] || return 1
+  directory_contains_only_entry "${staged_root}" "${staged_lock}"
+}
+
+remove_legacy_lock_bridge() {
+  local public_lock="${INSTALL_ROOT}/.manager.lock"
+
+  [[ -e "${INSTALL_ROOT}" || -L "${INSTALL_ROOT}" ]] || return 0
+  legacy_public_lock_bridge_is_valid || return 1
+  rm -f -- "${public_lock}" || return 1
+  rmdir -- "${INSTALL_ROOT}"
+}
+
+stage_install_root_for_uninstall() {
+  local identity device inode
+  local record temporary entry name destination
+
+  STAGED_INSTALL_ROOT="${INSTALL_ROOT}.uninstall-$$"
+  [[ ! -e "${STAGED_INSTALL_ROOT}" && ! -L "${STAGED_INSTALL_ROOT}" ]] ||
+    return 1
+  manager_install_root_is_valid "${INSTALL_ROOT}" ||
+    empty_manager_install_root_is_valid "${INSTALL_ROOT}" ||
+    pre_activation_manager_install_root_is_valid "${INSTALL_ROOT}" || return 1
+  create_legacy_lock_bridge "${STAGED_INSTALL_ROOT}" || return 1
+  identity="$(stat -c '%d %i' -- "${STAGED_INSTALL_ROOT}" 2>/dev/null)" ||
+    return 1
+  [[ "${identity}" =~ ^[0-9]+\ [0-9]+$ ]] || return 1
+  read -r device inode <<<"${identity}"
+  record="${TRANSACTION_BACKUP}/staged-install-root"
+  temporary="${record}.new.$$"
+  [[ ! -e "${record}" && ! -L "${record}" &&
+    ! -e "${temporary}" && ! -L "${temporary}" ]] || return 1
+  if ! jq -n \
+    --arg staged_root "${STAGED_INSTALL_ROOT}" \
+    --arg device "${device}" \
+    --arg inode "${inode}" \
+    '{stagedInstallRoot: $staged_root, device: $device, inode: $inode}' \
+    >"${temporary}" ||
+    ! chmod 0600 "${temporary}" ||
+    ! mv -Tf -- "${temporary}" "${record}"; then
+    rm -f -- "${temporary}" || true
+    discard_unrecorded_staged_install_root "${STAGED_INSTALL_ROOT}" || true
+    return 1
+  fi
+  while IFS= read -r -d '' entry; do
+    name="$(basename "${entry}")"
+    [[ "${name}" != ".manager.lock" ]] || continue
+    destination="${STAGED_INSTALL_ROOT}/${name}"
+    [[ ! -e "${destination}" && ! -L "${destination}" ]] || return 1
+    mv -T -- "${entry}" "${destination}" || return 1
+  done < <(find "${INSTALL_ROOT}" -mindepth 1 -maxdepth 1 -print0)
+  legacy_lock_bridge_is_valid "${STAGED_INSTALL_ROOT}" || return 1
+  manager_install_root_is_valid "${STAGED_INSTALL_ROOT}" ||
+    empty_manager_install_root_is_valid "${STAGED_INSTALL_ROOT}" ||
+    pre_activation_manager_install_root_is_valid "${STAGED_INSTALL_ROOT}" ||
+    return 1
+  staged_install_root_identity_matches \
+    "${STAGED_INSTALL_ROOT}" "${device}" "${inode}" || return 1
 }
 
 perform_uninstall() {
@@ -1637,29 +4084,33 @@ perform_uninstall() {
 
   if [[ -L "${APP_COMMAND}" &&
     "$(readlink "${APP_COMMAND}")" == "${CURRENT_LINK}/app/bin/devin-desktop" ]]; then
-    rm -f -- "${APP_COMMAND}"
+    rm -f -- "${APP_COMMAND}" || return 1
   elif [[ -e "${APP_COMMAND}" || -L "${APP_COMMAND}" ]]; then
     warn "leaving non-manager-owned command in place: ${APP_COMMAND}"
   fi
 
   remove_managed_regular_file "${MAIN_DESKTOP}" mainDesktop true || return 1
   remove_managed_regular_file "${URL_DESKTOP}" urlDesktop true || return 1
-  remove_managed_regular_file "${ICON_FILE}" icon false || return 1
-  remove_managed_regular_file "${MIME_FILE}" mime false || return 1
+  remove_managed_regular_file \
+    "${ICON_FILE}" icon false devin-desktop.png || return 1
+  remove_managed_regular_file \
+    "${MIME_FILE}" mime false devin-desktop-workspace.xml || return 1
   remove_legacy_integration || return 1
   refresh_desktop_caches || return 1
-  rm -rf -- "${CACHE_ROOT}" "${INSTALL_ROOT}" "${STATE_DIR}" || return 1
-  remove_manager_command_if_owned
+  stage_install_root_for_uninstall || return 1
+  rm -rf -- "${CACHE_ROOT}" "${STATE_DIR}" || return 1
 }
 
 command_uninstall() {
   local answer="${1:-}"
 
-  require_commands jq sha256sum readlink flock awk mktemp
+  require_commands jq sha256sum readlink flock awk mktemp find
   require_integration_commands
   acquire_lock
   require_app_stopped
   validate_state_or_absent
+  validate_release_inventory_ownership
+  validate_linked_releases
 
   if [[ "${answer}" != "--yes" ]]; then
     if [[ ! -t 0 ]]; then
@@ -1674,12 +4125,31 @@ command_uninstall() {
   fi
 
   backup_transaction
-  if ! (perform_uninstall); then
+  if ! perform_uninstall; then
     warn "uninstall failed; restoring manager-owned files and desktop defaults"
-    restore_transaction
+    restore_transaction ||
+      die "uninstall recovery failed; preserved at ${TRANSACTION_JOURNAL}"
     exit 1
   fi
-  discard_transaction
+  local staged_root="${STAGED_INSTALL_ROOT}"
+  if ! write_uninstall_cleanup_record "${staged_root}"; then
+    warn "uninstall cleanup could not be made durable; restoring the installation"
+    restore_transaction ||
+      die "uninstall recovery failed; preserved at ${TRANSACTION_JOURNAL}"
+    exit 1
+  fi
+  discard_transaction ||
+    die "uninstall was not durably committed; transaction journal preserved at ${TRANSACTION_JOURNAL}; recovery is required before another installation change"
+  if [[ -n "${staged_root}" ]] &&
+    ! uninstall_cleanup_record_matches_root "${staged_root}"; then
+    warn "uninstall completed, but the old release data identity changed; cleanup record preserved at ${UNINSTALL_CLEANUP_RECORD}"
+  elif [[ -n "${staged_root}" ]]; then
+    finish_recorded_uninstall_cleanup false
+  fi
+  STAGED_INSTALL_ROOT=""
+  if ! remove_manager_command_if_owned; then
+    warn "could not remove the manager command; remove it manually: ${MANAGER_COMMAND}"
+  fi
   info "managed application removed; Devin CLI and user configuration were preserved"
 }
 
@@ -1688,7 +4158,7 @@ main() {
 
   case "${command_name}" in
     help|-h|--help)
-      (($# == 1)) || die "help does not accept arguments"
+      (($# <= 1)) || die "help does not accept arguments"
       usage
       return
       ;;

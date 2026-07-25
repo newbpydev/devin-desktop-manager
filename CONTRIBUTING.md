@@ -30,12 +30,25 @@ Tests must remain offline and deterministic. Never add an upstream Devin
 Desktop package or captured user data to a fixture. The miniature package
 fixture under `tests/fixtures` is generated locally from harmless test files.
 
+The public coverage gate requires at least 90% line coverage across `bin/` and
+`scripts/`. Install Ruby and Bundler, then install the exact locked dependency
+set and run:
+
+```bash
+bundle install
+bundle exec make coverage
+```
+
+Coverage is a backstop, not a substitute for behavior assertions. New failure
+paths should be exercised through the public command whenever practical.
+
 ## Pull requests
 
 - Keep each pull request focused and explain the user-visible value.
 - Add or update tests and documentation with behavior changes.
 - Preserve the security invariants documented in the README.
 - Use a conventional, imperative commit subject when practical.
-- Confirm `make verify` and describe any validation that cannot run locally.
+- Confirm `make verify` and `make coverage`, and describe any validation that
+  cannot run locally.
 
 By participating, you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).

@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+usage() {
+  printf 'Usage: check-coverage RESULTSET MINIMUM_PERCENT\n' >&2
+  exit 2
+}
+
+main() {
+  local resultset="${1:-}"
+  local minimum="${2:-}"
+  local stats covered relevant percentage
+
+  (($# == 2)) || usage
+  [[ -f "${resultset}" ]] ||
+    {
+      printf 'check-coverage: result set is missing: %s\n' "${resultset}" >&2
+      exit 1
+    }
+  if [[ ! "${minimum}" =~ ^[0-9]+([.][0-9]+)?$ ]] ||
+    ! awk -v value="${minimum}" 'BEGIN { exit !(value >= 0 && value <= 100) }'; then
+    printf 'check-coverage: minimum must be between 0 and 100\n' >&2
+    exit 2
+  fi
+
+  stats="$(
+    jq -er '
+      [
+        .[]?.coverage? | .[]? |
+        if type == "array" then .[]
+        elif type == "object" and (.lines? | type) == "array" then .lines[]
+        else empty
+        end |
+        select(. != null)
+      ] as $lines
+      | ($lines | length) as $relevant
+      | ($lines | map(select(. > 0)) | length) as $covered
+      | select($relevant > 0)
+      | [$covered, $relevant] | @tsv
+    ' "${resultset}" 2>/dev/null
+  )" ||
+    {
+      printf 'check-coverage: result set contains no relevant lines\n' >&2
+      exit 1
+    }
+  IFS=$'\t' read -r covered relevant <<<"${stats}"
+  percentage="$(awk -v covered="${covered}" -v relevant="${relevant}" \
+    'BEGIN { printf "%.2f", covered * 100 / relevant }')"
+
+  if ! awk -v covered="${covered}" -v relevant="${relevant}" \
+    -v required="${minimum}" \
+    'BEGIN { exit !(covered * 100 >= required * relevant) }'; then
+    printf 'check-coverage: %s%% is below required %.2f%% (%s/%s)\n' \
+      "${percentage}" "${minimum}" "${covered}" "${relevant}" >&2
+    exit 1
+  fi
+
+  printf 'Coverage: %s%% (%s/%s), required %.2f%%\n' \
+    "${percentage}" "${covered}" "${relevant}" "${minimum}"
+}
+
+main "$@"

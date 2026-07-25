@@ -25,7 +25,7 @@ checked after the repository is created.
 
 1. Develop the smallest fix on a private security fork when confidentiality is
    required.
-2. Run `make verify` and focused adversarial tests.
+2. Run `make verify`, `make coverage`, and focused adversarial tests.
 3. Review archive, ownership, downloader, workflow-permission, and release
    implications.
 4. Request a CVE through the GitHub security advisory when appropriate.

@@ -27,12 +27,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes \
             bats \
+            curl \
             desktop-file-utils \
             jq \
             libarchive-tools \
+            ruby-bundler \
+            ruby-dev \
             shellcheck \
             shared-mime-info \
             xdg-utils
+          bundle config set --local deployment true
+          bundle install
 
       - name: Run offline quality gate
-        run: make verify
+        run: |
+          make lint
+          bundle exec make coverage

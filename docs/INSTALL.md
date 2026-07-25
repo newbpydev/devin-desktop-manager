@@ -71,6 +71,22 @@ make doctor
 No command requires `sudo`. Running the manager as root is intentionally
 refused. Add `~/.local/bin` to `PATH` if your distribution does not already.
 
+## Existing path collisions
+
+The manager creates versioned ownership markers in its installation, cache,
+and state roots. It automatically migrates the public 0.1.0 markerless layout
+only after validating its release links, release metadata, state paths, and
+managed-file hashes. A near-miss or any other path containing data without a
+valid marker is left unchanged. Move that conflicting path aside, inspect its
+contents, and retry. Do not add a marker by hand: ownership metadata is part of
+the manager's deletion safety boundary.
+
+Interrupted mutations leave a private transaction journal beside the state
+directory. The next mutating command acquires the manager lock and restores
+that journal before starting new work. If interruption happens after an
+uninstall commits, a separate validated cleanup record lets the next mutation
+remove only the manager-owned staged release tree.
+
 ## User namespaces
 
 The extracted Electron bundle cannot use a root-owned setuid sandbox in a
@@ -82,4 +98,9 @@ distribution documentation if `unshare --user --map-root-user true` fails.
 
 The manager respects absolute `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`,
 `XDG_DATA_HOME`, and `XDG_STATE_HOME` values. Relative XDG paths are refused to
-avoid writing to an unexpected directory.
+avoid writing to an unexpected directory. Because transaction journals and
+locks live in `XDG_STATE_HOME`, that directory must be owned by the current
+user and must not be group- or world-writable; shared directories such as
+`/tmp` are rejected. XDG homes also cannot live beneath the manager's install,
+cache, or state roots, and the derived manager cache and state roots cannot
+overlap, because uninstall removes those manager-owned trees recursively.

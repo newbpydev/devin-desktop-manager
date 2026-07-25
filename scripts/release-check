@@ -12,7 +12,15 @@ main() {
   local project_root manager_version make_version release_tag
 
   (($# == 1)) || usage
-  project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  project_root="${RELEASE_CHECK_PROJECT_ROOT:-}"
+  if [[ -z "${project_root}" ]]; then
+    project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  fi
+  [[ "${project_root}" == /* && -d "${project_root}" ]] ||
+    {
+      printf 'release-check: project root must be an absolute directory\n' >&2
+      exit 1
+    }
   manager_version="$(
     "${project_root}/bin/devin-desktop-manager" --version | awk '{print $2}'
   )"

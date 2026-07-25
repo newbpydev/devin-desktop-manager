@@ -37,16 +37,20 @@ jobs:
             desktop-file-utils \
             jq \
             libarchive-tools \
+            ruby-bundler \
+            ruby-dev \
             shellcheck \
             shared-mime-info \
             xdg-utils
+          bundle config set --local deployment true
+          bundle install
 
       - name: Verify and package exact version
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           version="${GITHUB_REF_NAME#v}"
-          make release-check VERSION="${version}"
+          bundle exec make release-check VERSION="${version}"
 
       - name: Attest source archive provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4

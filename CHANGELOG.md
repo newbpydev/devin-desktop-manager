@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- Safely migrate installations created by the public 0.1.0 markerless layout
+  after cache eviction or an interrupted migration, without accepting unsafe
+  links or weakening ownership checks for unknown directories.
+- Restore the installed manager command when an interrupted uninstall rolls
+  back, and resume post-commit staged-release cleanup on the next mutation.
+- Enforce the 90% coverage threshold on tagged releases and compare exact
+  fresh coverage counts before rounding the displayed percentage; lock the
+  complete Ruby coverage dependency graph used by CI and releases.
+
 ## [0.1.0] - 2026-07-20
 
 ### Added
