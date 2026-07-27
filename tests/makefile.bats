@@ -15,6 +15,206 @@ setup() {
 printf '%s\n' "$*" >>"${CALL_LOG}"
 EOF
   chmod 0755 "${MOCK_MANAGER}"
+
+  MAKE_COMMAND="$(command -v make)"
+  HARNESS_BASH="$(command -v bash)"
+  TRUE_COMMAND="$(type -P true)"
+}
+
+make_fixture() {
+  local root="$1"
+
+  mkdir -p "${root}/bin" "${root}/scripts"
+  cp "${PROJECT_ROOT}/Makefile" "${root}/Makefile"
+  cp "${PROJECT_ROOT}/bin/devin-desktop-manager" \
+    "${root}/bin/devin-desktop-manager"
+  cp "${PROJECT_ROOT}/scripts/install-manager" \
+    "${root}/scripts/install-manager"
+}
+
+write_recorder() {
+  local path="$1"
+  local identity="$2"
+
+  cat >"${path}" <<EOF
+#!${HARNESS_BASH}
+printf '%s' '${identity}' >>"\${CALL_LOG}"
+printf ' <%s>' "\$@" >>"\${CALL_LOG}"
+printf '\n' >>"\${CALL_LOG}"
+EOF
+  chmod 0755 "${path}"
+}
+
+@test "[PMC-U1-R01] help needs only Make and literal POSIX shell" {
+  local stdout_file="${BATS_TEST_TMPDIR}/stdout"
+  local stderr_file="${BATS_TEST_TMPDIR}/stderr"
+
+  run /bin/sh -c 'env -u HOME -u BASH -u RUBYOPT -u XDG_CONFIG_HOME \
+    -u XDG_DATA_HOME -u XDG_STATE_HOME -u XDG_CACHE_HOME -u XDG_RUNTIME_DIR \
+    PATH=/missing "$1" --no-print-directory -s -C "$2" >"$3" 2>"$4"' \
+    _ "${MAKE_COMMAND}" "${PROJECT_ROOT}" "${stdout_file}" "${stderr_file}"
+
+  [ "${status}" -eq 0 ]
+  [ -s "${stdout_file}" ]
+  [ ! -s "${stderr_file}" ]
+
+  run env -u HOME -u BASH -u RUBYOPT PATH=/missing \
+    "${MAKE_COMMAND}" --no-print-directory -s -C "${PROJECT_ROOT}" help
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"Devin Desktop Manager"* ]]
+}
+
+@test "[PMC-U1-R02] manager targets always execute checkout source" {
+  local root="${BATS_TEST_TMPDIR}/checkout"
+  local installed="${TEST_HOME}/.local/bin/devin-desktop-manager"
+  local stale_log="${BATS_TEST_TMPDIR}/stale-calls"
+
+  make_fixture "${root}"
+  write_recorder "${root}/bin/devin-desktop-manager" checkout
+  mkdir -p "$(dirname "${installed}")"
+  cat >"${installed}" <<EOF
+#!${HARNESS_BASH}
+printf 'stale\n' >>'${stale_log}'
+EOF
+  chmod 0755 "${installed}"
+
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
+    HOME="${TEST_HOME}" BASH="${HARNESS_BASH}" status
+
+  [ "${status}" -eq 0 ]
+  [ "$(<"${CALL_LOG}")" = "checkout <status>" ]
+  [ ! -e "${stale_log}" ]
+}
+
+@test "[PMC-U1-R03] invalid Make entry is rejected before mutation" {
+  local root="${BATS_TEST_TMPDIR}/checkout"
+  local sentinel="${BATS_TEST_TMPDIR}/injected"
+  local installed="${TEST_HOME}/.local/bin/devin-desktop-manager"
+
+  make_fixture "${root}"
+  write_recorder "${root}/bin/devin-desktop-manager" checkout
+  write_recorder "${root}/scripts/install-manager" installer
+  mkdir -p "$(dirname "${installed}")"
+  write_recorder "${installed}" installed
+
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" unknown
+  [ "${status}" -ne 0 ]
+  [ ! -e "${CALL_LOG}" ]
+
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" status status
+  [ "${status}" -ne 0 ]
+  [ ! -e "${CALL_LOG}" ]
+
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" status check
+  [ "${status}" -ne 0 ]
+  [ ! -e "${CALL_LOG}" ]
+
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
+    MANAGER="${installed}" status
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"MANAGER"* ]]
+  [ ! -e "${CALL_LOG}" ]
+
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
+    BASH="bash; touch ${sentinel}" status
+  [ "${status}" -ne 0 ]
+  [ ! -e "${sentinel}" ]
+  [ ! -e "${CALL_LOG}" ]
+
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
+    BATS="bats; touch ${sentinel}" test
+  [ "${status}" -ne 0 ]
+  [ ! -e "${sentinel}" ]
+  [ ! -e "${CALL_LOG}" ]
+
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
+    SHELLCHECK="shellcheck; touch ${sentinel}" lint
+  [ "${status}" -ne 0 ]
+  [ ! -e "${sentinel}" ]
+  [ ! -e "${CALL_LOG}" ]
+
+  mkdir -p "${root}/coverage"
+  printf 'preserve\n' >"${root}/coverage/.resultset.json"
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
+    BASHCOV="bashcov; touch ${sentinel}" coverage
+  [ "${status}" -ne 0 ]
+  [ ! -e "${sentinel}" ]
+  [ "$(<"${root}/coverage/.resultset.json")" = preserve ]
+  [ ! -e "${CALL_LOG}" ]
+
+  run "${MAKE_COMMAND}" --no-print-directory -s -j -C "${root}" \
+    install package
+  [ "${status}" -ne 0 ]
+  [ ! -e "${CALL_LOG}" ]
+}
+
+@test "[PMC-U1-R04] caller paths are data and controls are rejected" {
+  local component='space single-'"'"' double-" glob-[*?] dollar-$value subshell-$(touch injected) semi-;pipe-| backtick-`touch injected`'
+  local root="${BATS_TEST_TMPDIR}/${component}"
+  local home="${BATS_TEST_TMPDIR}/home ${component}"
+  local app="${BATS_TEST_TMPDIR}/app ${component}"
+  local bats_command="${BATS_TEST_TMPDIR}/bats ${component}"
+  local sentinel="${root}/injected"
+
+  make_fixture "${root}"
+  write_recorder "${root}/bin/devin-desktop-manager" checkout
+  write_recorder "${root}/scripts/install-manager" installer
+  write_recorder "${app}" app
+  write_recorder "${bats_command}" bats
+
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
+    HOME="${home}" BASH="${HARNESS_BASH}" status
+  [ "${status}" -eq 0 ]
+  [ "$(<"${CALL_LOG}")" = "checkout <status>" ]
+  [ ! -e "${sentinel}" ]
+
+  : >"${CALL_LOG}"
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" APP="${app}" app-version
+  [ "${status}" -eq 0 ]
+  [ "$(<"${CALL_LOG}")" = "app <--version>" ]
+  [ ! -e "${sentinel}" ]
+
+  : >"${CALL_LOG}"
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
+    BASH="${HARNESS_BASH}" BATS="${bats_command}" test
+  [ "${status}" -eq 0 ]
+  [ "$(<"${CALL_LOG}")" = "bats <tests>" ]
+  [ ! -e "${sentinel}" ]
+
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
+    BASH=$'bad\tidentity' status
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"BASH"* ]]
+  [[ "${output}" == *"control"* ]]
+  [[ "${output}" != *$'\t'* ]]
+}
+
+@test "[PMC-U1-R05] APP failures are explicit and help labels every target" {
+  local missing="${BATS_TEST_TMPDIR}/missing-app"
+  local nonexec="${BATS_TEST_TMPDIR}/nonexec-app"
+  local stdout_file="${BATS_TEST_TMPDIR}/stdout"
+  local stderr_file="${BATS_TEST_TMPDIR}/stderr"
+  local target
+
+  : >"${nonexec}"
+  chmod 0644 "${nonexec}"
+
+  for target in "${missing}" "${nonexec}"; do
+    run /bin/sh -c '"$1" --no-print-directory -s -C "$2" APP="$3" run \
+      >"$4" 2>"$5"' _ "${MAKE_COMMAND}" "${PROJECT_ROOT}" "${target}" \
+      "${stdout_file}" "${stderr_file}"
+    [ "${status}" -ne 0 ]
+    [ ! -s "${stdout_file}" ]
+    grep -Fq 'run: error: APP is not an executable file:' "${stderr_file}"
+  done
+
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${PROJECT_ROOT}" help
+  [ "${status}" -eq 0 ]
+  for target in help install-manager link link-dev install status check update \
+    rollback set-defaults doctor run app-version test lint verify package \
+    release-check coverage uninstall uninstall-yes clean; do
+    [[ "${output}" == *"make ${target}"* ]]
+  done
 }
 
 @test "project keeps executable manager and release scripts" {
@@ -62,18 +262,21 @@ EOF
 JSON
 
   run make --no-print-directory -s -C "${PROJECT_ROOT}" \
-    BASHCOV=true COVERAGE_DIR="${coverage_dir}" COVERAGE_MINIMUM=100 coverage
+    BASHCOV="${TRUE_COMMAND}" COVERAGE_DIR="${coverage_dir}" \
+    COVERAGE_MINIMUM=100 coverage
 
   [ "${status}" -ne 0 ]
   [[ "${output}" == *"result set is missing"* ]]
 }
 
 @test "lifecycle targets forward exactly one command to the manager" {
+  local root="${BATS_TEST_TMPDIR}/checkout"
   local target
 
+  make_fixture "${root}"
+  cp "${MOCK_MANAGER}" "${root}/bin/devin-desktop-manager"
   for target in status check update rollback set-defaults doctor; do
-    run make --no-print-directory -s -C "${PROJECT_ROOT}" \
-      MANAGER="${MOCK_MANAGER}" "${target}"
+    run make --no-print-directory -s -C "${root}" BASH="${HARNESS_BASH}" "${target}"
     [ "${status}" -eq 0 ]
   done
 
@@ -83,8 +286,12 @@ JSON
 }
 
 @test "uninstall-yes forwards explicit noninteractive confirmation" {
-  run make --no-print-directory -s -C "${PROJECT_ROOT}" \
-    MANAGER="${MOCK_MANAGER}" uninstall-yes
+  local root="${BATS_TEST_TMPDIR}/checkout"
+
+  make_fixture "${root}"
+  cp "${MOCK_MANAGER}" "${root}/bin/devin-desktop-manager"
+  run make --no-print-directory -s -C "${root}" \
+    BASH="${HARNESS_BASH}" uninstall-yes
 
   [ "${status}" -eq 0 ]
   run tail -n 1 "${CALL_LOG}"
@@ -95,7 +302,7 @@ JSON
   local installed="${TEST_HOME}/.local/bin/devin-desktop-manager"
 
   run make --no-print-directory -s -C "${PROJECT_ROOT}" \
-    HOME="${TEST_HOME}" MANAGER="${installed}" install-manager
+    HOME="${TEST_HOME}" install-manager
 
   [ "${status}" -eq 0 ]
   [ -x "${installed}" ]
@@ -103,7 +310,7 @@ JSON
   [ "$("${installed}" --version)" = "devin-desktop-manager 0.1.0" ]
 
   run make --no-print-directory -s -C "${PROJECT_ROOT}" \
-    HOME="${TEST_HOME}" MANAGER="${installed}" install-manager
+    HOME="${TEST_HOME}" install-manager
   [ "${status}" -eq 0 ]
   [ -x "${installed}" ]
 }
@@ -114,7 +321,7 @@ JSON
   mkdir -p "$(dirname "${installed}")"
   ln -s "${PROJECT_ROOT}/bin/devin-desktop-manager" "${installed}"
   run make --no-print-directory -s -C "${PROJECT_ROOT}" \
-    HOME="${TEST_HOME}" MANAGER="${installed}" install-manager
+    HOME="${TEST_HOME}" install-manager
 
   [ "${status}" -eq 0 ]
   [ -x "${installed}" ]
@@ -128,7 +335,7 @@ JSON
   printf '#!/usr/bin/env bash\nexit 0\n' >"${installed}"
   chmod 0755 "${installed}"
   run make --no-print-directory -s -C "${PROJECT_ROOT}" \
-    HOME="${TEST_HOME}" MANAGER="${installed}" install-manager
+    HOME="${TEST_HOME}" install-manager
 
   [ "${status}" -ne 0 ]
   [[ "${output}" == *"refusing to replace unrelated path"* ]]
@@ -159,7 +366,7 @@ JSON
   local installed="${TEST_HOME}/.local/bin/devin-desktop-manager"
 
   run make --no-print-directory -s -C "${PROJECT_ROOT}" \
-    HOME="${TEST_HOME}" MANAGER="${installed}" link-dev
+    HOME="${TEST_HOME}" link-dev
 
   [ "${status}" -eq 0 ]
   [ -L "${installed}" ]

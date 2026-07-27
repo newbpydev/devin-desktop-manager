@@ -6,6 +6,44 @@ setup() {
   PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
 }
 
+@test "[PMC-U1-C01] all Make targets retain routes and quality-suite ownership" {
+  local makefile="${PROJECT_ROOT}/Makefile"
+  local expected target
+
+  expected='app-version check clean coverage doctor help install install-manager link link-dev lint package release-check rollback run set-defaults status test uninstall uninstall-yes update verify'
+  run bash -c 'awk '\''
+    /^\.PHONY:/ { collecting = 1 }
+    collecting {
+      continued = ($0 ~ /\\$/)
+      sub(/^\.PHONY:[[:space:]]*/, "")
+      sub(/[[:space:]]*\\$/, "")
+      for (i = 1; i <= NF; i++) print $i
+      if (!continued) collecting = 0
+    }
+  '\'' "$1" | LC_ALL=C sort | tr "\n" " "' _ "${makefile}"
+  [ "${status}" -eq 0 ]
+  [ "${output% }" = "${expected}" ]
+
+  for target in ${expected}; do
+    grep -Eq "(^|[[:space:]])${target}([[:space:]:]|$)" "${makefile}"
+  done
+
+  grep -Eq '^link:[[:space:]]+link-dev$' "${makefile}"
+  grep -Eq '^verify:[[:space:]]+lint[[:space:]]+test$' "${makefile}"
+  grep -Eq '^release-check:[[:space:]]+lint[[:space:]]+coverage$' "${makefile}"
+  grep -Eq '^test:' "${makefile}"
+  grep -Eq '^coverage:' "${makefile}"
+  grep -Fq 'COVERAGE_COMMAND_NAME=bats-suite' "${makefile}"
+}
+
+@test "[PMC-U1-C02] manifest canary executes checkout source directly" {
+  local canary="${PROJECT_ROOT}/.github/workflows/manifest-canary.yml"
+
+  grep -Fq 'run: bin/devin-desktop-manager check' "${canary}"
+  run grep -F 'make check' "${canary}"
+  [ "${status}" -ne 0 ]
+}
+
 @test "public repository includes the expected community health files" {
   local path
 
