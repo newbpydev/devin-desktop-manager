@@ -64,6 +64,9 @@ write_platform_mocks() {
 EOF
   cat >"${MOCK_BIN}/ldd" <<'EOF'
 #!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+  printf 'ldd (GNU libc) 2.39\n'
+fi
 exit 0
 EOF
   cat >"${MOCK_BIN}/timeout" <<'EOF'
@@ -241,19 +244,24 @@ write_manifest_curl() {
   cat >"${MOCK_BIN}/curl" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "\${1:-}" == "--disable" && "\${2:-}" == "--version" ]]; then
+  printf 'curl 8.0 test\nProtocols: http https\nFeatures: SSL\n'
+  exit 0
+fi
 printf '%s\n' "\$*" >>"${CURL_LOG}"
 output=""
+header=""
 url="\${!#}"
 while ((\$# > 0)); do
-  if [[ "\$1" == "--output" ]]; then
-    output="\$2"
-    shift 2
-  else
-    shift
-  fi
+  case "\$1" in
+    --output) output="\$2"; shift 2 ;;
+    --dump-header) header="\$2"; shift 2 ;;
+    *) shift ;;
+  esac
 done
+printf 'HTTP/1.1 200 OK\r\n\r\n' >"\${header}"
 if [[ "\${url}" == "https://windsurf-stable.codeium.com/api/update/linux-x64-deb/stable/latest" ]]; then
-  cat <<'JSON'
+  cat >"\${output}" <<'JSON'
 {
   "url": "${artifact_url}",
   "name": "1.110.1",
@@ -410,7 +418,7 @@ downgrade_to_public_0_1_layout() {
   [[ "${output}" == *"Usage: devin-desktop-manager <command>"* ]]
 }
 
-@test "status is read-only and reports an empty installation" {
+@test "[PMC-U2-C01] status is read-only and reports an empty installation" {
   run manager_env status
 
   [ "${status}" -eq 0 ]
@@ -418,6 +426,226 @@ downgrade_to_public_0_1_layout() {
   [[ "${output}" == *"Previous: none"* ]]
   [ ! -e "${TEST_HOME}/.local/opt/devin-desktop" ]
   [ ! -e "${TEST_HOME}/.local/state/devin-desktop-manager" ]
+}
+
+@test "[PMC-U2-R01] runtime blockers aggregate before state or network access" {
+  local sparse_bin="${BATS_TEST_TMPDIR}/sparse-bin"
+
+  mkdir -p "${sparse_bin}"
+  ln -s "$(command -v bash)" "${sparse_bin}/bash"
+  run env HOME="${TEST_HOME}" XDG_STATE_HOME="${TEST_HOME}/state" \
+    PATH="${sparse_bin}" "${MANAGER}" update
+
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"update: error:"* ]]
+  [[ "${output}" == *"curl"* ]]
+  [[ "${output}" == *"jq"* ]]
+  [[ "${output}" == *"bsdtar"* ]]
+  [ ! -e "${TEST_HOME}/.local/opt/devin-desktop" ]
+  [ ! -e "${TEST_HOME}/state" ]
+  [ ! -e "${CURL_LOG}" ]
+}
+
+@test "[PMC-U2-R02] incompatible tools are distinct and profiles stay scoped" {
+  cat >"${MOCK_BIN}/readlink" <<'EOF'
+#!/usr/bin/env bash
+printf 'not-a-canonical-path\n'
+EOF
+  chmod 0755 "${MOCK_BIN}/readlink"
+
+  run manager_env status
+
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"incompatible"* ]]
+  [[ "${output}" == *"readlink"* ]]
+  [[ "${output}" != *"bsdtar"* ]]
+  [ ! -e "${TEST_HOME}/.local/state" ]
+}
+
+@test "[PMC-U2-R03] private profiles reject unknown commands as usage" {
+  local stdout_file="${BATS_TEST_TMPDIR}/stdout"
+  local stderr_file="${BATS_TEST_TMPDIR}/stderr"
+
+  run bash -c '"$1" internal-preflight 1 unknown >"$2" 2>"$3"' \
+    _ "${MANAGER}" "${stdout_file}" "${stderr_file}"
+
+  [ "${status}" -eq 2 ]
+  [ ! -s "${stdout_file}" ]
+  grep -Fq 'internal-preflight' "${stderr_file}"
+
+  cat >"${MOCK_BIN}/uname" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -s) printf 'Linux\n' ;;
+  -m) printf 'aarch64\n' ;;
+esac
+EOF
+  cat >"${MOCK_BIN}/ldd" <<'EOF'
+#!/usr/bin/env bash
+printf 'unknown libc evidence\n'
+EOF
+  chmod 0755 "${MOCK_BIN}/uname" "${MOCK_BIN}/ldd"
+  run bash -c 'HOME="$1" PATH="$2:$PATH" \
+    "$3" internal-preflight 1 status >"$4" 2>"$5"' \
+    _ "${TEST_HOME}" "${MOCK_BIN}" "${MANAGER}" "${stdout_file}" "${stderr_file}"
+
+  [ "${status}" -eq 1 ]
+  [ ! -s "${stderr_file}" ]
+  run bash -c 'mapfile -d "" -t fields <"$1"; \
+    printf "%s\n" "${fields[@]}"' _ "${stdout_file}"
+  [[ "${output}" == *"platform.x86-64"* ]]
+  [[ "${output}" == *"platform.glibc"* ]]
+}
+
+@test "[PMC-U2-R04] private preflight emits bounded NUL records without effects" {
+  local protocol="${BATS_TEST_TMPDIR}/protocol"
+  local stderr_file="${BATS_TEST_TMPDIR}/stderr"
+
+  run bash -c 'HOME="$1" XDG_STATE_HOME="$1/state" PATH="$2:$PATH" \
+    "$3" internal-preflight 1 status >"$4" 2>"$5"' \
+    _ "${TEST_HOME}" "${MOCK_BIN}" "${MANAGER}" "${protocol}" "${stderr_file}"
+
+  [ "${status}" -eq 0 ]
+  [ ! -s "${stderr_file}" ]
+  run bash -c 'mapfile -d "" -t fields <"$1"; \
+    [[ "${#fields[@]}" -eq 3 && "${fields[0]}" == DDM-PREFLIGHT && \
+      "${fields[1]}" == 1 && "${fields[2]}" == 0 ]]' _ "${protocol}"
+  [ "${status}" -eq 0 ]
+  [ "$(stat -c %s "${protocol}")" -le 32768 ]
+  [ ! -e "${TEST_HOME}/.local" ]
+  [ ! -e "${CURL_LOG}" ]
+
+  local sparse_bin="${BATS_TEST_TMPDIR}/protocol-bin"
+  mkdir -p "${sparse_bin}"
+  ln -s "$(command -v bash)" "${sparse_bin}/bash"
+  run bash -c 'HOME="$1" PATH="$2" "$3" internal-preflight 1 update >"$4"' \
+    _ "${TEST_HOME}" "${sparse_bin}" "${MANAGER}" "${protocol}"
+  [ "${status}" -eq 1 ]
+  run bash -c '
+    mapfile -d "" -t fields <"$1"
+    count=${fields[2]}
+    [[ "$count" =~ ^[0-9]+$ && "$count" -le 64 ]]
+    [[ "${#fields[@]}" -eq $((3 + count * 6)) ]]
+    for ((i = 3; i < ${#fields[@]}; i += 6)); do
+      [[ "${fields[i]}" == blocker || "${fields[i]}" == warning ]]
+      [[ "${fields[i + 1]}" =~ ^(environment|path|platform|command|interaction|optional)$ ]]
+      [[ "${fields[i + 2]}" =~ ^[a-z0-9.-]{1,64}$ ]]
+      for ((j = i + 3; j < i + 6; j++)); do
+        [[ ${#fields[j]} -le 512 ]]
+      done
+    done
+  ' _ "${protocol}"
+  [ "${status}" -eq 0 ]
+  [ "$(stat -c %s "${protocol}")" -le 32768 ]
+}
+
+@test "[PMC-U2-R04] aggregate protocol overflow fails closed to one blocker" {
+  local protocol="${BATS_TEST_TMPDIR}/overflow-protocol"
+  local stderr_file="${BATS_TEST_TMPDIR}/overflow-stderr"
+
+  run bash -c '
+    source "$1"
+    fill=$(printf "x%.0s" {1..512})
+    preflight_reset
+    for ((i = 0; i < 64; i++)); do
+      preflight_add blocker command "command.overflow-$i" \
+        "$fill" "$fill" "$fill"
+    done
+    preflight_emit_protocol >"$2" 2>"$3"
+    if preflight_has_blockers; then
+      exit 1
+    fi
+  ' _ "${MANAGER}" "${protocol}" "${stderr_file}"
+
+  [ "${status}" -eq 1 ]
+  [ ! -s "${stderr_file}" ]
+  [ "$(stat -c %s "${protocol}")" -le 32768 ]
+  run bash -c '
+    mapfile -d "" -t fields <"$1"
+    [[ "${#fields[@]}" -eq 9 ]]
+    [[ "${fields[0]}" == DDM-PREFLIGHT && "${fields[1]}" == 1 ]]
+    [[ "${fields[2]}" == 1 && "${fields[3]}" == blocker ]]
+    [[ "${fields[6]}" == "diagnostic output exceeded safe limit" ]]
+    [[ "${fields[7]}" != *xxxxx* && "${fields[8]}" != *xxxxx* ]]
+  ' _ "${protocol}"
+  [ "${status}" -eq 0 ]
+}
+
+@test "[PMC-U2-R05] curl starts disabled and clears credential configuration" {
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+  printf '%s\n' '--insecure' >"${TEST_HOME}/.curlrc"
+
+  run env HOME="${TEST_HOME}" XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" CURL_HOME="${TEST_HOME}" \
+    NETRC="${TEST_HOME}/credentials" SSL_CERT_FILE="${TEST_HOME}/bad-ca" \
+    ALL_PROXY="http://credentials.invalid" "${MANAGER}" check
+
+  [ "${status}" -eq 0 ]
+  grep -Eq '^--disable( |$)' "${CURL_LOG}"
+  ! grep -Eq -- '--insecure|credentials.invalid|bad-ca' "${CURL_LOG}"
+  grep -Fq -- '--max-time 60' "${CURL_LOG}"
+  grep -Fq -- '--max-filesize 1048576' "${CURL_LOG}"
+
+  rm -f "${CURL_LOG}"
+  run env HOME="${TEST_HOME}" XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" PATH="${MOCK_BIN}:${PATH}" \
+    HTTPS_PROXY="https://one.invalid" https_proxy="https://two.invalid" \
+    "${MANAGER}" check
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"conflicting proxy settings"* ]]
+  [[ "${output}" != *"one.invalid"* && "${output}" != *"two.invalid"* ]]
+  [ ! -e "${CURL_LOG}" ]
+
+  cat >"${MOCK_BIN}/curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--disable" && "${2:-}" == "--version" ]]; then
+  printf 'curl 8.0 test\nProtocols: http https\nFeatures: SSL\n'
+  exit 0
+fi
+printf 'request\n' >>"${CURL_LOG}"
+while (($# > 0)); do
+  case "$1" in
+    --dump-header) header="$2"; shift 2 ;;
+    --output) output="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf 'HTTP/1.1 302 Found\r\nLocation: http://windsurf-stable.codeium.com/downgrade\r\n\r\n' >"${header}"
+: >"${output}"
+EOF
+  chmod 0755 "${MOCK_BIN}/curl"
+  run env -u HTTPS_PROXY -u https_proxy HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" PATH="${MOCK_BIN}:${PATH}" \
+    "${MANAGER}" check
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"could not fetch the official stable manifest"* ]]
+  [ "$(wc -l <"${CURL_LOG}")" -eq 1 ]
+}
+
+@test "[PMC-U2-R06] diagnostics are deterministic escaped plain stderr" {
+  local stdout_file="${BATS_TEST_TMPDIR}/stdout"
+  local stderr_file="${BATS_TEST_TMPDIR}/stderr"
+  local hostile_home
+
+  hostile_home="${BATS_TEST_TMPDIR}/bad"$'\n'"home"
+  run bash -c 'HOME="$1" "$2" status >"$3" 2>"$4"' \
+    _ "${hostile_home}" "${MANAGER}" "${stdout_file}" "${stderr_file}"
+
+  [ "${status}" -eq 1 ]
+  [ ! -s "${stdout_file}" ]
+  grep -Fq 'status: error:' "${stderr_file}"
+  grep -Fq '\n' "${stderr_file}"
+  ! grep -q $'\033' "${stderr_file}"
+  [ "$(wc -l <"${stderr_file}")" -le 8 ]
 }
 
 @test "check accepts the exact official stable artifact shape" {
@@ -540,7 +768,7 @@ JSON
   [ "${status}" -eq 0 ]
 }
 
-@test "update refuses an unowned pre-existing installation root" {
+@test "[PMC-U2-C01] update refuses an unowned pre-existing installation root" {
   local foreign="${TEST_HOME}/.local/opt/devin-desktop/releases/foreign/keep.txt"
 
   mkdir -p "$(dirname "${foreign}")"
@@ -1575,7 +1803,7 @@ EOF
   grep -Fq 'backup.desktop;' "${DEFAULTS_FILE}"
 }
 
-@test "KDE cache refresh is optional and cannot break installation" {
+@test "[PMC-U2-C01] KDE cache refresh is optional and cannot break installation" {
   write_manifest_curl \
     "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
 
@@ -2074,7 +2302,7 @@ EOF
   [ "${lines[-1]}" = "original" ]
 }
 
-@test "transaction recovery preserves a user file created after an absent snapshot" {
+@test "[PMC-U2-C01] transaction recovery preserves a user file created after an absent snapshot" {
   local mimeapps="${TEST_HOME}/.config/mimeapps.list"
   local journal="${TEST_HOME}/.local/state/devin-desktop-manager.transaction"
 
@@ -2564,7 +2792,7 @@ EOF
   [ ! -L "${TEST_HOME}/.local/opt/devin-desktop/current" ]
 }
 
-@test "rollback swaps releases and refreshes managed state" {
+@test "[PMC-U2-C01] rollback swaps releases and refreshes managed state" {
   local second="${BATS_TEST_TMPDIR}/second.deb"
   local second_build="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
@@ -3613,7 +3841,7 @@ EOF
   [ ! -e "${TEST_HOME}/.local/opt/devin-desktop" ]
 }
 
-@test "state lock rejects FIFOs and hard links without opening or truncating them" {
+@test "[PMC-U2-C01] state lock rejects FIFOs and hard links without opening or truncating them" {
   local state_home="${TEST_HOME}/.local/state"
   local lock_file="${state_home}/devin-desktop-manager.lock"
   local user_file="${BATS_TEST_TMPDIR}/user-file"

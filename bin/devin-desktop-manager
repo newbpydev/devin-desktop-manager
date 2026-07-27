@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+if ((BASH_VERSINFO[0] < 4 ||
+  (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
+  printf 'devin-desktop-manager: error: Bash 4.4 or newer is required\n' >&2
+  exit 1
+fi
+
 set -Eeuo pipefail
 shopt -s inherit_errexit 2>/dev/null ||
   {
@@ -60,11 +66,12 @@ readonly MIME_DEVIN="x-scheme-handler/devin"
 readonly MIME_WINDSURF="x-scheme-handler/windsurf"
 readonly MIME_WORKSPACE="application/x-devin-desktop-workspace"
 declare -ar CURL_SECURITY_OPTIONS=(
+  --disable
   --fail
-  --location
   --proto '=https'
   --proto-redir '=https'
   --max-redirs 5
+  --no-progress-meter
   --retry 4
   --retry-delay 2
   --retry-all-errors
@@ -82,6 +89,18 @@ TRANSACTION_DURABLE_RECOVERY=false
 LEGACY_LOCK_HELD=false
 CLEANUP_PROOF_TEMP=""
 RESTORE_TEMP_ROOT=""
+CURL_CA_SNAPSHOT=""
+NETWORK_HEADER_TEMP=""
+NETWORK_RESPONSE_TEMP=""
+declare -a CURL_CA_OPTIONS=()
+
+declare -a PREFLIGHT_SEVERITIES=()
+declare -a PREFLIGHT_CATEGORIES=()
+declare -a PREFLIGHT_KEYS=()
+declare -a PREFLIGHT_PURPOSES=()
+declare -a PREFLIGHT_OBSERVED=()
+declare -a PREFLIGHT_REMEDIATIONS=()
+PREFLIGHT_LIMIT_EXCEEDED=false
 
 info() {
   printf 'devin-desktop-manager: %s\n' "$*" >&2
@@ -94,6 +113,523 @@ warn() {
 die() {
   printf 'devin-desktop-manager: error: %s\n' "$*" >&2
   exit 1
+}
+
+usage_die() {
+  printf 'devin-desktop-manager: error: %s\n' "$*" >&2
+  exit 2
+}
+
+preflight_reset() {
+  PREFLIGHT_SEVERITIES=()
+  PREFLIGHT_CATEGORIES=()
+  PREFLIGHT_KEYS=()
+  PREFLIGHT_PURPOSES=()
+  PREFLIGHT_OBSERVED=()
+  PREFLIGHT_REMEDIATIONS=()
+  PREFLIGHT_LIMIT_EXCEEDED=false
+}
+
+preflight_add() {
+  local severity="$1"
+  local category="$2"
+  local key="$3"
+  local purpose="$4"
+  local observed="$5"
+  local remediation="$6"
+  local existing
+  local LC_ALL=C
+
+  for existing in "${PREFLIGHT_KEYS[@]}"; do
+    [[ "${existing}" != "${key}" ]] || return 0
+  done
+  if ((${#PREFLIGHT_KEYS[@]} >= 64)); then
+    PREFLIGHT_LIMIT_EXCEEDED=true
+    return 0
+  fi
+  PREFLIGHT_SEVERITIES+=("${severity}")
+  PREFLIGHT_CATEGORIES+=("${category}")
+  PREFLIGHT_KEYS+=("${key}")
+  PREFLIGHT_PURPOSES+=("${purpose:0:512}")
+  PREFLIGHT_OBSERVED+=("${observed:0:512}")
+  PREFLIGHT_REMEDIATIONS+=("${remediation:0:512}")
+}
+
+preflight_enforce_aggregate_limit() {
+  local count=${#PREFLIGHT_KEYS[@]}
+  local total index
+  local LC_ALL=C
+
+  total=$((17 + ${#count}))
+  for ((index = 0; index < count; index++)); do
+    total=$((total +
+      ${#PREFLIGHT_SEVERITIES[index]} +
+      ${#PREFLIGHT_CATEGORIES[index]} +
+      ${#PREFLIGHT_KEYS[index]} +
+      ${#PREFLIGHT_PURPOSES[index]} +
+      ${#PREFLIGHT_OBSERVED[index]} +
+      ${#PREFLIGHT_REMEDIATIONS[index]} + 6))
+  done
+  if [[ "${PREFLIGHT_LIMIT_EXCEEDED}" != true ]] && ((total <= 32768)); then
+    return 0
+  fi
+
+  PREFLIGHT_SEVERITIES=(blocker)
+  PREFLIGHT_CATEGORIES=(environment)
+  PREFLIGHT_KEYS=(diagnostic.output-limit)
+  PREFLIGHT_PURPOSES=("diagnostic output exceeded safe limit")
+  PREFLIGHT_OBSERVED=("")
+  PREFLIGHT_REMEDIATIONS=("Correct the reported environment and retry.")
+  PREFLIGHT_LIMIT_EXCEEDED=true
+}
+
+preflight_command_missing() {
+  local key="$1"
+  local purpose="$2"
+
+  preflight_add blocker command "command.${key}" \
+    "${purpose}" "missing command: ${key}" \
+    "Install a compatible ${key} command using your distribution documentation."
+}
+
+preflight_command_incompatible() {
+  local key="$1"
+  local purpose="$2"
+
+  preflight_add blocker command "command.${key}" \
+    "${purpose}" "incompatible command: ${key}" \
+    "Install a compatible ${key} command using your distribution documentation."
+}
+
+preflight_probe_command() {
+  local command_name="$1"
+  local purpose="$2"
+  local output=""
+
+  if ! command -v "${command_name}" >/dev/null 2>&1; then
+    preflight_command_missing "${command_name}" "${purpose}"
+    return
+  fi
+
+  case "${command_name}" in
+    readlink)
+      output="$(LC_ALL=C readlink -m -- / 2>/dev/null || true)"
+      [[ "${output}" == "/" ]] ||
+        preflight_command_incompatible readlink "${purpose}"
+      ;;
+    stat)
+      output="$(LC_ALL=C stat -c '%h' -- /dev/null 2>/dev/null || true)"
+      [[ "${output}" =~ ^[0-9]+$ ]] ||
+        preflight_command_incompatible stat "${purpose}"
+      ;;
+    mv)
+      output="$(LC_ALL=C mv --help 2>/dev/null || true)"
+      [[ "${output}" == *"--no-target-directory"* ]] ||
+        preflight_command_incompatible mv "${purpose}"
+      ;;
+    timeout)
+      LC_ALL=C timeout --signal=TERM --kill-after=1s 1s \
+        bash -c 'exit 0' </dev/null >/dev/null 2>&1 ||
+        preflight_command_incompatible timeout "${purpose}"
+      ;;
+    find)
+      LC_ALL=C find /dev/null -mindepth 0 -maxdepth 0 -print0 \
+        </dev/null >/dev/null 2>&1 ||
+        preflight_command_incompatible find "${purpose}"
+      ;;
+    curl)
+      output="$(LC_ALL=C curl --disable --version </dev/null 2>/dev/null || true)"
+      [[ "${output}" == *"Protocols:"* && "${output}" == *"https"* ]] ||
+        preflight_command_incompatible curl "${purpose}"
+      ;;
+    jq)
+      LC_ALL=C jq -n -e '([1, 2] | length) == 2' \
+        </dev/null >/dev/null 2>&1 ||
+        preflight_command_incompatible jq "${purpose}"
+      ;;
+    bsdtar)
+      output="$(LC_ALL=C bsdtar --version </dev/null 2>/dev/null || true)"
+      [[ "${output,,}" == *"bsdtar"* || "${output,,}" == *"libarchive"* ]] ||
+        preflight_command_incompatible bsdtar "${purpose}"
+      ;;
+    flock)
+      output="$(LC_ALL=C flock --version </dev/null 2>/dev/null || true)"
+      [[ "${output,,}" == *"flock"* ]] ||
+        preflight_command_incompatible flock "${purpose}"
+      ;;
+  esac
+}
+
+preflight_check_commands() {
+  local command_name
+
+  for command_name in "$@"; do
+    preflight_probe_command "${command_name}" "required by this runtime operation"
+  done
+}
+
+preflight_check_environment() {
+  local name value
+
+  for name in HOME XDG_CACHE_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME; do
+    case "${name}" in
+      HOME) value="${HOME_DIR}" ;;
+      XDG_CACHE_HOME) value="${XDG_CACHE_HOME:-${HOME_DIR}/.cache}" ;;
+      XDG_CONFIG_HOME) value="${CONFIG_HOME}" ;;
+      XDG_DATA_HOME) value="${DATA_HOME}" ;;
+      XDG_STATE_HOME) value="${STATE_HOME}" ;;
+    esac
+    if [[ -z "${value}" || "${value}" != /* ||
+      "${value}" == *$'\n'* || "${value}" == *$'\r'* ||
+      "${value}" == *$'\t'* || "${value}" == *$'\e'* ]]; then
+      preflight_add blocker path "path.${name,,}" \
+        "${name} must be an absolute path without control bytes" "${value}" \
+        "Set ${name} to a safe absolute directory and retry."
+    fi
+  done
+  if ((EUID == 0)); then
+    preflight_add blocker environment environment.unprivileged \
+      "the manager requires an unprivileged desktop user" "effective UID is 0" \
+      "Run the command as an unprivileged desktop user."
+  fi
+}
+
+preflight_check_network_environment() {
+  if [[ -v HTTPS_PROXY && -v https_proxy &&
+    "${HTTPS_PROXY}" != "${https_proxy}" ]]; then
+    preflight_add blocker environment environment.https-proxy \
+      "HTTPS proxy case variants must agree" "conflicting proxy settings" \
+      "Set only HTTPS_PROXY or https_proxy, or give both the same value."
+  fi
+  if [[ -v NO_PROXY && -v no_proxy && "${NO_PROXY}" != "${no_proxy}" ]]; then
+    preflight_add blocker environment environment.no-proxy \
+      "proxy exclusion case variants must agree" "conflicting proxy exclusion settings" \
+      "Set only NO_PROXY or no_proxy, or give both the same value."
+  fi
+}
+
+preflight_mode_is_safe() {
+  local mode="$1"
+
+  [[ "${mode}" =~ ^[0-7]{3,4}$ ]] || return 1
+  mode="${mode: -3}"
+  [[ "${mode:1:1}" != [2367] && "${mode:2:1}" != [2367] ]]
+}
+
+preflight_check_ca_bundle() {
+  local path="${CURL_CA_BUNDLE:-}"
+  local owner links mode parent
+
+  [[ -n "${path}" ]] || return 0
+  if [[ "${path}" != /* || ! -f "${path}" || -L "${path}" || ! -r "${path}" ]]; then
+    preflight_add blocker path path.curl-ca-bundle \
+      "CURL_CA_BUNDLE must name a safe absolute CA file" "unsafe CA bundle setting" \
+      "Use the system trust store or a protected absolute regular CA file."
+    return
+  fi
+  owner="$(stat -c '%u' -- "${path}" 2>/dev/null || true)"
+  links="$(stat -c '%h' -- "${path}" 2>/dev/null || true)"
+  mode="$(stat -c '%a' -- "${path}" 2>/dev/null || true)"
+  if { [[ "${owner}" != 0 && "${owner}" != "${EUID}" ]]; } ||
+    [[ "${links}" != 1 ]] || ! preflight_mode_is_safe "${mode}"; then
+    preflight_add blocker path path.curl-ca-bundle \
+      "CURL_CA_BUNDLE must be protected from replacement" "unsafe CA bundle metadata" \
+      "Use the system trust store or a protected root/current-user CA file."
+    return
+  fi
+  parent="${path%/*}"
+  [[ -n "${parent}" ]] || parent=/
+  while :; do
+    owner="$(stat -c '%u' -- "${parent}" 2>/dev/null || true)"
+    mode="$(stat -c '%a' -- "${parent}" 2>/dev/null || true)"
+    if [[ -L "${parent}" || ! -d "${parent}" ]] ||
+      { [[ "${owner}" != 0 && "${owner}" != "${EUID}" ]]; } ||
+      ! preflight_mode_is_safe "${mode}"; then
+      preflight_add blocker path path.curl-ca-bundle \
+        "CURL_CA_BUNDLE ancestors must be protected" "unsafe CA bundle ancestor" \
+        "Move the CA file beneath protected root/current-user directories."
+      return
+    fi
+    [[ "${parent}" != / ]] || break
+    parent="${parent%/*}"
+    [[ -n "${parent}" ]] || parent=/
+  done
+}
+
+preflight_check_platform() {
+  local kernel="" architecture="" libc=""
+
+  if command -v uname >/dev/null 2>&1; then
+    kernel="$(LC_ALL=C uname -s 2>/dev/null || true)"
+    architecture="$(LC_ALL=C uname -m 2>/dev/null || true)"
+    [[ "${kernel}" == "Linux" ]] ||
+      preflight_add blocker platform platform.linux \
+        "the manager supports native Linux" "${kernel:-unknown kernel}" \
+        "Use a supported native glibc Linux x86_64 host."
+    [[ "${architecture}" == "x86_64" ]] ||
+      preflight_add blocker platform platform.x86-64 \
+        "the official release requires x86_64" "${architecture:-unknown architecture}" \
+        "Use a supported native glibc Linux x86_64 host."
+  fi
+  if command -v ldd >/dev/null 2>&1; then
+    libc="$(LC_ALL=C ldd --version </dev/null 2>&1 | { IFS= read -r line; printf '%s' "${line}"; } || true)"
+    [[ "${libc}" == *"GLIBC"* || "${libc}" == *"GNU libc"* ]] ||
+      preflight_add blocker platform platform.glibc \
+        "the manager requires glibc" "${libc:-unrecognized libc evidence}" \
+        "Use a supported native glibc Linux x86_64 host."
+  fi
+}
+
+preflight_collect() {
+  local profile="$1"
+
+  preflight_reset
+  preflight_check_environment
+  preflight_check_commands uname ldd readlink
+  preflight_check_platform
+  case "${profile}" in
+    status)
+      preflight_check_commands jq basename
+      ;;
+    check)
+      preflight_check_commands curl jq awk cat basename stat mktemp cp chmod rm mv
+      preflight_check_network_environment
+      preflight_check_ca_bundle
+      ;;
+    update)
+      preflight_check_commands curl jq bsdtar sha256sum awk grep flock stat \
+        find timeout mv mktemp unshare cp chmod rm mkdir ln rmdir cat cmp true \
+        date dirname basename \
+        desktop-file-validate update-desktop-database update-mime-database xdg-mime
+      preflight_check_network_environment
+      preflight_check_ca_bundle
+      ;;
+    rollback)
+      preflight_check_commands jq sha256sum grep awk flock stat find timeout mv \
+        mktemp unshare cp chmod rm mkdir ln rmdir cat cmp true dirname basename \
+        desktop-file-validate update-desktop-database update-mime-database xdg-mime
+      ;;
+    set-defaults)
+      preflight_check_commands jq sha256sum grep awk flock stat find mv mktemp cp \
+        chmod rm mkdir ln rmdir cat cmp dirname basename desktop-file-validate \
+        update-desktop-database update-mime-database xdg-mime
+      ;;
+    doctor)
+      preflight_check_commands jq sha256sum grep awk stat find timeout unshare \
+        cat true basename desktop-file-validate update-desktop-database \
+        update-mime-database xdg-mime
+      if ! command -v kbuildsycoca6 >/dev/null 2>&1; then
+        preflight_add warning optional optional.kde-cache \
+          "KDE launcher cache refresh is optional" "kbuildsycoca6 is not installed" \
+          "No action is needed outside KDE; KDE users can refresh their launcher cache manually."
+      fi
+      ;;
+    uninstall|uninstall-yes)
+      preflight_check_commands jq sha256sum grep awk flock stat find mv mktemp cp \
+        chmod rm mkdir ln rmdir cat cmp dirname basename desktop-file-validate \
+        update-desktop-database update-mime-database xdg-mime
+      if [[ "${profile}" == "uninstall" && ! -t 0 ]]; then
+        preflight_add blocker interaction interaction.terminal \
+          "interactive uninstall requires a terminal" "standard input is not a terminal" \
+          "Use make uninstall-yes for prompt-free automation."
+      fi
+      ;;
+    *) return 2 ;;
+  esac
+}
+
+preflight_emit_protocol() {
+  local index count
+
+  preflight_enforce_aggregate_limit
+  count=${#PREFLIGHT_KEYS[@]}
+  printf 'DDM-PREFLIGHT\0%s\0%s\0' 1 "${count}"
+  for ((index = 0; index < count; index++)); do
+    printf '%s\0%s\0%s\0%s\0%s\0%s\0' \
+      "${PREFLIGHT_SEVERITIES[index]}" \
+      "${PREFLIGHT_CATEGORIES[index]}" \
+      "${PREFLIGHT_KEYS[index]}" \
+      "${PREFLIGHT_PURPOSES[index]}" \
+      "${PREFLIGHT_OBSERVED[index]}" \
+      "${PREFLIGHT_REMEDIATIONS[index]}"
+  done
+}
+
+preflight_escape() {
+  local value="$1" output="" byte hex index
+
+  LC_ALL=C
+  for ((index = 0; index < ${#value} && index < 512; index++)); do
+    byte="${value:index:1}"
+    case "${byte}" in
+      $'\t') output+='\t' ;;
+      $'\n') output+='\n' ;;
+      $'\r') output+='\r' ;;
+      '\\') output+='\\\\' ;;
+      [\ -~]) output+="${byte}" ;;
+      *)
+        printf -v hex '%02x' "'${byte}"
+        output+="\\x${hex}"
+        ;;
+    esac
+  done
+  ((${#value} <= 512)) || output+='...[truncated]'
+  printf '%s' "${output}"
+}
+
+preflight_render() {
+  local profile="$1" index label observed remediation
+
+  preflight_enforce_aggregate_limit
+  for ((index = 0; index < ${#PREFLIGHT_KEYS[@]}; index++)); do
+    if [[ "${PREFLIGHT_SEVERITIES[index]}" == blocker ]]; then
+      label=error
+    else
+      label=warning
+    fi
+    observed="$(preflight_escape "${PREFLIGHT_OBSERVED[index]}")"
+    remediation="$(preflight_escape "${PREFLIGHT_REMEDIATIONS[index]}")"
+    printf 'devin-desktop-manager: %s: %s: %s (%s). %s\n' \
+      "${profile}" "${label}" "${PREFLIGHT_PURPOSES[index]}" \
+      "${observed}" "${remediation}" >&2
+  done
+}
+
+preflight_has_blockers() {
+  local severity
+
+  for severity in "${PREFLIGHT_SEVERITIES[@]}"; do
+    [[ "${severity}" != blocker ]] || return 0
+  done
+  return 1
+}
+
+run_public_preflight() {
+  local profile="$1"
+
+  preflight_collect "${profile}" || return 2
+  preflight_render "${profile}"
+  ! preflight_has_blockers
+}
+
+sanitize_network_environment() {
+  unset ALL_PROXY all_proxy HTTP_PROXY http_proxy CURL_HOME NETRC \
+    SSL_CERT_FILE SSL_CERT_DIR SSLKEYLOGFILE CURL_CA_BUNDLE
+}
+
+prepare_network_environment() {
+  local bundle="${CURL_CA_BUNDLE:-}"
+  local path_identity fd_identity
+
+  CURL_CA_OPTIONS=()
+  if [[ -n "${bundle}" ]]; then
+    path_identity="$(stat -c '%d %i' -- "${bundle}")" || return 1
+    exec 6<"${bundle}" || return 1
+    fd_identity="$(stat -Lc '%d %i' -- /proc/self/fd/6)" || return 1
+    [[ "${path_identity}" == "${fd_identity}" ]] || return 1
+    CURL_CA_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/devin-desktop-manager.ca.XXXXXXXX")" ||
+      return 1
+    chmod 0600 "${CURL_CA_SNAPSHOT}" || return 1
+    cp -- /proc/self/fd/6 "${CURL_CA_SNAPSHOT}" || return 1
+    [[ "$(stat -c '%d %i' -- "${bundle}")" == "${path_identity}" ]] || return 1
+    exec 6<&-
+    CURL_CA_OPTIONS=(--cacert "${CURL_CA_SNAPSHOT}")
+  fi
+  sanitize_network_environment
+}
+
+network_url_is_allowed() {
+  local url="$1"
+
+  [[ "${url}" == https://windsurf-stable.codeium.com/* ||
+    "${url}" == https://windsurf-stable.codeiumdata.com/* ]]
+}
+
+curl_fetch_file() {
+  local url="$1"
+  local destination="$2"
+  local maximum_bytes="$3"
+  local maximum_time="$4"
+  local resume="${5:-false}"
+  local header response status location offset=0 hop
+  local -a resume_options=()
+
+  network_url_is_allowed "${url}" || return 1
+  if [[ "${resume}" == true && -f "${destination}" ]]; then
+    offset="$(stat -c '%s' -- "${destination}")" || return 1
+    ((offset == 0)) || resume_options=(--continue-at "${offset}")
+  fi
+  for ((hop = 0; hop <= 5; hop++)); do
+    header="$(mktemp "${TMPDIR:-/tmp}/devin-desktop-manager.header.XXXXXXXX")" ||
+      return 1
+    NETWORK_HEADER_TEMP="${header}"
+    response="$(mktemp "${TMPDIR:-/tmp}/devin-desktop-manager.response.XXXXXXXX")" || {
+      rm -f -- "${header}"
+      NETWORK_HEADER_TEMP=""
+      return 1
+    }
+    NETWORK_RESPONSE_TEMP="${response}"
+    if ! curl "${CURL_SECURITY_OPTIONS[@]}" "${CURL_CA_OPTIONS[@]}" \
+      --silent --show-error --max-time "${maximum_time}" \
+      --max-filesize "${maximum_bytes}" --dump-header "${header}" \
+      "${resume_options[@]}" --output "${response}" "${url}"; then
+      rm -f -- "${header}" "${response}"
+      NETWORK_HEADER_TEMP=""
+      NETWORK_RESPONSE_TEMP=""
+      return 1
+    fi
+    status="$(awk '/^HTTP\/[0-9.]+ [0-9][0-9][0-9]/ { code=$2 } END { print code }' \
+      "${header}")"
+    case "${status}" in
+      2??)
+        if ((offset > 0)); then
+          cat -- "${response}" >>"${destination}" || {
+            rm -f -- "${header}" "${response}"
+            NETWORK_HEADER_TEMP=""
+            NETWORK_RESPONSE_TEMP=""
+            return 1
+          }
+          rm -f -- "${response}"
+          NETWORK_RESPONSE_TEMP=""
+        else
+          mv -Tf -- "${response}" "${destination}" || {
+            rm -f -- "${header}" "${response}"
+            NETWORK_HEADER_TEMP=""
+            NETWORK_RESPONSE_TEMP=""
+            return 1
+          }
+          NETWORK_RESPONSE_TEMP=""
+        fi
+        rm -f -- "${header}"
+        NETWORK_HEADER_TEMP=""
+        return 0
+        ;;
+      3??)
+        location="$(awk '
+          BEGIN { IGNORECASE=1 }
+          /^Location:/ {
+            sub(/^[^:]*:[[:space:]]*/, "")
+            sub(/\r$/, "")
+            value=$0
+          }
+          END { print value }
+        ' "${header}")"
+        rm -f -- "${header}" "${response}"
+        NETWORK_HEADER_TEMP=""
+        NETWORK_RESPONSE_TEMP=""
+        ((hop < 5)) || return 1
+        network_url_is_allowed "${location}" || return 1
+        url="${location}"
+        ;;
+      *)
+        rm -f -- "${header}" "${response}"
+        NETWORK_HEADER_TEMP=""
+        NETWORK_RESPONSE_TEMP=""
+        return 1
+        ;;
+    esac
+  done
+  return 1
 }
 
 cleanup() {
@@ -139,6 +675,18 @@ cleanup() {
     esac
     RESTORE_TEMP_ROOT=""
   fi
+  if [[ -n "${CURL_CA_SNAPSHOT}" ]]; then
+    rm -f -- "${CURL_CA_SNAPSHOT}" 2>/dev/null || true
+    CURL_CA_SNAPSHOT=""
+  fi
+  if [[ -n "${NETWORK_HEADER_TEMP}" ]]; then
+    rm -f -- "${NETWORK_HEADER_TEMP}" 2>/dev/null || true
+    NETWORK_HEADER_TEMP=""
+  fi
+  if [[ -n "${NETWORK_RESPONSE_TEMP}" ]]; then
+    rm -f -- "${NETWORK_RESPONSE_TEMP}" 2>/dev/null || true
+    NETWORK_RESPONSE_TEMP=""
+  fi
 }
 
 trap cleanup EXIT
@@ -177,6 +725,7 @@ Commands:
   set-defaults   Make Devin Desktop the default for its URL schemes/workspaces
   doctor         Validate the installation and desktop integration
   uninstall      Remove manager-owned files after confirmation
+  uninstall-yes  Remove manager-owned files without prompting
   version        Show the manager version
   help           Show this help
 EOF
@@ -1331,15 +1880,21 @@ release_identifier() {
 }
 
 fetch_manifest() {
-  local manifest
+  local manifest manifest_file
   local url sha256 version build product_version timestamp display_name
   local url_prefix url_path url_build url_filename expected_filename
-  manifest="$(
-    curl "${CURL_SECURITY_OPTIONS[@]}" \
-      --silent --show-error --max-time 60 \
-      --max-filesize "${MANIFEST_MAX_BYTES}" \
-      "${MANIFEST_URL}"
-  )" || die "could not fetch the official stable manifest"
+  manifest_file="$(mktemp "${TMPDIR:-/tmp}/devin-desktop-manager.manifest.XXXXXXXX")" ||
+    die "could not create a private manifest temporary"
+  if ! curl_fetch_file "${MANIFEST_URL}" "${manifest_file}" \
+    "${MANIFEST_MAX_BYTES}" 60; then
+    rm -f -- "${manifest_file}"
+    die "could not fetch the official stable manifest"
+  fi
+  manifest="$(cat -- "${manifest_file}")" || {
+    rm -f -- "${manifest_file}"
+    die "could not read the official stable manifest"
+  }
+  rm -f -- "${manifest_file}"
 
   ((${#manifest} > 0 && ${#manifest} <= MANIFEST_MAX_BYTES)) ||
     die "official manifest is empty or exceeds ${MANIFEST_MAX_BYTES} bytes"
@@ -3497,12 +4052,10 @@ download_release() {
   if [[ ! -f "${artifact}" ]]; then
     info "downloading official Devin Desktop ${version}"
     if [[ -f "${partial}" ]]; then
-      curl "${CURL_SECURITY_OPTIONS[@]}" --show-error --max-time 7200 \
-        --continue-at - --output "${partial}" "${url}" ||
+      curl_fetch_file "${url}" "${partial}" 2147483648 7200 true ||
         die "download failed; the partial file was kept for retry"
     else
-      curl "${CURL_SECURITY_OPTIONS[@]}" --show-error --max-time 7200 \
-        --output "${partial}" "${url}" ||
+      curl_fetch_file "${url}" "${partial}" 2147483648 7200 ||
         die "download failed; the partial file was kept for retry"
     fi
     mv -- "${partial}" "${artifact}"
@@ -4155,63 +4708,105 @@ command_uninstall() {
 
 main() {
   local command_name="${1:-help}"
+  local profile
 
   case "${command_name}" in
     help|-h|--help)
-      (($# <= 1)) || die "help does not accept arguments"
+      (($# <= 1)) || usage_die "help does not accept arguments"
       usage
       return
       ;;
     version|-V|--version)
-      (($# == 1)) || die "version does not accept arguments"
+      (($# == 1)) || usage_die "version does not accept arguments"
       printf 'devin-desktop-manager %s\n' "${MANAGER_VERSION}"
       return
       ;;
+    internal-preflight)
+      if (($# != 3)) || [[ "${2:-}" != "1" ]]; then
+        usage_die "usage: devin-desktop-manager internal-preflight 1 COMMAND"
+      fi
+      if ! preflight_collect "${3}"; then
+        usage_die "internal-preflight has an unknown command profile: ${3}"
+      fi
+      preflight_emit_protocol
+      ((${#PREFLIGHT_KEYS[@]} == 0)) && return 0
+      return 1
+      ;;
   esac
 
+  case "${command_name}" in
+    install|update|status|check|rollback|set-defaults|doctor)
+      (($# == 1)) || usage_die "${command_name} does not accept arguments"
+      ;;
+    uninstall)
+      (($# <= 2)) || usage_die "uninstall accepts only --yes"
+      [[ $# == 1 || "${2:-}" == "--yes" ]] ||
+        usage_die "uninstall accepts only --yes"
+      ;;
+    uninstall-yes)
+      (($# == 1)) || usage_die "uninstall-yes does not accept arguments"
+      ;;
+    *)
+      usage >&2
+      usage_die "unknown command: ${command_name}"
+      ;;
+  esac
+
+  case "${command_name}" in
+    install) profile=update ;;
+    uninstall)
+      if [[ "${2:-}" == "--yes" ]]; then
+        profile=uninstall-yes
+      else
+        profile=uninstall
+      fi
+      ;;
+    *) profile="${command_name}" ;;
+  esac
+  if ! run_public_preflight "${profile}"; then
+    exit 1
+  fi
+  case "${profile}" in
+    check|update)
+      prepare_network_environment ||
+        die "network trust configuration changed during preflight"
+      ;;
+    *) sanitize_network_environment ;;
+  esac
   validate_environment
   ensure_not_root
 
   case "${command_name}" in
     install|update)
       shift
-      (($# == 0)) || die "${command_name} does not accept arguments"
       command_update
       ;;
     status)
       shift
-      (($# == 0)) || die "status does not accept arguments"
       command_status
       ;;
     check)
       shift
-      (($# == 0)) || die "check does not accept arguments"
       command_check
       ;;
     rollback)
       shift
-      (($# == 0)) || die "rollback does not accept arguments"
       command_rollback
       ;;
     set-defaults)
       shift
-      (($# == 0)) || die "set-defaults does not accept arguments"
       command_set_defaults
       ;;
     doctor)
       shift
-      (($# == 0)) || die "doctor does not accept arguments"
       command_doctor
       ;;
     uninstall)
       shift
-      (($# <= 1)) || die "uninstall accepts only --yes"
-      [[ $# == 0 || "$1" == "--yes" ]] || die "uninstall accepts only --yes"
       command_uninstall "${1:-}"
       ;;
-    *)
-      usage >&2
-      die "unknown command: ${command_name}"
+    uninstall-yes)
+      command_uninstall --yes
       ;;
   esac
 }
