@@ -2,6 +2,16 @@
 
 set -Eeuo pipefail
 
+while read -r _ _ function_name; do
+  unset -f "${function_name}" 2>/dev/null || true
+done < <(declare -F)
+
+((BASH_VERSINFO[0] > 4 ||
+  (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4))) || {
+  printf 'check-coverage: Bash 4.4 or newer is required\n' >&2
+  exit 1
+}
+
 usage() {
   printf 'Usage: check-coverage RESULTSET MINIMUM_PERCENT\n' >&2
   exit 2
@@ -10,9 +20,13 @@ usage() {
 main() {
   local resultset="${1:-}"
   local minimum="${2:-}"
-  local stats covered relevant percentage
+  local stats covered relevant percentage script_dir
 
   (($# == 2)) || usage
+  script_dir="${BASH_SOURCE[0]%/*}"
+  [[ "${script_dir}" != "${BASH_SOURCE[0]}" ]] || script_dir=.
+  script_dir="$(CDPATH= cd -P -- "${script_dir}" && pwd -P)"
+  "${script_dir}/preflight" check-coverage
   [[ -f "${resultset}" ]] ||
     {
       printf 'check-coverage: result set is missing: %s\n' "${resultset}" >&2

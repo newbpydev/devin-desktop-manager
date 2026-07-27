@@ -1,0 +1,525 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+while read -r _ _ function_name; do
+  unset -f "${function_name}" 2>/dev/null || true
+done < <(declare -F)
+
+readonly PREFLIGHT_MAX_RECORDS=64
+readonly PREFLIGHT_MAX_FIELD_BYTES=512
+readonly PREFLIGHT_MAX_OUTPUT_BYTES=32768
+readonly PREFLIGHT_PROBE_SECONDS="${PREFLIGHT_PROBE_SECONDS:-3}"
+
+declare -a FINDING_SEVERITY=()
+declare -a FINDING_CATEGORY=()
+declare -a FINDING_KEY=()
+declare -a FINDING_PURPOSE=()
+declare -a FINDING_OBSERVED=()
+declare -a FINDING_REMEDIATION=()
+declare -A FINDING_SEEN=()
+declare -A RESOLVED_TOOLS=()
+declare -A VISITED_PROFILES=()
+WORK_DIRECTORY=""
+PROJECT_ROOT=""
+
+readonly -A PROFILE_MEMBERS=(
+  [install-manager]='install-manager-local'
+  [check-coverage]='check-coverage-local'
+  [fixture-mini-deb]='fixture-mini-deb-local'
+  [manager-status]='manager-status-local'
+  [manager-check]='manager-check-local'
+  [manager-update]='manager-update-local'
+  [manager-rollback]='manager-rollback-local'
+  [manager-set-defaults]='manager-set-defaults-local'
+  [manager-doctor]='manager-doctor-local'
+  [manager-uninstall]='manager-uninstall-local'
+  [manager-uninstall-yes]='manager-uninstall-yes-local'
+  [test]='test-local fixture-mini-deb'
+  [lint]='lint-local'
+  [verify]='lint test'
+  [coverage]='coverage-local check-coverage'
+  [package]='package-local'
+  [release-contract]='release-contract-local'
+  [release-check]='lint coverage release-contract package'
+  [install]='install-manager manager-update'
+  [application]='application-local'
+  [clean]='clean-local'
+)
+
+readonly -A ROOT_OPTIONAL=(
+  [install-manager]=1
+  [check-coverage]=1
+  [fixture-mini-deb]=1
+)
+
+usage() {
+  printf 'Usage: preflight PROFILE [--project-root ROOT]\n' >&2
+  exit 2
+}
+
+cleanup() {
+  [[ -z "${WORK_DIRECTORY}" ]] || "${RESOLVED_TOOLS[rm]:-rm}" -rf -- "${WORK_DIRECTORY}"
+}
+
+escape_field() {
+  local value="$1" output="" byte hex index
+  local LC_ALL=C
+
+  for ((index = 0; index < ${#value} && index < PREFLIGHT_MAX_FIELD_BYTES; index++)); do
+    byte="${value:index:1}"
+    case "${byte}" in
+      $'\t') output+='\t' ;;
+      $'\n') output+='\n' ;;
+      $'\r') output+='\r' ;;
+      '\\') output+='\\\\' ;;
+      [\ -~]) output+="${byte}" ;;
+      *)
+        printf -v hex '%02x' "'${byte}"
+        output+="\\x${hex}"
+        ;;
+    esac
+  done
+  ((${#value} <= PREFLIGHT_MAX_FIELD_BYTES)) || output+='...[truncated]'
+  printf '%s' "${output}"
+}
+
+add_finding() {
+  local severity="$1" category="$2" key="$3" purpose="$4" observed="$5"
+  local remediation="$6"
+
+  [[ -z "${FINDING_SEEN[${key}]:-}" ]] || return 0
+  FINDING_SEEN["${key}"]=1
+  if ((${#FINDING_KEY[@]} >= PREFLIGHT_MAX_RECORDS)); then
+    FINDING_SEVERITY=(blocker)
+    FINDING_CATEGORY=(environment)
+    FINDING_KEY=(diagnostic.output-limit)
+    FINDING_PURPOSE=('diagnostic output exceeded safe limit')
+    FINDING_OBSERVED=('too many findings')
+    FINDING_REMEDIATION=('Correct the reported environment and retry.')
+    return 0
+  fi
+  FINDING_SEVERITY+=("${severity}")
+  FINDING_CATEGORY+=("${category}")
+  FINDING_KEY+=("${key}")
+  FINDING_PURPOSE+=("${purpose:0:PREFLIGHT_MAX_FIELD_BYTES}")
+  FINDING_OBSERVED+=("${observed:0:PREFLIGHT_MAX_FIELD_BYTES}")
+  FINDING_REMEDIATION+=("${remediation:0:PREFLIGHT_MAX_FIELD_BYTES}")
+}
+
+add_missing_command() {
+  local key="$1" value="$2" purpose="$3"
+  add_finding blocker command "command.${key}" "${purpose}" \
+    "missing command: ${value}" \
+    "Install a compatible ${key} command using your distribution documentation and retry."
+}
+
+add_incompatible_command() {
+  local key="$1" observed="$2" requirement="$3"
+  add_finding blocker command "command.${key}" "${requirement}" \
+    "incompatible command: ${observed}" \
+    "Install a compatible ${key} command using your distribution documentation and retry."
+}
+
+resolve_executable() {
+  local key="$1" value="$2" purpose="$3"
+  local candidate directory physical
+
+  [[ -z "${RESOLVED_TOOLS[${key}]:-}" ]] || return 0
+  case "${value}" in
+    '')
+      add_missing_command "${key}" '<empty>' "${purpose}"
+      return 1
+      ;;
+    *[!\ -~]*)
+      add_incompatible_command "${key}" "$(escape_field "${value}")" \
+        'executable identity must not contain control bytes'
+      return 1
+      ;;
+    */*)
+      if [[ "${value}" != /* ]]; then
+        add_incompatible_command "${key}" "${value}" \
+          'executable identity must be one command name or an absolute path'
+        return 1
+      fi
+      ;;
+  esac
+  if [[ "${value}" == /* ]]; then
+    candidate="${value}"
+  else
+    candidate="$(type -P -- "${value}" 2>/dev/null || true)"
+  fi
+  if [[ "${candidate}" != /* || ! -f "${candidate}" || ! -x "${candidate}" ]]; then
+    add_missing_command "${key}" "$(escape_field "${value}")" "${purpose}"
+    return 1
+  fi
+  directory="${candidate%/*}"
+  physical="$(CDPATH= cd -P -- "${directory}" 2>/dev/null && pwd -P)" || {
+    add_incompatible_command "${key}" "$(escape_field "${candidate}")" \
+      'executable directory must resolve physically'
+    return 1
+  }
+  candidate="${physical}/${candidate##*/}"
+  [[ -f "${candidate}" && -x "${candidate}" ]] || {
+    add_missing_command "${key}" "$(escape_field "${candidate}")" "${purpose}"
+    return 1
+  }
+  RESOLVED_TOOLS["${key}"]="${candidate}"
+}
+
+ensure_probe_workspace() {
+  [[ -n "${WORK_DIRECTORY}" ]] && return 0
+  local base="${TMPDIR:-/tmp}"
+  resolve_executable mkdir mkdir 'isolated capability probes require mkdir' || return 1
+  resolve_executable rm rm 'isolated capability probe cleanup requires rm' || return 1
+  WORK_DIRECTORY="${base%/}/devin-desktop-manager.preflight.${UID}.$$"
+  if ! "${RESOLVED_TOOLS[mkdir]}" -m 0700 -- "${WORK_DIRECTORY}" 2>/dev/null; then
+    WORK_DIRECTORY=""
+    add_finding blocker environment environment.probe-temporary \
+      'capability probes require isolated temporary state' \
+      "cannot create a private temporary directory" \
+      'Set TMPDIR to a writable local directory and retry.'
+    return 1
+  fi
+}
+
+run_probe() {
+  local key="$1"
+  shift
+  resolve_executable timeout timeout 'bounded capability probes require util-linux timeout' || return 1
+  resolve_executable env env 'isolated capability probes require env' || return 1
+  ensure_probe_workspace || return 1
+  (
+    ulimit -f 64
+    exec "${RESOLVED_TOOLS[env]}" -i PATH=/usr/bin:/bin \
+      HOME="${WORK_DIRECTORY}/home" TMPDIR="${WORK_DIRECTORY}" \
+      LC_ALL=C TZ=UTC NO_COLOR=1 TERM=dumb \
+      HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 \
+      ALL_PROXY=http://127.0.0.1:9 NO_PROXY= \
+      "${RESOLVED_TOOLS[timeout]}" --signal=TERM --kill-after=1s \
+      "${PREFLIGHT_PROBE_SECONDS}s" "$@" </dev/null
+  )
+  local status=$?
+  if ((status == 124 || status == 137)); then
+    add_incompatible_command "${key}" 'probe timed out' \
+      'capability probe must complete within the bounded timeout'
+  fi
+  return "${status}"
+}
+
+capture_probe() {
+  local key="$1" output_file status
+  shift
+  ensure_probe_workspace || return 1
+  output_file="${WORK_DIRECTORY}/probe-output"
+  : >"${output_file}"
+  if run_probe "${key}" "$@" >"${output_file}" 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+  PROBE_OUTPUT=""
+  IFS= read -r -N 4096 PROBE_OUTPUT <"${output_file}" || true
+  return "${status}"
+}
+
+version_at_least() {
+  local actual="$1" required="$2" actual_major actual_minor required_major required_minor
+  IFS=. read -r actual_major actual_minor _ <<<"${actual}"
+  IFS=. read -r required_major required_minor _ <<<"${required}"
+  [[ "${actual_major}" =~ ^[0-9]+$ && "${actual_minor}" =~ ^[0-9]+$ ]] || return 1
+  ((actual_major > required_major ||
+    (actual_major == required_major && actual_minor >= required_minor)))
+}
+
+check_versioned_tool() {
+  local key="$1" value="$2" required="$3" pattern="$4" purpose="$5"
+  local PROBE_OUTPUT="" version=""
+  resolve_executable "${key}" "${value}" "${purpose}" || return 0
+  if capture_probe "${key}" "${RESOLVED_TOOLS[${key}]}" --version; then
+    if [[ "${PROBE_OUTPUT}" =~ ${pattern} ]]; then
+      version="${BASH_REMATCH[1]}"
+    fi
+  fi
+  if [[ -z "${version}" ]] || ! version_at_least "${version}" "${required}"; then
+    add_incompatible_command "${key}" "${PROBE_OUTPUT:-no version output}" \
+      "${purpose}; requires ${key^} ${required} or newer"
+  fi
+}
+
+check_feature_tool() {
+  local key="$1" value="$2" purpose="$3" probe="$4"
+  local PROBE_OUTPUT=""
+  resolve_executable "${key}" "${value}" "${purpose}" || return 0
+  case "${probe}" in
+    jq)
+      run_probe "${key}" "${RESOLVED_TOOLS[${key}]}" -n -e \
+        '([1, 2] | length) == 2' >/dev/null 2>&1 ||
+        add_incompatible_command "${key}" "${value}" "${purpose}"
+      ;;
+    awk)
+      run_probe "${key}" "${RESOLVED_TOOLS[${key}]}" \
+        'BEGIN { printf "%.2f", 1 / 2; exit !(1 < 2) }' >/dev/null 2>&1 ||
+        add_incompatible_command "${key}" "${value}" "${purpose}"
+      ;;
+    readlink)
+      capture_probe "${key}" "${RESOLVED_TOOLS[${key}]}" -m -- / || true
+      [[ "${PROBE_OUTPUT}" == / ]] || add_incompatible_command "${key}" "${value}" "${purpose}"
+      ;;
+    gnu-mv)
+      capture_probe "${key}" "${RESOLVED_TOOLS[${key}]}" --help || true
+      [[ "${PROBE_OUTPUT}" == *'--no-target-directory'* ]] ||
+        add_incompatible_command "${key}" "${value}" "${purpose}"
+      ;;
+    gnu-tar)
+      capture_probe "${key}" "${RESOLVED_TOOLS[${key}]}" --version || true
+      [[ "${PROBE_OUTPUT}" == *'GNU tar'* ]] ||
+        add_incompatible_command "${key}" "${value}" "${purpose}"
+      ;;
+    *)
+      capture_probe "${key}" "${RESOLVED_TOOLS[${key}]}" --version || true
+      [[ -n "${PROBE_OUTPUT}" ]] || add_incompatible_command "${key}" "${value}" "${purpose}"
+      ;;
+  esac
+}
+
+check_plain_tools() {
+  local key PROBE_OUTPUT
+  for key in "$@"; do
+    resolve_executable "${key}" "${key}" "required by this helper operation" || continue
+    PROBE_OUTPUT=""
+    capture_probe "${key}" "${RESOLVED_TOOLS[${key}]}" --version || true
+    [[ -n "${PROBE_OUTPUT}" ]] ||
+      add_incompatible_command "${key}" "${key}" \
+        'the selected command must expose bounded version evidence'
+  done
+}
+
+collect_manager_protocol() {
+  local command_name="$1" manager="${PROJECT_ROOT}/bin/devin-desktop-manager"
+  local output_file error_file status magic version count index extra
+  local severity category key purpose observed remediation
+
+  [[ -f "${manager}" && -x "${manager}" ]] || {
+    add_missing_command manager "${manager}" 'checkout manager preflight is required'
+    return
+  }
+  resolve_executable timeout timeout 'bounded manager preflight requires util-linux timeout' || return
+  resolve_executable env env 'isolated manager preflight requires env' || return
+  resolve_executable stat stat 'bounded manager protocol validation requires stat' || return
+  ensure_probe_workspace || return
+  output_file="${WORK_DIRECTORY}/manager-output"
+  error_file="${WORK_DIRECTORY}/manager-error"
+  if "${RESOLVED_TOOLS[env]}" -i PATH="${PATH}" HOME="${HOME:-}" XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-}" \
+    XDG_DATA_HOME="${XDG_DATA_HOME:-}" XDG_STATE_HOME="${XDG_STATE_HOME:-}" \
+    XDG_CACHE_HOME="${XDG_CACHE_HOME:-}" XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
+    TMPDIR="${TMPDIR:-}" LC_ALL=C TZ=UTC BASH_ENV= ENV= \
+    "${RESOLVED_TOOLS[timeout]}" --signal=TERM --kill-after=1s \
+    "${PREFLIGHT_PROBE_SECONDS}s" "${manager}" internal-preflight 1 \
+    "${command_name}" </dev/null >"${output_file}" 2>"${error_file}"; then
+    status=0
+  else
+    status=$?
+  fi
+  if ((status != 0 && status != 1)) ||
+    (($("${RESOLVED_TOOLS[stat]}" -c %s -- "${output_file}" 2>/dev/null || printf 0) > PREFLIGHT_MAX_OUTPUT_BYTES)) ||
+    (($("${RESOLVED_TOOLS[stat]}" -c %s -- "${error_file}" 2>/dev/null || printf 0) != 0)); then
+    add_finding blocker environment manager.protocol \
+      'checkout manager capability protocol must be valid and bounded' \
+      "manager protocol failed with status ${status}" \
+      'Use the manager from this checkout and retry.'
+    return
+  fi
+  exec 3<"${output_file}"
+  IFS= read -r -d '' magic <&3 || magic=""
+  IFS= read -r -d '' version <&3 || version=""
+  IFS= read -r -d '' count <&3 || count=""
+  if [[ "${magic}" != DDM-PREFLIGHT || "${version}" != 1 || ! "${count}" =~ ^[0-9]+$ ]] ||
+    ((count > PREFLIGHT_MAX_RECORDS)) ||
+    { ((status == 0)) && ((count != 0)); } ||
+    { ((status == 1)) && ((count == 0)); }; then
+    exec 3<&-
+    add_finding blocker environment manager.protocol \
+      'checkout manager capability protocol must be valid and bounded' \
+      'malformed manager protocol header' 'Use the manager from this checkout and retry.'
+    return
+  fi
+  for ((index = 0; index < count; index++)); do
+    IFS= read -r -d '' severity <&3 && IFS= read -r -d '' category <&3 &&
+      IFS= read -r -d '' key <&3 && IFS= read -r -d '' purpose <&3 &&
+      IFS= read -r -d '' observed <&3 && IFS= read -r -d '' remediation <&3 || {
+      exec 3<&-
+      add_finding blocker environment manager.protocol \
+        'checkout manager capability protocol must be complete' \
+        'truncated manager protocol record' 'Use the manager from this checkout and retry.'
+      return
+    }
+    if [[ "${severity}" != blocker && "${severity}" != warning ]] ||
+      [[ ! "${category}" =~ ^(environment|path|platform|command|interaction|optional)$ ]] ||
+      [[ ! "${key}" =~ ^[a-z0-9.-]{1,64}$ ]] ||
+      ((${#purpose} > PREFLIGHT_MAX_FIELD_BYTES ||
+        ${#observed} > PREFLIGHT_MAX_FIELD_BYTES ||
+        ${#remediation} > PREFLIGHT_MAX_FIELD_BYTES)); then
+      exec 3<&-
+      add_finding blocker environment manager.protocol \
+        'checkout manager capability protocol fields must be valid' \
+        'invalid manager protocol record' 'Use the manager from this checkout and retry.'
+      return
+    fi
+    add_finding "${severity}" "${category}" "manager.${key}" "${purpose}" \
+      "${observed}" "${remediation}"
+  done
+  if IFS= read -r -n 1 extra <&3; then
+    add_finding blocker environment manager.protocol \
+      'checkout manager capability protocol must end after its records' \
+      'extra manager protocol data' 'Use the manager from this checkout and retry.'
+  fi
+  exec 3<&-
+}
+
+collect_local_profile() {
+  local profile="$1"
+  case "${profile}" in
+    install-manager-local)
+      check_plain_tools grep dirname mkdir mktemp rm ln install
+      check_feature_tool readlink readlink 'GNU readlink physical path behavior is required' readlink
+      check_feature_tool mv mv 'GNU mv no-target-directory behavior is required' gnu-mv
+      ;;
+    check-coverage-local)
+      check_feature_tool jq jq 'jq array and object evaluation is required' jq
+      check_feature_tool awk awk 'awk numeric comparison is required' awk
+      ;;
+    fixture-mini-deb-local)
+      check_plain_tools mkdir mktemp chmod ln rm ar cat
+      check_feature_tool tar tar 'GNU tar deterministic fixture options are required' gnu-tar
+      ;;
+    test-local)
+      check_versioned_tool bats "${PREFLIGHT_BATS:-bats}" 1.4 \
+        'Bats[[:space:]]+([0-9]+\.[0-9]+([.][0-9]+)?)' \
+        'the offline suite requires Bats 1.4 or newer'
+      ;;
+    lint-local)
+      check_versioned_tool shellcheck "${PREFLIGHT_SHELLCHECK:-shellcheck}" 0.7 \
+        'version:[[:space:]]*([0-9]+\.[0-9]+([.][0-9]+)?)' \
+        'lint requires ShellCheck 0.7 or newer'
+      ;;
+    coverage-local)
+      check_versioned_tool bashcov "${PREFLIGHT_BASHCOV:-bashcov}" 3.3 \
+        'bashcov[[:space:]]+([0-9]+\.[0-9]+([.][0-9]+)?)' \
+        'coverage requires Bashcov 3.3 or newer'
+      collect_profile test
+      ;;
+    package-local)
+      check_plain_tools git sort gzip sha256sum mktemp rm chmod mkdir
+      check_feature_tool tar tar 'packaging requires GNU tar deterministic options' gnu-tar
+      ;;
+    release-contract-local)
+      check_feature_tool awk awk 'release metadata parsing requires awk' awk
+      check_plain_tools grep
+      ;;
+    manager-*-local)
+      local command_name="${profile#manager-}"
+      command_name="${command_name%-local}"
+      collect_manager_protocol "${command_name}"
+      ;;
+    application-local|clean-local)
+      ;;
+    *) usage ;;
+  esac
+}
+
+collect_profile() {
+  local profile="$1" member
+  [[ -z "${VISITED_PROFILES[${profile}]:-}" ]] || return 0
+  VISITED_PROFILES["${profile}"]=1
+  if [[ "${profile}" == *-local ]]; then
+    collect_local_profile "${profile}"
+    return
+  fi
+  [[ -n "${PROFILE_MEMBERS[${profile}]:-}" ]] || usage
+  for member in ${PROFILE_MEMBERS[${profile}]}; do
+    collect_profile "${member}"
+  done
+}
+
+validate_project_root() {
+  local root="$1" physical
+  [[ "${root}" == /* && "${root}" != *[!\ -~]* && -d "${root}" && ! -L "${root}" ]] || return 1
+  physical="$(CDPATH= cd -P -- "${root}" 2>/dev/null && pwd -P)" || return 1
+  [[ "${root%/}" == "${physical}" ]] || return 1
+  PROJECT_ROOT="${physical}"
+}
+
+render_findings() {
+  local profile="$1" severity_order category_order index selected label line total=0
+  local purpose observed remediation
+  local -A rendered=()
+  local -a lines=()
+  local LC_ALL=C
+  for severity_order in blocker warning; do
+    for category_order in command environment interaction optional path platform; do
+      while :; do
+        selected=-1
+        for ((index = 0; index < ${#FINDING_KEY[@]}; index++)); do
+          [[ -z "${rendered[${index}]:-}" &&
+            "${FINDING_SEVERITY[index]}" == "${severity_order}" &&
+            "${FINDING_CATEGORY[index]}" == "${category_order}" ]] || continue
+          if ((selected < 0)) || [[ "${FINDING_KEY[index]}" < "${FINDING_KEY[selected]}" ]]; then
+            selected=${index}
+          fi
+        done
+        ((selected >= 0)) || break
+        index=${selected}
+        rendered["${index}"]=1
+        [[ "${severity_order}" == blocker ]] && label=error || label=warning
+        purpose="$(escape_field "${FINDING_PURPOSE[index]}")"
+        observed="$(escape_field "${FINDING_OBSERVED[index]}")"
+        remediation="$(escape_field "${FINDING_REMEDIATION[index]}")"
+        printf -v line '%s: %s: %s: %s (%s). %s' "${profile}" "${label}" \
+          "${FINDING_KEY[index]}" "${purpose}" "${observed}" "${remediation}"
+        if ((${#line} > 2048)); then line="${line:0:2034}...[truncated]"; fi
+        total=$((total + ${#line} + 1))
+        if ((total > PREFLIGHT_MAX_OUTPUT_BYTES)); then
+          printf '%s: error: diagnostic.output-limit: diagnostic output exceeded safe limit. Correct the reported environment and retry.\n' \
+            "${profile}" >&2
+          return
+        fi
+        lines+=("${line}")
+      done
+    done
+  done
+  printf '%s\n' "${lines[@]}" >&2
+}
+
+main() {
+  local profile="${1:-}" root=""
+  [[ "${BASH_VERSINFO[0]}" -gt 4 ||
+    ("${BASH_VERSINFO[0]}" -eq 4 && "${BASH_VERSINFO[1]}" -ge 4) ]] || {
+    printf 'preflight: error: Bash 4.4 or newer is required\n' >&2
+    exit 1
+  }
+  [[ -n "${profile}" && -n "${PROFILE_MEMBERS[${profile}]:-}" ]] || usage
+  shift
+  if (($# > 0)); then
+    [[ $# == 2 && "$1" == --project-root ]] || usage
+    root="$2"
+  fi
+  if [[ -z "${root}" ]]; then
+    [[ -n "${ROOT_OPTIONAL[${profile}]:-}" ]] || {
+      printf 'preflight: profile %s requires --project-root ROOT\n' "${profile}" >&2
+      exit 2
+    }
+  elif ! validate_project_root "${root}"; then
+    printf 'preflight: --project-root must be one physical absolute directory\n' >&2
+    exit 2
+  fi
+
+  trap cleanup EXIT
+  collect_profile "${profile}"
+  if ((${#FINDING_KEY[@]} > 0)); then
+    render_findings "${profile}"
+    exit 1
+  fi
+}
+
+main "$@"

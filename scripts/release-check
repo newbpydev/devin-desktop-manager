@@ -2,6 +2,16 @@
 
 set -Eeuo pipefail
 
+while read -r _ _ function_name; do
+  unset -f "${function_name}" 2>/dev/null || true
+done < <(declare -F)
+
+((BASH_VERSINFO[0] > 4 ||
+  (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4))) || {
+  printf 'release-check: Bash 4.4 or newer is required\n' >&2
+  exit 1
+}
+
 usage() {
   printf 'Usage: release-check VERSION\n' >&2
   exit 2
@@ -9,18 +19,22 @@ usage() {
 
 main() {
   local version="${1:-}"
-  local project_root manager_version make_version release_tag
+  local project_root manager_version make_version release_tag script_dir
 
   (($# == 1)) || usage
+  script_dir="${BASH_SOURCE[0]%/*}"
+  [[ "${script_dir}" != "${BASH_SOURCE[0]}" ]] || script_dir=.
+  script_dir="$(CDPATH= cd -P -- "${script_dir}" && pwd -P)"
   project_root="${RELEASE_CHECK_PROJECT_ROOT:-}"
   if [[ -z "${project_root}" ]]; then
-    project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    project_root="$(cd "${script_dir}/.." && pwd -P)"
   fi
   [[ "${project_root}" == /* && -d "${project_root}" ]] ||
     {
       printf 'release-check: project root must be an absolute directory\n' >&2
       exit 1
     }
+  "${script_dir}/preflight" release-contract --project-root "${project_root}"
   manager_version="$(
     "${project_root}/bin/devin-desktop-manager" --version | awk '{print $2}'
   )"

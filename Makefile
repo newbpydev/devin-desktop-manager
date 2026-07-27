@@ -30,6 +30,7 @@ override MAKE_XDG_STATE_HOME := $(value XDG_STATE_HOME)
 override MAKE_XDG_CACHE_HOME := $(value XDG_CACHE_HOME)
 override MAKE_XDG_RUNTIME_DIR := $(value XDG_RUNTIME_DIR)
 override MAKE_TMPDIR := $(value TMPDIR)
+override MAKE_PATH := $(value PATH)
 override MAKE_DIST_DIR := $(value DIST_DIR)
 override MAKE_COVERAGE_MINIMUM := $(value COVERAGE_MINIMUM)
 override MAKE_COVERAGE_DIR := $(value COVERAGE_DIR)
@@ -37,7 +38,7 @@ export MAKE_BASH MAKE_BATS MAKE_SHELLCHECK MAKE_BASHCOV MAKE_APP MAKE_HOME
 export PROJECT_ROOT APP_DEFAULT
 export MAKE_XDG_CONFIG_HOME MAKE_XDG_DATA_HOME MAKE_XDG_STATE_HOME
 export MAKE_XDG_CACHE_HOME MAKE_XDG_RUNTIME_DIR MAKE_TMPDIR MAKE_DIST_DIR
-export MAKE_COVERAGE_MINIMUM MAKE_COVERAGE_DIR
+export MAKE_COVERAGE_MINIMUM MAKE_COVERAGE_DIR MAKE_PATH
 unexport BASH BATS SHELLCHECK BASHCOV APP HOME XDG_CONFIG_HOME XDG_DATA_HOME
 unexport XDG_STATE_HOME XDG_CACHE_HOME XDG_RUNTIME_DIR TMPDIR DIST_DIR
 unexport COVERAGE_MINIMUM COVERAGE_DIR
@@ -94,23 +95,57 @@ endef
 
 define RESOLVE_BASH
 $(RESOLVE_EXECUTABLE); \
-bash_path=$$(resolve_executable BASH "$$MAKE_BASH") || exit $$?
+bash_path=$$(resolve_executable BASH "$$MAKE_BASH") || exit $$?; \
+env_path=$$(resolve_executable ENV env) || exit $$?
 endef
 
-define CALLER_ENVIRONMENT
-HOME="$$MAKE_HOME" \
-XDG_CONFIG_HOME="$$MAKE_XDG_CONFIG_HOME" \
-XDG_DATA_HOME="$$MAKE_XDG_DATA_HOME" \
-XDG_STATE_HOME="$$MAKE_XDG_STATE_HOME" \
-XDG_CACHE_HOME="$$MAKE_XDG_CACHE_HOME" \
-XDG_RUNTIME_DIR="$$MAKE_XDG_RUNTIME_DIR" \
-TMPDIR="$$MAKE_TMPDIR"
-endef
-
-define RUN_MANAGER
+define PREPARE_SCRIPT_RUNNER
 $(RESOLVE_BASH); \
-$(CALLER_ENVIRONMENT) BASH_ENV= ENV= "$$bash_path" --noprofile --norc \
-	"$$PROJECT_ROOT/bin/devin-desktop-manager" $(1)
+run_script() { \
+  BASH_ENV= ENV= LC_ALL=C TZ=UTC \
+  HOME="$$MAKE_HOME" PATH="$$MAKE_PATH" \
+  XDG_CONFIG_HOME="$$MAKE_XDG_CONFIG_HOME" \
+  XDG_DATA_HOME="$$MAKE_XDG_DATA_HOME" \
+  XDG_STATE_HOME="$$MAKE_XDG_STATE_HOME" \
+  XDG_CACHE_HOME="$$MAKE_XDG_CACHE_HOME" \
+  XDG_RUNTIME_DIR="$$MAKE_XDG_RUNTIME_DIR" TMPDIR="$$MAKE_TMPDIR" \
+  PREFLIGHT_BATS="$$MAKE_BATS" PREFLIGHT_SHELLCHECK="$$MAKE_SHELLCHECK" \
+  PREFLIGHT_BASHCOV="$$MAKE_BASHCOV" \
+  "$$env_path" -u BASHOPTS -u SHELLOPTS -u PS4 -u CDPATH \
+    -u RUBYOPT -u RUBYLIB -u BUNDLE_GEMFILE -u BUNDLE_PATH \
+    -u GIT_CONFIG -u GIT_CONFIG_GLOBAL -u GIT_CONFIG_SYSTEM -u GIT_CONFIG_COUNT \
+    -u TAR_OPTIONS -u GZIP -u ENV -u BASH_ENV \
+    "$$bash_path" --noprofile --norc -c \
+    'while read -r _ _ fn; do unset -f "$$fn" 2>/dev/null || true; done < <(declare -F); exec "$$@"' \
+    make-bootstrap "$$bash_path" --noprofile --norc "$$@"; \
+}
+endef
+
+define RUN_PREFLIGHT
+run_script "$$PROJECT_ROOT/scripts/preflight" $(1) --project-root "$$PROJECT_ROOT"
+endef
+
+define DO_LINT
+shellcheck_path=$$(resolve_executable SHELLCHECK "$$MAKE_SHELLCHECK") || exit $$?; \
+run_script -n "$$PROJECT_ROOT/bin/devin-desktop-manager" scripts/*; \
+LC_ALL=C TZ=UTC "$$shellcheck_path" \
+	"$$PROJECT_ROOT/bin/devin-desktop-manager" scripts/*
+endef
+
+define DO_TEST
+bats_path=$$(resolve_executable BATS "$$MAKE_BATS") || exit $$?; \
+run_script "$$bats_path" tests
+endef
+
+define DO_COVERAGE
+bats_path=$$(resolve_executable BATS "$$MAKE_BATS") || exit $$?; \
+bashcov_path=$$(resolve_executable BASHCOV "$$MAKE_BASHCOV") || exit $$?; \
+rm -f -- "$$MAKE_COVERAGE_DIR/.resultset.json"; \
+HOME="$$MAKE_HOME" LC_ALL=C TZ=UTC COVERAGE_MINIMUM="$$MAKE_COVERAGE_MINIMUM" \
+	COVERAGE_DIR="$$MAKE_COVERAGE_DIR" COVERAGE_COMMAND_NAME=bats-suite \
+	"$$bashcov_path" -- "$$bats_path" tests; \
+run_script "$$PROJECT_ROOT/scripts/check-coverage" \
+	"$$MAKE_COVERAGE_DIR/.resultset.json" "$$MAKE_COVERAGE_MINIMUM"
 endef
 
 help:
@@ -144,29 +179,38 @@ help:
 		'  make clean           Remove generated coverage and release output'
 
 install-manager:
-	@$(RESOLVE_BASH); \
+	@$(PREPARE_SCRIPT_RUNNER); \
+	run_script "$$PROJECT_ROOT/scripts/preflight" install-manager; \
 	destination=$$MAKE_HOME/.local/bin/devin-desktop-manager; \
-	$(CALLER_ENVIRONMENT) BASH_ENV= ENV= "$$bash_path" --noprofile --norc \
-		"$$PROJECT_ROOT/scripts/install-manager" \
+	run_script "$$PROJECT_ROOT/scripts/install-manager" \
 		"$$PROJECT_ROOT/bin/devin-desktop-manager" "$$destination"
 
 link: link-dev
 
 link-dev:
-	@$(RESOLVE_BASH); \
+	@$(PREPARE_SCRIPT_RUNNER); \
+	run_script "$$PROJECT_ROOT/scripts/preflight" install-manager; \
 	destination=$$MAKE_HOME/.local/bin/devin-desktop-manager; \
-	$(CALLER_ENVIRONMENT) BASH_ENV= ENV= "$$bash_path" --noprofile --norc \
-		"$$PROJECT_ROOT/scripts/install-manager" --link \
+	run_script "$$PROJECT_ROOT/scripts/install-manager" --link \
 		"$$PROJECT_ROOT/bin/devin-desktop-manager" "$$destination"
 
-install: install-manager
-	@$(call RUN_MANAGER,install)
+install:
+	@$(PREPARE_SCRIPT_RUNNER); \
+	$(call RUN_PREFLIGHT,install); \
+	destination=$$MAKE_HOME/.local/bin/devin-desktop-manager; \
+	run_script "$$PROJECT_ROOT/scripts/install-manager" \
+		"$$PROJECT_ROOT/bin/devin-desktop-manager" "$$destination"; \
+	run_script "$$PROJECT_ROOT/bin/devin-desktop-manager" install
 
 status check update rollback set-defaults doctor:
-	@$(call RUN_MANAGER,$@)
+	@$(PREPARE_SCRIPT_RUNNER); \
+	$(call RUN_PREFLIGHT,manager-$@); \
+	run_script "$$PROJECT_ROOT/bin/devin-desktop-manager" $@
 
 run:
-	@app="$$MAKE_APP"; \
+	@$(PREPARE_SCRIPT_RUNNER); \
+	$(call RUN_PREFLIGHT,application); \
+	app="$$MAKE_APP"; \
 	if [ "$$APP_DEFAULT" = 1 ]; then app=$$MAKE_HOME/.local/bin/devin-desktop; fi; \
 	case "$$app" in \
 		/*) ;; \
@@ -177,10 +221,12 @@ run:
 	if [ ! -f "$$app" ] || [ ! -x "$$app" ]; then \
 		printf '%s\n' "run: error: APP is not an executable file: $$app" >&2; exit 1; \
 	fi; \
-	$(CALLER_ENVIRONMENT) exec "$$app"
+	HOME="$$MAKE_HOME" exec "$$app"
 
 app-version:
-	@app="$$MAKE_APP"; \
+	@$(PREPARE_SCRIPT_RUNNER); \
+	$(call RUN_PREFLIGHT,application); \
+	app="$$MAKE_APP"; \
 	if [ "$$APP_DEFAULT" = 1 ]; then app=$$MAKE_HOME/.local/bin/devin-desktop; fi; \
 	case "$$app" in \
 		/*) ;; \
@@ -191,54 +237,53 @@ app-version:
 	if [ ! -f "$$app" ] || [ ! -x "$$app" ]; then \
 		printf '%s\n' "app-version: error: APP is not an executable file: $$app" >&2; exit 1; \
 	fi; \
-	$(CALLER_ENVIRONMENT) exec "$$app" --version
+	HOME="$$MAKE_HOME" exec "$$app" --version
 
 test:
-	@$(RESOLVE_BASH); \
-	bats_path=$$(resolve_executable BATS "$$MAKE_BATS") || exit $$?; \
-	$(CALLER_ENVIRONMENT) BASH_ENV= ENV= \
-		"$$bash_path" --noprofile --norc "$$bats_path" tests
+	@$(PREPARE_SCRIPT_RUNNER); \
+	$(call RUN_PREFLIGHT,test); \
+	$(DO_TEST)
 
 coverage:
-	@$(RESOLVE_BASH); \
-	bats_path=$$(resolve_executable BATS "$$MAKE_BATS") || exit $$?; \
-	bashcov_path=$$(resolve_executable BASHCOV "$$MAKE_BASHCOV") || exit $$?; \
-	rm -f -- "$$MAKE_COVERAGE_DIR/.resultset.json"; \
-	$(CALLER_ENVIRONMENT) COVERAGE_MINIMUM="$$MAKE_COVERAGE_MINIMUM" \
-		COVERAGE_DIR="$$MAKE_COVERAGE_DIR" \
-		COVERAGE_COMMAND_NAME=bats-suite \
-		"$$bashcov_path" -- "$$bats_path" tests; \
-	$(CALLER_ENVIRONMENT) BASH_ENV= ENV= "$$bash_path" --noprofile --norc \
-		"$$PROJECT_ROOT/scripts/check-coverage" \
-		"$$MAKE_COVERAGE_DIR/.resultset.json" "$$MAKE_COVERAGE_MINIMUM"
+	@$(PREPARE_SCRIPT_RUNNER); \
+	$(call RUN_PREFLIGHT,coverage); \
+	$(DO_COVERAGE)
 
 lint:
-	@$(RESOLVE_BASH); \
-	shellcheck_path=$$(resolve_executable SHELLCHECK "$$MAKE_SHELLCHECK") || exit $$?; \
-	$(CALLER_ENVIRONMENT) BASH_ENV= ENV= "$$bash_path" --noprofile --norc -n \
-		"$$PROJECT_ROOT/bin/devin-desktop-manager" scripts/*; \
-	$(CALLER_ENVIRONMENT) "$$shellcheck_path" \
-		"$$PROJECT_ROOT/bin/devin-desktop-manager" scripts/*
+	@$(PREPARE_SCRIPT_RUNNER); \
+	$(call RUN_PREFLIGHT,lint); \
+	$(DO_LINT)
 
-verify: lint test
+verify:
+	@$(PREPARE_SCRIPT_RUNNER); \
+	$(call RUN_PREFLIGHT,verify); \
+	$(DO_LINT); \
+	$(DO_TEST)
 
 package:
-	@$(RESOLVE_BASH); \
-	$(CALLER_ENVIRONMENT) BASH_ENV= ENV= "$$bash_path" --noprofile --norc \
-		"$$PROJECT_ROOT/scripts/package-release" "$(VERSION)" "$$MAKE_DIST_DIR"
+	@$(PREPARE_SCRIPT_RUNNER); \
+	$(call RUN_PREFLIGHT,package); \
+	run_script "$$PROJECT_ROOT/scripts/package-release" "$(VERSION)" "$$MAKE_DIST_DIR"
 
-release-check: lint coverage
-	@$(RESOLVE_BASH); \
-	$(CALLER_ENVIRONMENT) BASH_ENV= ENV= "$$bash_path" --noprofile --norc \
-		"$$PROJECT_ROOT/scripts/release-check" "$(VERSION)"; \
-	$(CALLER_ENVIRONMENT) BASH_ENV= ENV= "$$bash_path" --noprofile --norc \
-		"$$PROJECT_ROOT/scripts/package-release" "$(VERSION)" "$$MAKE_DIST_DIR"
+release-check:
+	@$(PREPARE_SCRIPT_RUNNER); \
+	$(call RUN_PREFLIGHT,release-check); \
+	$(DO_LINT); \
+	$(DO_COVERAGE); \
+	run_script "$$PROJECT_ROOT/scripts/release-check" "$(VERSION)"; \
+	run_script "$$PROJECT_ROOT/scripts/package-release" "$(VERSION)" "$$MAKE_DIST_DIR"
 
 uninstall:
-	@$(call RUN_MANAGER,uninstall)
+	@$(PREPARE_SCRIPT_RUNNER); \
+	$(call RUN_PREFLIGHT,manager-uninstall); \
+	run_script "$$PROJECT_ROOT/bin/devin-desktop-manager" uninstall
 
 uninstall-yes:
-	@$(call RUN_MANAGER,uninstall --yes)
+	@$(PREPARE_SCRIPT_RUNNER); \
+	$(call RUN_PREFLIGHT,manager-uninstall-yes); \
+	run_script "$$PROJECT_ROOT/bin/devin-desktop-manager" uninstall --yes
 
 clean:
-	@rm -rf -- "$$MAKE_DIST_DIR" "$$MAKE_COVERAGE_DIR"
+	@$(PREPARE_SCRIPT_RUNNER); \
+	$(call RUN_PREFLIGHT,clean); \
+	rm -rf -- "$$MAKE_DIST_DIR" "$$MAKE_COVERAGE_DIR"

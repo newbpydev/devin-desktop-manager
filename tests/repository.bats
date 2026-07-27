@@ -29,8 +29,10 @@ setup() {
   done
 
   grep -Eq '^link:[[:space:]]+link-dev$' "${makefile}"
-  grep -Eq '^verify:[[:space:]]+lint[[:space:]]+test$' "${makefile}"
-  grep -Eq '^release-check:[[:space:]]+lint[[:space:]]+coverage$' "${makefile}"
+  grep -Eq '^verify:$' "${makefile}"
+  grep -Eq '^release-check:$' "${makefile}"
+  grep -Fq '$(call RUN_PREFLIGHT,verify)' "${makefile}"
+  grep -Fq '$(call RUN_PREFLIGHT,release-check)' "${makefile}"
   grep -Eq '^test:' "${makefile}"
   grep -Eq '^coverage:' "${makefile}"
   grep -Fq 'COVERAGE_COMMAND_NAME=bats-suite' "${makefile}"
@@ -42,6 +44,26 @@ setup() {
   grep -Fq 'run: bin/devin-desktop-manager check' "${canary}"
   run grep -F 'make check' "${canary}"
   [ "${status}" -ne 0 ]
+}
+
+@test "[PMC-U3-R01] repository keeps prerequisite policy in the preflight registry" {
+  local preflight="${PROJECT_ROOT}/scripts/preflight"
+  local helper
+
+  [ -x "${preflight}" ]
+  for helper in scripts/install-manager scripts/check-coverage \
+    scripts/package-release scripts/release-check tests/fixtures/build-mini-deb; do
+    grep -Fq 'preflight"' "${PROJECT_ROOT}/${helper}"
+  done
+  grep -Fq 'readonly -A PROFILE_MEMBERS' "${preflight}"
+  grep -Fq '[verify]=' "${preflight}"
+  grep -Fq '[release-check]=' "${preflight}"
+}
+
+@test "[PMC-U3-R05] repository policy treats hostile MAKEFILES as caller ingress" {
+  run grep -F 'MAKEFILES' "${PROJECT_ROOT}/Makefile"
+  [ "${status}" -ne 0 ]
+  grep -Fq 'MAKEFILES' "${PROJECT_ROOT}/tests/repository.bats"
 }
 
 @test "public repository includes the expected community health files" {

@@ -3,6 +3,16 @@
 set -Eeuo pipefail
 umask 077
 
+while read -r _ _ function_name; do
+  unset -f "${function_name}" 2>/dev/null || true
+done < <(declare -F)
+
+((BASH_VERSINFO[0] > 4 ||
+  (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4))) || {
+  printf 'install-manager: Bash 4.4 or newer is required\n' >&2
+  exit 1
+}
+
 readonly PROJECT_ID="io.github.newbpydev.devin-desktop-manager"
 
 usage() {
@@ -42,7 +52,7 @@ ensure_destination_manageable() {
 
 main() {
   local mode="copy"
-  local source destination temporary
+  local source destination temporary script_dir
 
   if [[ "${1:-}" == "--link" ]]; then
     mode="link"
@@ -51,6 +61,11 @@ main() {
   (($# == 2)) || usage
   source="$1"
   destination="$2"
+
+  script_dir="${BASH_SOURCE[0]%/*}"
+  [[ "${script_dir}" != "${BASH_SOURCE[0]}" ]] || script_dir=.
+  script_dir="$(CDPATH= cd -P -- "${script_dir}" && pwd -P)"
+  "${script_dir}/preflight" install-manager
 
   [[ -f "${source}" && -x "${source}" ]] ||
     {

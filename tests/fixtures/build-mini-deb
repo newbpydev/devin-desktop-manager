@@ -3,20 +3,41 @@
 set -Eeuo pipefail
 umask 077
 
+while read -r _ _ function_name; do
+  unset -f "${function_name}" 2>/dev/null || true
+done < <(declare -F)
+
+((BASH_VERSINFO[0] > 4 ||
+  (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4))) || {
+  printf 'build-mini-deb: Bash 4.4 or newer is required\n' >&2
+  exit 1
+}
+
 main() {
   local output="${1:-}"
   local mode="${2:-safe}"
   local build="${3:-0d4bf12ed4a7597cb8ae9016fe8474468aad98a2}"
   local version="${4:-3.4.27}"
-  local work
+  local work script_dir
   local -a data_tar_options=()
   local control_tar_source="."
 
   [[ -n "${output}" ]] ||
     {
-      printf 'Usage: build-mini-deb OUTPUT [safe|unsafe-symlink]\n' >&2
+      printf 'Usage: build-mini-deb OUTPUT [safe|unsafe-symlink|unsafe-hardlink|control-no-dot] [BUILD] [VERSION]\n' >&2
       exit 2
     }
+  case "${mode}" in
+    safe|unsafe-symlink|unsafe-hardlink|control-no-dot) ;;
+    *)
+      printf 'Usage: build-mini-deb OUTPUT [safe|unsafe-symlink|unsafe-hardlink|control-no-dot] [BUILD] [VERSION]\n' >&2
+      exit 2
+      ;;
+  esac
+  script_dir="${BASH_SOURCE[0]%/*}"
+  [[ "${script_dir}" != "${BASH_SOURCE[0]}" ]] || script_dir=.
+  script_dir="$(CDPATH= cd -P -- "${script_dir}" && pwd -P)"
+  "${script_dir}/../../scripts/preflight" fixture-mini-deb
   work="$(mktemp -d)"
   # Expand the quoted temporary path while the local variable is still in scope.
   # shellcheck disable=SC2064
@@ -83,9 +104,6 @@ EOF
     data_tar_options+=(--transform='flags=h;s|.*|outside-target|')
   elif [[ "${mode}" == "control-no-dot" ]]; then
     control_tar_source="control"
-  elif [[ "${mode}" != "safe" ]]; then
-    printf 'Unknown fixture mode: %s\n' "${mode}" >&2
-    exit 2
   fi
 
   printf '2.0\n' >"${work}/debian-binary"

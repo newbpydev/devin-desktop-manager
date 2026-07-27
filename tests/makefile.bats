@@ -12,6 +12,10 @@ setup() {
   mkdir -p "${TEST_HOME}"
   cat >"${MOCK_MANAGER}" <<'EOF'
 #!/usr/bin/env bash
+if [[ "${1:-}" == internal-preflight ]]; then
+  printf 'DDM-PREFLIGHT\0%s\0%s\0' 1 0
+  exit 0
+fi
 printf '%s\n' "$*" >>"${CALL_LOG}"
 EOF
   chmod 0755 "${MOCK_MANAGER}"
@@ -30,6 +34,22 @@ make_fixture() {
     "${root}/bin/devin-desktop-manager"
   cp "${PROJECT_ROOT}/scripts/install-manager" \
     "${root}/scripts/install-manager"
+  if [[ -f "${PROJECT_ROOT}/scripts/preflight" ]]; then
+    cp "${PROJECT_ROOT}/scripts/preflight" "${root}/scripts/preflight"
+  fi
+}
+
+@test "[PMC-U3-R04] Make composites use one explicit ordered preflight" {
+  grep -Fq 'RUN_PREFLIGHT' "${PROJECT_ROOT}/Makefile"
+  grep -Eq '^install:' "${PROJECT_ROOT}/Makefile"
+  grep -Eq '^verify:' "${PROJECT_ROOT}/Makefile"
+  grep -Eq '^release-check:' "${PROJECT_ROOT}/Makefile"
+  run grep -Eq '^install:[[:space:]]+install-manager' "${PROJECT_ROOT}/Makefile"
+  [ "${status}" -ne 0 ]
+  run grep -Eq '^verify:[[:space:]]+lint[[:space:]]+test' "${PROJECT_ROOT}/Makefile"
+  [ "${status}" -ne 0 ]
+  run grep -Eq '^release-check:[[:space:]]+lint[[:space:]]+coverage' "${PROJECT_ROOT}/Makefile"
+  [ "${status}" -ne 0 ]
 }
 
 write_recorder() {
@@ -38,6 +58,10 @@ write_recorder() {
 
   cat >"${path}" <<EOF
 #!${HARNESS_BASH}
+if [[ "\${1:-}" == internal-preflight ]]; then
+  printf 'DDM-PREFLIGHT\\0%s\\0%s\\0' 1 0
+  exit 0
+fi
 printf '%s' '${identity}' >>"\${CALL_LOG}"
 printf ' <%s>' "\$@" >>"\${CALL_LOG}"
 printf '\n' >>"\${CALL_LOG}"
@@ -160,7 +184,17 @@ EOF
   write_recorder "${root}/bin/devin-desktop-manager" checkout
   write_recorder "${root}/scripts/install-manager" installer
   write_recorder "${app}" app
-  write_recorder "${bats_command}" bats
+  cat >"${bats_command}" <<EOF
+#!${HARNESS_BASH}
+if [[ "\${1:-}" == --version ]]; then
+  printf 'Bats 1.14.0\n'
+  exit 0
+fi
+printf '%s' bats >>"\${CALL_LOG}"
+printf ' <%s>' "\$@" >>"\${CALL_LOG}"
+printf '\n' >>"\${CALL_LOG}"
+EOF
+  chmod 0755 "${bats_command}"
 
   run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
     HOME="${home}" BASH="${HARNESS_BASH}" status
@@ -241,7 +275,7 @@ EOF
 @test "coverage target enforces the public repository threshold" {
   grep -Fq 'coverage:' "${PROJECT_ROOT}/Makefile"
   grep -Fq 'COVERAGE_MINIMUM ?= 90' "${PROJECT_ROOT}/Makefile"
-  grep -Fq 'release-check: lint coverage' "${PROJECT_ROOT}/Makefile"
+  grep -Fq '$(call RUN_PREFLIGHT,release-check)' "${PROJECT_ROOT}/Makefile"
   grep -Fq 'make coverage' "${PROJECT_ROOT}/CONTRIBUTING.md"
   grep -Fq 'minimum_coverage ENV.fetch("COVERAGE_MINIMUM", "90")' \
     "${PROJECT_ROOT}/.simplecov"
@@ -397,6 +431,7 @@ JSON
 
   mkdir -p "${repository}/scripts"
   cp "${PROJECT_ROOT}/scripts/package-release" "${repository}/scripts/package-release"
+  cp "${PROJECT_ROOT}/scripts/preflight" "${repository}/scripts/preflight"
   chmod 0755 "${repository}/scripts/package-release"
   printf 'tracked\n' >"${repository}/README.md"
   git -C "${repository}" init --quiet
