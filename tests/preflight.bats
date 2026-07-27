@@ -237,3 +237,12 @@ EOF
   run wait_for_ready "${BATS_TEST_TMPDIR}/never"
   [ "${status}" -eq 1 ]
 }
+
+@test "[PMC-U10-R04] output-lock is a root-scoped capability profile" {
+  run "${HARNESS_BASH}" "${PREFLIGHT}" output-lock
+  [ "${status}" -eq 2 ]
+  [[ "${output}" == *"--project-root"* ]]
+
+  run "${HARNESS_BASH}" "${PREFLIGHT}" output-lock --project-root "${PROJECT_ROOT}"
+  [ "${status}" -ne 2 ]
+}

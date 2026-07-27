@@ -1,5 +1,6 @@
 /dist/
 /coverage/
+/.devin-desktop-manager.outputs.lock
 /.bundle/
 /vendor/bundle/
 *.tmp

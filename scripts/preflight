@@ -39,6 +39,7 @@ readonly -A PROFILE_MEMBERS=(
   [lint]='lint-local'
   [verify]='lint test'
   [coverage]='coverage-local check-coverage'
+  [output-lock]='output-lock-local'
   [package]='package-local'
   [release-contract]='release-contract-local'
   [release-check]='lint coverage release-contract package'
@@ -276,6 +277,17 @@ check_feature_tool() {
       [[ "${PROBE_OUTPUT}" == *'GNU tar'* ]] ||
         add_incompatible_command "${key}" "${value}" "${purpose}"
       ;;
+    flock)
+      capture_probe "${key}" "${RESOLVED_TOOLS[${key}]}" --version || true
+      [[ "${PROBE_OUTPUT,,}" == *flock* ]] ||
+        add_incompatible_command "${key}" "${value}" "${purpose}"
+      ;;
+    stat)
+      capture_probe "${key}" "${RESOLVED_TOOLS[${key}]}" -Lc '%d:%i:%u:%F:%h' -- / || true
+      PROBE_OUTPUT="${PROBE_OUTPUT%%$'\n'*}"
+      [[ "${PROBE_OUTPUT}" =~ ^[0-9]+:[0-9]+:[0-9]+:directory:[0-9]+$ ]] ||
+        add_incompatible_command "${key}" "${value}" "${purpose}"
+      ;;
     *)
       capture_probe "${key}" "${RESOLVED_TOOLS[${key}]}" --version || true
       [[ -n "${PROBE_OUTPUT}" ]] || add_incompatible_command "${key}" "${value}" "${purpose}"
@@ -408,6 +420,10 @@ collect_local_profile() {
         'bashcov[[:space:]]+([0-9]+\.[0-9]+([.][0-9]+)?)' \
         'coverage requires Bashcov 3.3 or newer'
       collect_profile test
+      ;;
+    output-lock-local)
+      check_feature_tool flock flock 'checkout output locking requires util-linux flock' flock
+      check_feature_tool stat stat 'opened-inode and local-filesystem validation requires GNU stat' stat
       ;;
     package-local)
       check_plain_tools git sort gzip sha256sum mktemp rm chmod mkdir
