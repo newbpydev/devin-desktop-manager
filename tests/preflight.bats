@@ -30,7 +30,8 @@ make_sparse_bin() {
     [ "${status}" -ne 2 ]
   done
 
-  for profile in test lint verify package release-contract release-check manager-status; do
+  for profile in test lint verify package release-contract release-contract-official \
+    release-check release-check-official manager-status; do
     run "${HARNESS_BASH}" "${PREFLIGHT}" "${profile}"
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"--project-root"* ]]
@@ -38,8 +39,12 @@ make_sparse_bin() {
 
   grep -Fq 'preflight" install-manager' "${PROJECT_ROOT}/scripts/install-manager"
   grep -Fq 'preflight" check-coverage' "${PROJECT_ROOT}/scripts/check-coverage"
-  grep -Fq 'preflight" package' "${PROJECT_ROOT}/scripts/package-release"
-  grep -Fq 'preflight" release-contract' "${PROJECT_ROOT}/scripts/release-check"
+  grep -Fq "[package-run]='exact-git-root-local package-local package-output-local output-lock'" \
+    "${PROJECT_ROOT}/scripts/preflight"
+  grep -Fq "[release-contract]='exact-git-root-local release-contract-local'" \
+    "${PROJECT_ROOT}/scripts/preflight"
+  grep -Fq "[release-contract-official]='release-contract release-handoff-local'" \
+    "${PROJECT_ROOT}/scripts/preflight"
   grep -Fq 'preflight" fixture-mini-deb' "${FIXTURE_BUILDER}"
 }
 
@@ -252,4 +257,39 @@ EOF
   [[ "${output}" == *"--project-root"* ]]
 
   grep -Fq 'preflight" coverage-run' "${PROJECT_ROOT}/scripts/run-coverage"
+}
+
+@test "[PMC-U6-R01] package and release profiles reject roots without exact Git HEAD" {
+  local root="${BATS_TEST_TMPDIR}/extracted" profile
+  mkdir -p "${root}"
+
+  for profile in package release-contract release-check; do
+    run "${HARNESS_BASH}" "${PREFLIGHT}" "${profile}" --project-root "${root}"
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"exact Git root"*"HEAD"* ]]
+  done
+}
+
+@test "[PMC-U6-C01] release composite reuses package coverage and contract profiles" {
+  grep -Fq "[package]='package-run'" "${PREFLIGHT}"
+  grep -Fq "[release-check]='lint coverage package release-contract'" "${PREFLIGHT}"
+  grep -Fq "[release-check-official]='release-check release-contract-official'" "${PREFLIGHT}"
+  [ "$(grep -c '^    package-output-local)' "${PREFLIGHT}")" -eq 1 ]
+  [ "$(grep -c '^    release-contract-local)' "${PREFLIGHT}")" -eq 1 ]
+  [ "$(grep -c '^    release-handoff-local)' "${PREFLIGHT}")" -eq 1 ]
+}
+
+@test "[PMC-U6-R06] handoff-only tools are required only by tagged direct contracts" {
+  local sparse
+  sparse="$(make_sparse_bin bash git awk grep timeout env mkdir rm find sha256sum readlink stat)"
+
+  run env PATH="${sparse}" "${HARNESS_BASH}" "${PROJECT_ROOT}/scripts/release-check" \
+    --project-root "${PROJECT_ROOT}" 0.1.0
+  [ "${status}" -eq 0 ]
+
+  run env PATH="${sparse}" "${HARNESS_BASH}" "${PROJECT_ROOT}/scripts/release-check" \
+    --project-root "${PROJECT_ROOT}" --release-tag v0.1.0 0.1.0
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"command.tail"* ]]
+  [[ "${output}" != *"package handoff"* ]]
 }

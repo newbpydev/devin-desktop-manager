@@ -43,9 +43,12 @@ readonly -A PROFILE_MEMBERS=(
   [coverage]='coverage-run'
   [coverage-run]='coverage-local check-coverage output-lock coverage-output-local'
   [output-lock]='output-lock-local'
-  [package]='package-local'
-  [release-contract]='release-contract-local'
-  [release-check]='lint coverage release-contract package'
+  [package]='package-run'
+  [package-run]='exact-git-root-local package-local package-output-local output-lock'
+  [release-contract]='exact-git-root-local release-contract-local'
+  [release-contract-official]='release-contract release-handoff-local'
+  [release-check]='lint coverage package release-contract'
+  [release-check-official]='release-check release-contract-official'
   [install]='install-manager manager-update'
   [application]='application-local'
   [clean]='clean-local'
@@ -455,13 +458,41 @@ collect_local_profile() {
       check_feature_tool flock flock 'checkout output locking requires util-linux flock' flock
       check_feature_tool stat stat 'opened-inode and local-filesystem validation requires GNU stat' stat
       ;;
+    exact-git-root-local)
+      local head top physical
+      if resolve_executable git git 'package and release operations require Git'; then
+        head="$("${RESOLVED_TOOLS[git]}" -C "${PROJECT_ROOT}" rev-parse --verify HEAD^{commit} 2>/dev/null || true)"
+        top="$("${RESOLVED_TOOLS[git]}" -C "${PROJECT_ROOT}" rev-parse --show-toplevel 2>/dev/null || true)"
+        if [[ -n "${top}" ]]; then
+          physical="$(CDPATH= cd -P -- "${top}" 2>/dev/null && pwd -P)" || physical=
+        else
+          physical=
+        fi
+        [[ "${head}" =~ ^[0-9a-f]{40}$ && "${physical}" == "${PROJECT_ROOT}" ]] ||
+          add_finding blocker environment git.exact-root \
+            'package and release operations require the exact Git root with a valid HEAD' \
+            "selected root is not an exact Git root with HEAD: ${PROJECT_ROOT}" \
+            'Use a Git checkout at its top level, create a commit, and retry.'
+      fi
+      ;;
     package-local)
-      check_plain_tools git sort gzip sha256sum mktemp rm chmod mkdir
+      check_plain_tools git sort gzip sha256sum mktemp chmod mkdir
+      check_feature_tool readlink readlink 'package output path validation requires GNU readlink' readlink
       check_feature_tool tar tar 'packaging requires GNU tar deterministic options' gnu-tar
+      ;;
+    package-output-local)
+      check_plain_tools find tail rm rmdir
+      check_feature_tool mv mv 'package atomic replacement requires GNU mv' gnu-mv
+      check_feature_tool stat stat 'package candidate validation requires GNU stat' stat
       ;;
     release-contract-local)
       check_feature_tool awk awk 'release metadata parsing requires awk' awk
       check_plain_tools grep
+      ;;
+    release-handoff-local)
+      check_plain_tools find tail sha256sum
+      check_feature_tool readlink readlink 'release handoff path validation requires GNU readlink' readlink
+      check_feature_tool stat stat 'release handoff identity validation requires GNU stat' stat
       ;;
     manager-*-local)
       local command_name="${profile#manager-}"

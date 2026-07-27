@@ -32,7 +32,8 @@ setup() {
   grep -Eq '^verify:$' "${makefile}"
   grep -Eq '^release-check:$' "${makefile}"
   grep -Fq '$(call RUN_PREFLIGHT,verify)' "${makefile}"
-  grep -Fq '$(call RUN_PREFLIGHT,release-check)' "${makefile}"
+  grep -Fq '$(call RUN_PREFLIGHT,$$preflight_profile)' "${makefile}"
+  grep -Fq 'preflight_profile=release-check-official' "${makefile}"
   grep -Eq '^test:' "${makefile}"
   grep -Eq '^coverage:' "${makefile}"
   grep -Fq 'BASHCOV_COMMAND_NAME=bats-suite' "${PROJECT_ROOT}/scripts/run-coverage"
@@ -52,12 +53,14 @@ setup() {
 
   [ -x "${preflight}" ]
   for helper in scripts/install-manager scripts/check-coverage scripts/run-coverage \
-    scripts/package-release scripts/release-check tests/fixtures/build-mini-deb; do
+    tests/fixtures/build-mini-deb; do
     grep -Fq 'preflight"' "${PROJECT_ROOT}/${helper}"
   done
   grep -Fq 'readonly -A PROFILE_MEMBERS' "${preflight}"
   grep -Fq '[verify]=' "${preflight}"
   grep -Fq '[release-check]=' "${preflight}"
+  grep -Fq '[package-run]=' "${preflight}"
+  grep -Fq '[release-contract]=' "${preflight}"
 }
 
 @test "[PMC-U3-R05] repository policy treats hostile MAKEFILES as caller ingress" {
@@ -189,6 +192,20 @@ setup() {
   run grep -F 'minimum_coverage' "${PROJECT_ROOT}/.simplecov"
   [ "${status}" -ne 0 ]
   [ "$(grep -c -- '--.*tests' "${PROJECT_ROOT}/scripts/run-coverage")" -eq 1 ]
+}
+
+@test "[PMC-U6-C01] release route owns one coverage suite and one package handoff" {
+  local makefile="${PROJECT_ROOT}/Makefile" release_check="${PROJECT_ROOT}/scripts/release-check"
+  grep -Fq '$(call RUN_PREFLIGHT,$$preflight_profile)' "${makefile}"
+  grep -Fq 'preflight_profile=release-check-official' "${makefile}"
+  [ "$(grep -c '\$(DO_LOCKED_COVERAGE)' "${makefile}")" -eq 1 ]
+  [ "$(grep -c 'scripts/package-release' "${makefile}")" -eq 1 ]
+  grep -Fq -- '--project-root "$$PROJECT_ROOT"' "${makefile}"
+  grep -Fq -- '--release-tag' "${makefile}"
+  grep -Fq 'package handoff' "${release_check}"
+  run grep -F '$(DO_TEST)' "${makefile}"
+  [ "${status}" -eq 0 ]
+  [ "$(grep -c '\$(DO_TEST)' "${makefile}")" -eq 2 ]
 }
 
 @test "Dependabot checks pinned GitHub Actions weekly" {

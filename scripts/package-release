@@ -2,86 +2,267 @@
 
 set -Eeuo pipefail
 umask 077
+export LC_ALL=C TZ=UTC
 
 while read -r _ _ function_name; do
   unset -f "${function_name}" 2>/dev/null || true
 done < <(declare -F)
 
-((BASH_VERSINFO[0] > 4 ||
-  (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4))) || {
-  printf 'package-release: Bash 4.4 or newer is required\n' >&2
-  exit 1
-}
-
 usage() {
-  printf 'Usage: package-release VERSION OUTPUT_DIRECTORY\n' >&2
+  printf 'Usage: package-release [--project-root ROOT] [--release-mode TAG COMMIT] [--output-lock-fd 6] VERSION OUTPUT_DIRECTORY\n' >&2
   exit 2
 }
 
+fail() {
+  printf 'package-release: error: %s\n' "$1" >&2
+  exit 1
+}
+
+physical_root() {
+  local value="$1" physical
+  [[ "${value}" == /* && "${value}" != *[!\ -~]* && -d "${value}" && ! -L "${value}" ]] ||
+    fail 'project root must be an absolute physical directory'
+  physical="$(CDPATH= cd -P -- "${value}" 2>/dev/null && pwd -P)" ||
+    fail 'project root cannot be resolved physically'
+  [[ "${value%/}" == "${physical}" ]] ||
+    fail 'project root must not contain symbolic components'
+  printf '%s\n' "${physical}"
+}
+
+canonical_output() {
+  local root="$1" value="$2" candidate current component
+  [[ -n "${value}" && "${value}" != /* && "${value}" != *[!\ -~]* ]] ||
+    fail 'OUTPUT_DIRECTORY must be one printable project-relative path beneath the exact Git root'
+  case "/${value}/" in
+    */../*|*/./*|*//*) fail 'OUTPUT_DIRECTORY must canonicalize beneath the exact Git root' ;;
+  esac
+  current="${root}"
+  IFS=/ read -r -a components <<<"${value}"
+  for component in "${components[@]}"; do
+    current="${current}/${component}"
+    [[ ! -L "${current}" ]] || fail 'OUTPUT_DIRECTORY must not contain symbolic components'
+  done
+  candidate="$(readlink -m -- "${root}/${value}" 2>/dev/null)" ||
+    fail 'OUTPUT_DIRECTORY cannot be canonicalized'
+  [[ "${candidate}" == "${root}/"* ]] ||
+    fail 'OUTPUT_DIRECTORY must canonicalize beneath the exact Git root'
+  [[ ! -e "${candidate}" || (-d "${candidate}" && ! -L "${candidate}") ]] ||
+    fail 'OUTPUT_DIRECTORY must be a directory'
+  printf '%s\n' "${candidate}"
+}
+
+validate_git_root() {
+  local root="$1" top head
+  head="$(git -C "${root}" rev-parse --verify HEAD^{commit} 2>/dev/null)" ||
+    fail 'packaging requires an exact Git root with a valid HEAD'
+  top="$(git -C "${root}" rev-parse --show-toplevel 2>/dev/null)" ||
+    fail 'packaging requires an exact Git root with a valid HEAD'
+  top="$(CDPATH= cd -P -- "${top}" 2>/dev/null && pwd -P)" ||
+    fail 'Git top-level cannot be resolved physically'
+  [[ "${top}" == "${root}" ]] ||
+    fail 'packaging requires the selected project root to equal the exact Git root'
+  printf '%s\n' "${head}"
+}
+
+validate_lock() {
+  local root="$1" owner="${BASHPID}" lock descriptor lock_metadata
+  lock="${root}/.devin-desktop-manager.outputs.lock"
+  [[ -e "/proc/${owner}/fd/6" && -f "${lock}" && ! -L "${lock}" ]] || usage
+  descriptor="$(stat -Lc '%d:%i:%u:%F:%h' -- "/proc/${owner}/fd/6" 2>/dev/null)" || usage
+  lock_metadata="$(stat -Lc '%d:%i:%u:%F:%h' -- "${lock}" 2>/dev/null)" || usage
+  [[ "${descriptor}" == "${lock_metadata}" &&
+    "${lock_metadata}" == *":${UID}:regular"*" file:1" ]] || usage
+  if (exec 6>&-; flock -n "/proc/${owner}/fd/6" true) >/dev/null 2>&1; then
+    usage
+  fi
+  flock -n 6 >/dev/null 2>&1 || usage
+}
+
+validate_release_mode() {
+  local root="$1" version="$2" head="$3" tag="$4" workflow_commit="$5"
+  local tag_type peeled status
+  [[ "${tag}" == "v${version}" ]] || fail "release tag must be v${version}"
+  [[ "${workflow_commit}" =~ ^[0-9a-f]{40}$ && "${workflow_commit}" == "${head}" ]] ||
+    fail 'supplied workflow commit must identify HEAD'
+  status="$(git -C "${root}" status --porcelain --untracked-files=normal)" ||
+    fail 'cannot inspect the release working tree'
+  [[ -z "${status}" ]] || fail 'official packaging requires a clean index and working tree'
+  tag_type="$(git -C "${root}" cat-file -t "refs/tags/${tag}" 2>/dev/null || true)"
+  [[ "${tag_type}" == tag ]] || fail "official release requires annotated tag ${tag}"
+  peeled="$(git -C "${root}" rev-parse "refs/tags/${tag}^{commit}" 2>/dev/null || true)"
+  [[ "${peeled}" == "${workflow_commit}" ]] ||
+    fail 'annotated release tag does not identify the supplied workflow commit'
+}
+
+restore_backup_pair() {
+  local output="$1" backup="$2" archive_name="$3"
+  rm -f -- "${output}/${archive_name}" "${output}/SHA256SUMS" || return 1
+  mv -T -- "${backup}/${archive_name}" "${output}/${archive_name}" || return 1
+  mv -T -- "${backup}/SHA256SUMS" "${output}/SHA256SUMS" || return 1
+  rmdir -- "${backup}"
+}
+
 main() {
-  local version="${1:-}"
-  local output_directory="${2:-}"
-  local project_root archive_name archive_path file_list script_dir
+  local root_value= release_tag= workflow_commit= lock_fd=
+  local version output_value script_dir root head output archive_name output_device
+  local file_list= token stage= stage_archive stage_checksum backup archive_name_prior
+  local state prior=0 parent_created=0 attempt
 
+  while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+      --project-root)
+        [[ -z "${root_value}" && -n "${2:-}" ]] || usage
+        root_value="$2"
+        shift 2
+        ;;
+      --release-mode)
+        [[ -z "${release_tag}" && -n "${2:-}" && -n "${3:-}" ]] || usage
+        release_tag="$2"
+        workflow_commit="$3"
+        shift 3
+        ;;
+      --output-lock-fd)
+        [[ -z "${lock_fd}" && "${2:-}" == 6 ]] || usage
+        lock_fd=6
+        shift 2
+        ;;
+      *) usage ;;
+    esac
+  done
   (($# == 2)) || usage
-  [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] ||
-    {
-      printf 'package-release: invalid release version: %s\n' "${version}" >&2
-      exit 1
-    }
+  [[ "${lock_fd}" == 6 ]] || usage
+  version="$1"
+  output_value="$2"
+  [[ "${version}" =~ ^[0-9]+[.][0-9]+[.][0-9]+([.-][0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] ||
+    fail "invalid release version: ${version}"
 
-  script_dir="${BASH_SOURCE[0]%/*}"
-  [[ "${script_dir}" != "${BASH_SOURCE[0]}" ]] || script_dir=.
-  script_dir="$(CDPATH= cd -P -- "${script_dir}" && pwd -P)"
-  project_root="$(cd "${script_dir}/.." && pwd -P)"
-  "${script_dir}/preflight" package --project-root "${project_root}"
-  output_directory="$(mkdir -p "${output_directory}" && cd "${output_directory}" && pwd)"
+  script_dir="$(CDPATH= cd -P -- "${BASH_SOURCE[0]%/*}" 2>/dev/null && pwd -P)" || usage
+  if [[ -n "${root_value}" ]]; then
+    root="$(physical_root "${root_value}")"
+  else
+    root="$(CDPATH= cd -P -- "${script_dir}/.." 2>/dev/null && pwd -P)" || usage
+  fi
+  head="$(validate_git_root "${root}")"
+  output="$(canonical_output "${root}" "${output_value}")"
+  validate_lock "${root}"
+  [[ -z "${release_tag}" ]] ||
+    validate_release_mode "${root}" "${version}" "${head}" "${release_tag}" "${workflow_commit}"
+
+  if [[ ! -d "${output}" ]]; then
+    mkdir -m 0700 -p -- "${output}" || fail 'cannot create OUTPUT_DIRECTORY'
+    parent_created=1
+  fi
+  output_device="$(stat -Lc '%d' -- "${output}" 2>/dev/null)" || fail 'cannot inspect OUTPUT_DIRECTORY'
+  [[ "${output_device}" == "$(stat -Lc '%d' -- "${root}" 2>/dev/null)" ]] ||
+    fail 'OUTPUT_DIRECTORY and the project root must share one device'
+
+  # shellcheck source=scripts/lib/package-output.bash
+  source "${root}/scripts/lib/package-output.bash"
+  _package_classify "${output}" ||
+    fail "unsafe package output (${_PACKAGE_REASON}); prior pair and unknown siblings were preserved"
+  state="${_PACKAGE_STATE}"
+  case "${state}" in
+    repair-backup|repair-partial|discard-stage|public-valid-cleanup)
+      package_repair "${output}" "${state}" ||
+        fail 'package recovery changed concurrently; preserved recovery state requires inspection'
+      ;;
+  esac
+  _package_classify "${output}" ||
+    fail "unsafe package output (${_PACKAGE_REASON}); prior pair and unknown siblings were preserved"
+  [[ "${_PACKAGE_STATE}" == absent || "${_PACKAGE_STATE}" == public-valid ]] ||
+    fail 'package output is not ready for publication'
+  if [[ "${_PACKAGE_STATE}" == public-valid ]]; then
+    prior=1
+    archive_name_prior="${_PACKAGE_PUBLIC_ARCHIVE##*/}"
+  fi
+
   archive_name="devin-desktop-manager-${version}.tar.gz"
-  archive_path="${output_directory}/${archive_name}"
-  file_list="$(mktemp)"
-  # Expand the quoted temporary path while the local variable is still in scope.
-  # shellcheck disable=SC2064
-  trap "rm -f -- $(printf '%q' "${file_list}")" EXIT
+  file_list="$(mktemp "${TMPDIR:-/tmp}/devin-desktop-manager.package-files.XXXXXX")" ||
+    fail 'cannot create tracked file list'
+  cleanup() {
+    rm -f -- "${file_list:-}" 2>/dev/null || true
+    [[ -z "${stage:-}" || ! -e "${stage}" ]] || rm -rf -- "${stage}" 2>/dev/null || true
+    ((parent_created == 0)) || rmdir --ignore-fail-on-non-empty -- "${output}" 2>/dev/null || true
+  }
+  trap cleanup EXIT
+  (cd "${root}" && git ls-files --cached -z | LC_ALL=C sort -z >"${file_list}") ||
+    fail 'cannot enumerate tracked package files'
+  [[ -s "${file_list}" ]] || fail 'no repository files found'
 
-  (
-    cd "${project_root}"
-    if git rev-parse --verify HEAD >/dev/null 2>&1; then
-      git ls-files --cached -z
-    else
-      git ls-files --cached --others --exclude-standard -z
-    fi | LC_ALL=C sort -z >"${file_list}"
-  )
-  [[ -s "${file_list}" ]] ||
-    {
-      printf 'package-release: no repository files found\n' >&2
-      exit 1
-    }
+  for attempt in {0..15}; do
+    printf -v token '%06x' "$(((($$ << 4) + attempt) & 0xffffff))"
+    stage="${output}/.devin-desktop-manager.package.stage.$$.${token}"
+    if mkdir -m 0700 -- "${stage}" 2>/dev/null; then break; fi
+    stage=
+  done
+  [[ -n "${stage}" ]] || fail 'cannot create exclusive package stage'
+  [[ "$(stat -Lc '%d' -- "${stage}" 2>/dev/null)" == "${output_device}" ]] ||
+    fail 'package stage is on the wrong device'
+  stage_archive="${stage}/${archive_name}"
+  stage_checksum="${stage}/SHA256SUMS"
 
-  rm -f -- "${archive_path}" "${output_directory}/SHA256SUMS"
-  (
-    cd "${project_root}"
-    tar --null --files-from="${file_list}" \
-      --sort=name \
-      --mtime='@0' \
-      --owner=0 \
-      --group=0 \
-      --numeric-owner \
-      --mode='u+rwX,go+rX,go-w' \
-      --transform="s,^,devin-desktop-manager-${version}/," \
-      --format=posix \
-      --pax-option=delete=atime,delete=ctime \
-      -cf -
-  ) | gzip -n -9 >"${archive_path}"
-  chmod 0644 "${archive_path}"
+  if ! (cd "${root}" && tar --null --files-from="${file_list}" --sort=name --mtime='@0' \
+    --owner=0 --group=0 --numeric-owner --mode='u+rwX,go+rX,go-w' \
+    --transform="s,^,devin-desktop-manager-${version}/," --format=posix \
+    --pax-option=delete=atime,delete=ctime -cf - | gzip -n -9 >"${stage_archive}"); then
+    fail 'archive generation failed; prior pair and unknown siblings were preserved'
+  fi
+  chmod 0644 -- "${stage_archive}" || fail 'cannot finalize staged archive'
+  (cd "${stage}" && sha256sum -- "${archive_name}" >SHA256SUMS) ||
+    fail 'checksum generation failed; prior pair and unknown siblings were preserved'
+  chmod 0644 -- "${stage_checksum}" || fail 'cannot finalize staged checksum'
+  _package_validate_sidecar "${stage}" "${output_device}" ||
+    fail "generated package pair is invalid (${_PACKAGE_REASON}); prior pair was preserved"
 
-  (
-    cd "${output_directory}"
-    sha256sum "${archive_name}" >SHA256SUMS
-    chmod 0644 SHA256SUMS
-  )
+  backup="${output}/.devin-desktop-manager.package.backup"
+  if ((prior)); then
+    mkdir -m 0700 -- "${backup}" || fail 'cannot create package backup'
+    if ! mv -T -- "${output}/${archive_name_prior}" "${backup}/${archive_name_prior}"; then
+      rmdir -- "${backup}" 2>/dev/null || true
+      fail 'cannot preserve prior archive; prior pair was unchanged'
+    fi
+    if ! mv -T -- "${output}/SHA256SUMS" "${backup}/SHA256SUMS"; then
+      mv -T -- "${backup}/${archive_name_prior}" "${output}/${archive_name_prior}" ||
+        fail 'cannot preserve prior checksum; explicit recovery state remains'
+      rmdir -- "${backup}" 2>/dev/null || true
+      fail 'cannot preserve prior checksum; prior pair was restored'
+    fi
+  fi
 
-  printf 'Created %s\n' "${archive_path}"
-  printf 'Created %s\n' "${output_directory}/SHA256SUMS"
+  if ! mv -T -- "${stage_archive}" "${output}/${archive_name}"; then
+    if ((prior)); then
+      package_repair "${output}" repair-backup ||
+        fail 'archive publication failed; explicit recovery state remains'
+      stage=
+    fi
+    fail 'archive publication failed; prior pair was preserved'
+  fi
+  if ! mv -T -- "${stage_checksum}" "${output}/SHA256SUMS"; then
+    rm -f -- "${output}/${archive_name}" ||
+      fail 'checksum publication failed; explicit recovery state remains'
+    if ((prior)); then
+      restore_backup_pair "${output}" "${backup}" "${archive_name_prior}" ||
+        fail 'checksum publication failed; explicit recovery state remains'
+    fi
+    rm -rf -- "${stage}" || true
+    stage=
+    fail 'checksum publication failed; prior pair was preserved'
+  fi
+  rmdir -- "${stage}" || fail 'published package stage did not become empty'
+  stage=
+
+  _package_classify "${output}" ||
+    fail "published package pair is invalid (${_PACKAGE_REASON}); explicit recovery state remains"
+  [[ "${_PACKAGE_STATE}" == public-valid || "${_PACKAGE_STATE}" == public-valid-cleanup ]] ||
+    fail 'published package pair did not reach a valid state'
+  if [[ -d "${backup}" ]]; then
+    rm -rf -- "${backup}" ||
+      printf 'package-release: warning: package published; stale backup cleanup will retry\n' >&2
+  fi
+  rm -f -- "${file_list}"
+  file_list=
+  trap - EXIT
+  printf 'Created %s\nCreated %s\n' "${output}/${archive_name}" "${output}/SHA256SUMS"
 }
 
 main "$@"

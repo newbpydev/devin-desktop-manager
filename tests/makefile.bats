@@ -22,7 +22,7 @@ printf '%s\n' "$*" >>"${CALL_LOG}"
 EOF
   chmod 0755 "${MOCK_MANAGER}"
 
-  resolve_harness_tools bash env make mv rm sleep timeout true
+  resolve_harness_tools bash cmp env flock git make mv rm sleep tar timeout true
   MAKE_COMMAND="${HARNESS_TOOLS[make]}"
   HARNESS_BASH="${HARNESS_TOOLS[bash]}"
   TRUE_COMMAND="${HARNESS_TOOLS[true]}"
@@ -46,6 +46,31 @@ make_fixture() {
       "${PROJECT_ROOT}/scripts/check-coverage" "${root}/scripts/"
     cp "${PROJECT_ROOT}/scripts/lib/coverage-output.bash" "${root}/scripts/lib/"
   fi
+}
+
+make_package_fixture() {
+  local root="$1"
+  mkdir -p "${root}/bin" "${root}/scripts/lib"
+  cp "${PROJECT_ROOT}/Makefile" "${root}/Makefile"
+  cp "${PROJECT_ROOT}/bin/devin-desktop-manager" "${root}/bin/"
+  cp "${PROJECT_ROOT}/scripts/package-release" "${PROJECT_ROOT}/scripts/preflight" \
+    "${PROJECT_ROOT}/scripts/output-lock" "${root}/scripts/"
+  cp "${PROJECT_ROOT}/scripts/lib/package-output.bash" "${root}/scripts/lib/"
+  printf '/dist*/\n/.devin-desktop-manager.outputs.lock\n' >"${root}/.gitignore"
+  printf 'tracked\n' >"${root}/README.md"
+  git -C "${root}" init --quiet
+  git -C "${root}" add .
+  git -C "${root}" -c user.name=Test -c user.email=test@example.invalid \
+    commit --quiet -m fixture
+}
+
+run_locked_package_fixture() {
+  local root="$1" lock="${1}/.devin-desktop-manager.outputs.lock"
+  shift
+  : >"${lock}"
+  run "${HARNESS_BASH}" -c 'exec 6<>"$1"; flock -n 6; shift; exec "$@"' \
+    _ "${lock}" "${root}/scripts/package-release" --project-root "${root}" \
+    --output-lock-fd 6 "$@"
 }
 
 @test "[PMC-U3-R04] Make composites use one explicit ordered preflight" {
@@ -672,13 +697,14 @@ EOF
   [ "${status}" -eq 0 ]
 }
 
-@test "package output is byte-for-byte deterministic" {
-  local first="${BATS_TEST_TMPDIR}/first"
-  local second="${BATS_TEST_TMPDIR}/second"
+@test "[PMC-U6-C01] package output is byte-for-byte deterministic" {
+  local repository="${BATS_TEST_TMPDIR}/repository"
+  local first="${repository}/first" second="${repository}/second"
+  make_package_fixture "${repository}"
 
-  run "${PROJECT_ROOT}/scripts/package-release" 0.1.0 "${first}"
+  run_locked_package_fixture "${repository}" 0.1.0 first
   [ "${status}" -eq 0 ]
-  run "${PROJECT_ROOT}/scripts/package-release" 0.1.0 "${second}"
+  run_locked_package_fixture "${repository}" 0.1.0 second
   [ "${status}" -eq 0 ]
 
   cmp "${first}/devin-desktop-manager-0.1.0.tar.gz" \
@@ -690,13 +716,15 @@ EOF
     "${BATS_TEST_TMPDIR}/archive-contents"
 }
 
-@test "package excludes untracked files once the repository has a commit" {
+@test "[PMC-U6-C01] package uses tracked working-tree bytes and excludes untracked files" {
   local repository="${BATS_TEST_TMPDIR}/repository"
-  local dist_dir="${BATS_TEST_TMPDIR}/dist"
+  local dist_dir="${repository}/dist"
 
-  mkdir -p "${repository}/scripts"
+  mkdir -p "${repository}/scripts/lib"
   cp "${PROJECT_ROOT}/scripts/package-release" "${repository}/scripts/package-release"
   cp "${PROJECT_ROOT}/scripts/preflight" "${repository}/scripts/preflight"
+  cp "${PROJECT_ROOT}/scripts/output-lock" "${repository}/scripts/output-lock"
+  cp "${PROJECT_ROOT}/scripts/lib/package-output.bash" "${repository}/scripts/lib/package-output.bash"
   chmod 0755 "${repository}/scripts/package-release"
   printf 'tracked\n' >"${repository}/README.md"
   git -C "${repository}" init --quiet
@@ -706,17 +734,25 @@ EOF
     -c user.email='test@example.invalid' \
     commit --quiet -m 'test fixture'
   printf 'must not ship\n' >"${repository}/untracked-secret.txt"
+  printf 'dirty tracked\n' >"${repository}/README.md"
 
-  run "${repository}/scripts/package-release" 0.1.0 "${dist_dir}"
+  : >"${repository}/.devin-desktop-manager.outputs.lock"
+  run "${HARNESS_BASH}" -c 'exec 6<>"$1"; flock -n 6; "$2" --project-root "$3" --output-lock-fd 6 0.1.0 dist' \
+    _ "${repository}/.devin-desktop-manager.outputs.lock" \
+    "${repository}/scripts/package-release" "${repository}"
 
   [ "${status}" -eq 0 ]
   run tar -tzf "${dist_dir}/devin-desktop-manager-0.1.0.tar.gz"
   [ "${status}" -eq 0 ]
   [[ "${output}" == *"devin-desktop-manager-0.1.0/README.md"* ]]
   [[ "${output}" != *"untracked-secret.txt"* ]]
+  run tar -xOzf "${dist_dir}/devin-desktop-manager-0.1.0.tar.gz" \
+    devin-desktop-manager-0.1.0/README.md
+  [ "${status}" -eq 0 ]
+  [ "${output}" = "dirty tracked" ]
 }
 
-@test "package-release rejects usage version and empty repository errors" {
+@test "[PMC-U6-R01] package-release rejects usage version and empty repository errors" {
   local packager="${PROJECT_ROOT}/scripts/package-release"
   local repository="${BATS_TEST_TMPDIR}/empty-repository"
   local dist_dir="${BATS_TEST_TMPDIR}/empty-dist"
@@ -725,16 +761,123 @@ EOF
   [ "${status}" -eq 2 ]
   [[ "${output}" == *"Usage: package-release"* ]]
 
-  run "${packager}" latest "${dist_dir}"
+  run "${packager}" --output-lock-fd 6 latest dist
   [ "${status}" -ne 0 ]
   [[ "${output}" == *"invalid release version"* ]]
 
-  mkdir -p "${repository}/scripts"
+  mkdir -p "${repository}/scripts/lib"
   cp "${packager}" "${repository}/scripts/package-release"
+  cp "${PROJECT_ROOT}/scripts/preflight" "${repository}/scripts/preflight"
+  cp "${PROJECT_ROOT}/scripts/output-lock" "${repository}/scripts/output-lock"
+  cp "${PROJECT_ROOT}/scripts/lib/package-output.bash" "${repository}/scripts/lib/package-output.bash"
   git -C "${repository}" init --quiet
   git -C "${repository}" -c user.name=Test -c user.email=test@example.invalid \
     commit --quiet --allow-empty -m empty
-  run "${repository}/scripts/package-release" 0.1.0 "${dist_dir}"
+  run_locked_package_fixture "${repository}" 0.1.0 dist
   [ "${status}" -ne 0 ]
   [[ "${output}" == *"no repository files found"* ]]
+}
+
+@test "[PMC-U6-R01] package requires its exact Git root and contained output before mutation" {
+  local repository="${BATS_TEST_TMPDIR}/repository" extracted="${BATS_TEST_TMPDIR}/extracted"
+  local outside="${BATS_TEST_TMPDIR}/outside" nested="${BATS_TEST_TMPDIR}/parent/child"
+
+  mkdir -p "${repository}/scripts/lib" "${extracted}/scripts/lib" "${nested}/scripts/lib"
+  for root in "${repository}" "${extracted}" "${nested}"; do
+    cp "${PROJECT_ROOT}/scripts/package-release" "${root}/scripts/package-release"
+    cp "${PROJECT_ROOT}/scripts/preflight" "${root}/scripts/preflight"
+    cp "${PROJECT_ROOT}/scripts/output-lock" "${root}/scripts/output-lock"
+    [[ ! -f "${PROJECT_ROOT}/scripts/lib/package-output.bash" ]] || \
+      cp "${PROJECT_ROOT}/scripts/lib/package-output.bash" "${root}/scripts/lib/"
+    printf 'tracked\n' >"${root}/README.md"
+  done
+  git -C "${repository}" init --quiet
+  git -C "${repository}" add .
+  git -C "${repository}" -c user.name=Test -c user.email=test@example.invalid \
+    commit --quiet -m fixture
+
+  : >"${repository}/.devin-desktop-manager.outputs.lock"
+  run "${HARNESS_BASH}" -c 'exec 6<>"$1"; flock -n 6; "$2" --project-root "$3" --output-lock-fd 6 0.1.0 dist' \
+    _ "${repository}/.devin-desktop-manager.outputs.lock" \
+    "${repository}/scripts/package-release" "${repository}"
+  [ "${status}" -eq 0 ]
+  [ -f "${repository}/dist/SHA256SUMS" ]
+
+  : >"${extracted}/.devin-desktop-manager.outputs.lock"
+  run "${HARNESS_BASH}" -c 'exec 6<>"$1"; flock -n 6; "$2" --project-root "$3" --output-lock-fd 6 0.1.0 dist' \
+    _ "${extracted}/.devin-desktop-manager.outputs.lock" \
+    "${extracted}/scripts/package-release" "${extracted}"
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"exact Git root"* ]]
+  [ ! -e "${extracted}/dist" ]
+
+  git -C "${BATS_TEST_TMPDIR}/parent" init --quiet
+  : >"${nested}/.devin-desktop-manager.outputs.lock"
+  run "${HARNESS_BASH}" -c 'exec 6<>"$1"; flock -n 6; "$2" --project-root "$3" --output-lock-fd 6 0.1.0 dist' \
+    _ "${nested}/.devin-desktop-manager.outputs.lock" \
+    "${nested}/scripts/package-release" "${nested}"
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"exact Git root"* ]]
+  [ ! -e "${nested}/dist" ]
+
+  run_locked_package_fixture "${repository}" 0.1.0 "${outside}"
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"OUTPUT_DIRECTORY"* ]]
+  [[ "${output}" == *"project-relative"* ]]
+  [ ! -e "${outside}" ]
+}
+
+@test "[PMC-U6-R05] release-check runs one union preflight lint coverage contract and package" {
+  local root="${BATS_TEST_TMPDIR}/release-routing" log="${BATS_TEST_TMPDIR}/release-routing.log"
+  local shim_bin="${BATS_TEST_TMPDIR}/release-bin"
+  mkdir -p "${root}/bin" "${root}/scripts" "${shim_bin}"
+  cp "${PROJECT_ROOT}/Makefile" "${root}/Makefile"
+  cat >"${root}/bin/devin-desktop-manager" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  cat >"${root}/scripts/preflight" <<EOF
+#!/usr/bin/env bash
+printf 'preflight <%s>\n' "\$*" >>$(printf '%q' "${log}")
+EOF
+  cat >"${root}/scripts/output-lock" <<EOF
+#!/usr/bin/env bash
+printf 'output-lock <%s>\n' "\$*" >>$(printf '%q' "${log}")
+root=\$1; shift 2; helper=\$1; shift
+exec "\$helper" --output-lock-fd 6 "\$@"
+EOF
+  cat >"${root}/scripts/run-coverage" <<EOF
+#!/usr/bin/env bash
+printf 'coverage <%s>\n' "\$*" >>$(printf '%q' "${log}")
+EOF
+  cat >"${root}/scripts/release-check" <<EOF
+#!/usr/bin/env bash
+printf 'contract <%s>\n' "\$*" >>$(printf '%q' "${log}")
+EOF
+  cat >"${root}/scripts/package-release" <<EOF
+#!/usr/bin/env bash
+printf 'package <%s>\n' "\$*" >>$(printf '%q' "${log}")
+EOF
+  cat >"${shim_bin}/shellcheck" <<EOF
+#!/usr/bin/env bash
+[[ "\${1:-}" != --version ]] || { printf 'ShellCheck - shell script analysis tool\nversion: 0.10.0\n'; exit 0; }
+printf 'lint\n' >>$(printf '%q' "${log}")
+EOF
+  chmod 0755 "${root}/bin/devin-desktop-manager" "${root}/scripts/"* \
+    "${shim_bin}/shellcheck"
+
+  run env PATH="${shim_bin}:${PATH}" "${MAKE_COMMAND}" --no-print-directory -s \
+    -C "${root}" BASH="${HARNESS_BASH}" SHELLCHECK="${shim_bin}/shellcheck" \
+    DIST_DIR=dist release-check
+  [ "${status}" -eq 0 ]
+  [ "$(grep -c '^preflight <release-check --project-root ' "${log}")" -eq 1 ]
+  [ "$(grep -c '^lint$' "${log}")" -eq 1 ]
+  [ "$(grep -c '^coverage ' "${log}")" -eq 1 ]
+  [ "$(grep -c '^contract ' "${log}")" -eq 1 ]
+  [ "$(grep -c '^package ' "${log}")" -eq 1 ]
+  grep -Fq "coverage <--output-lock-fd 6 --project-root ${root}>" "${log}"
+  grep -Fq "contract <--project-root ${root} 0.1.0>" "${log}"
+  grep -Fq "package <--output-lock-fd 6 --project-root ${root} 0.1.0 dist>" "${log}"
+  run grep -F 'tests' "${log}"
+  [ "${status}" -eq 1 ]
 }

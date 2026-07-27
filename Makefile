@@ -209,6 +209,17 @@ define DO_COVERAGE
 run_script "$$PROJECT_ROOT/scripts/run-coverage" --project-root "$$PROJECT_ROOT"
 endef
 
+define DO_LOCKED_COVERAGE
+run_script "$$PROJECT_ROOT/scripts/output-lock" "$$PROJECT_ROOT" -- \
+	"$$PROJECT_ROOT/scripts/run-coverage" --project-root "$$PROJECT_ROOT"
+endef
+
+define DO_LOCKED_PACKAGE
+run_script "$$PROJECT_ROOT/scripts/output-lock" "$$PROJECT_ROOT" -- \
+	"$$PROJECT_ROOT/scripts/package-release" --project-root "$$PROJECT_ROOT" \
+	$(1) "$(VERSION)" "$$MAKE_DIST_DIR"
+endef
+
 help:
 	@printf '%s\n' \
 		'Devin Desktop Manager $(VERSION)' \
@@ -321,15 +332,30 @@ verify:
 package:
 	@$(PREPARE_SCRIPT_RUNNER); \
 	$(call RUN_PREFLIGHT,package); \
-	run_script "$$PROJECT_ROOT/scripts/package-release" "$(VERSION)" "$$MAKE_DIST_DIR"
+	$(call DO_LOCKED_PACKAGE,)
 
 release-check:
 	@$(PREPARE_SCRIPT_RUNNER); \
-	$(call RUN_PREFLIGHT,release-check); \
+	release_tag=$${RELEASE_TAG:-}; \
+	if [ -z "$$release_tag" ] && [ "$${GITHUB_REF_TYPE:-}" = tag ]; then \
+		release_tag=$${GITHUB_REF_NAME:-}; \
+	fi; \
+	preflight_profile=release-check; \
+	if [ -n "$$release_tag" ]; then preflight_profile=release-check-official; fi; \
+	$(call RUN_PREFLIGHT,$$preflight_profile); \
 	$(DO_LINT); \
-	$(DO_COVERAGE); \
-	run_script "$$PROJECT_ROOT/scripts/release-check" "$(VERSION)"; \
-	run_script "$$PROJECT_ROOT/scripts/package-release" "$(VERSION)" "$$MAKE_DIST_DIR"
+	$(DO_LOCKED_COVERAGE); \
+	run_script "$$PROJECT_ROOT/scripts/release-check" \
+		--project-root "$$PROJECT_ROOT" "$(VERSION)"; \
+	if [ -n "$$release_tag" ]; then \
+		workflow_commit=$${GITHUB_SHA:-$$(git -C "$$PROJECT_ROOT" rev-parse HEAD)}; \
+		$(call DO_LOCKED_PACKAGE,--release-mode "$$release_tag" "$$workflow_commit"); \
+		run_script "$$PROJECT_ROOT/scripts/release-check" \
+			--project-root "$$PROJECT_ROOT" --release-tag "$$release_tag" "$(VERSION)" \
+			>/dev/null; \
+	else \
+		$(call DO_LOCKED_PACKAGE,); \
+	fi
 
 uninstall:
 	@$(PREPARE_SCRIPT_RUNNER); \
