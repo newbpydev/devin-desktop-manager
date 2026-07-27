@@ -40,7 +40,8 @@ readonly -A PROFILE_MEMBERS=(
   [test]='test-local fixture-mini-deb'
   [lint]='lint-local'
   [verify]='lint test'
-  [coverage]='coverage-local check-coverage'
+  [coverage]='coverage-run'
+  [coverage-run]='coverage-local check-coverage output-lock coverage-output-local'
   [output-lock]='output-lock-local'
   [package]='package-local'
   [release-contract]='release-contract-local'
@@ -407,6 +408,7 @@ collect_local_profile() {
       check_feature_tool stat stat 'manager lock descriptor validation requires GNU stat' stat
       ;;
     check-coverage-local)
+      check_plain_tools date
       check_feature_tool jq jq 'jq array and object evaluation is required' jq
       check_feature_tool awk awk 'awk numeric comparison is required' awk
       ;;
@@ -425,10 +427,29 @@ collect_local_profile() {
         'lint requires ShellCheck 0.7 or newer'
       ;;
     coverage-local)
+      local PROBE_OUTPUT="" bundler_version=""
+      check_versioned_tool ruby ruby 3.2 \
+        'ruby[[:space:]]+([0-9]+\.[0-9]+([.][0-9]+)?)' \
+        'coverage requires Ruby 3.2 or newer'
+      if resolve_executable bundler bundle 'coverage requires Bundler 2.4.20'; then
+        capture_probe bundler "${RESOLVED_TOOLS[bundler]}" --version || true
+        if [[ "${PROBE_OUTPUT}" =~ Bundler[[:space:]]+version[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+          bundler_version="${BASH_REMATCH[1]}"
+        fi
+        [[ "${bundler_version}" == 2.4.20 ]] ||
+          add_incompatible_command bundler "${PROBE_OUTPUT:-no version output}" \
+            'coverage requires Bundler 2.4.20'
+      fi
       check_versioned_tool bashcov "${PREFLIGHT_BASHCOV:-bashcov}" 3.3 \
         'bashcov[[:space:]]+([0-9]+\.[0-9]+([.][0-9]+)?)' \
         'coverage requires Bashcov 3.3 or newer'
       collect_profile test
+      ;;
+    coverage-output-local)
+      check_plain_tools date find mkdir rm sort
+      check_feature_tool readlink readlink 'coverage path validation requires GNU readlink' readlink
+      check_feature_tool mv mv 'coverage atomic replacement requires GNU mv' gnu-mv
+      check_feature_tool stat stat 'coverage file identity validation requires GNU stat' stat
       ;;
     output-lock-local)
       check_feature_tool flock flock 'checkout output locking requires util-linux flock' flock

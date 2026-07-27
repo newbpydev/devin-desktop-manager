@@ -32,7 +32,7 @@ EOF
 make_fixture() {
   local root="$1"
 
-  mkdir -p "${root}/bin" "${root}/scripts"
+  mkdir -p "${root}/bin" "${root}/scripts/lib"
   cp "${PROJECT_ROOT}/Makefile" "${root}/Makefile"
   cp "${PROJECT_ROOT}/bin/devin-desktop-manager" \
     "${root}/bin/devin-desktop-manager"
@@ -40,6 +40,11 @@ make_fixture() {
     "${root}/scripts/install-manager"
   if [[ -f "${PROJECT_ROOT}/scripts/preflight" ]]; then
     cp "${PROJECT_ROOT}/scripts/preflight" "${root}/scripts/preflight"
+  fi
+  if [[ -f "${PROJECT_ROOT}/scripts/run-coverage" ]]; then
+    cp "${PROJECT_ROOT}/scripts/run-coverage" "${PROJECT_ROOT}/scripts/output-lock" \
+      "${PROJECT_ROOT}/scripts/check-coverage" "${root}/scripts/"
+    cp "${PROJECT_ROOT}/scripts/lib/coverage-output.bash" "${root}/scripts/lib/"
   fi
 }
 
@@ -261,6 +266,7 @@ EOF
   [ -x "${PROJECT_ROOT}/bin/devin-desktop-manager" ]
   [ -x "${PROJECT_ROOT}/scripts/install-manager" ]
   [ -x "${PROJECT_ROOT}/scripts/check-coverage" ]
+  [ -x "${PROJECT_ROOT}/scripts/run-coverage" ]
   [ -x "${PROJECT_ROOT}/scripts/package-release" ]
   [ -x "${PROJECT_ROOT}/scripts/release-check" ]
 }
@@ -278,18 +284,22 @@ EOF
   [[ "${output}" == *"release-check"* ]]
 }
 
-@test "coverage target enforces the public repository threshold" {
+@test "[PMC-U5-C01] coverage target enforces the public repository threshold" {
   grep -Fq 'coverage:' "${PROJECT_ROOT}/Makefile"
   grep -Fq 'COVERAGE_MINIMUM ?= 90' "${PROJECT_ROOT}/Makefile"
   grep -Fq '$(call RUN_PREFLIGHT,release-check)' "${PROJECT_ROOT}/Makefile"
   grep -Fq 'make coverage' "${PROJECT_ROOT}/CONTRIBUTING.md"
-  grep -Fq 'minimum_coverage ENV.fetch("COVERAGE_MINIMUM", "90")' \
-    "${PROJECT_ROOT}/.simplecov"
+  run grep -F 'minimum_coverage' "${PROJECT_ROOT}/.simplecov"
+  [ "${status}" -ne 0 ]
+  grep -Fq 'scripts/run-coverage' "${PROJECT_ROOT}/Makefile"
 }
 
-@test "coverage target rejects a stale result when the runner produces nothing" {
-  local coverage_dir="${BATS_TEST_TMPDIR}/coverage"
+@test "[PMC-U5-C01] coverage target rejects a stale result when the runner produces nothing" {
+  local root="${BATS_TEST_TMPDIR}/checkout" coverage_dir="${BATS_TEST_TMPDIR}/checkout/coverage"
+  local bashcov="${BATS_TEST_TMPDIR}/bashcov-no-output"
+  local bats="${BATS_TEST_TMPDIR}/bats-ok"
 
+  make_fixture "${root}"
   mkdir -p "${coverage_dir}"
   cat >"${coverage_dir}/.resultset.json" <<'JSON'
 {
@@ -300,13 +310,32 @@ EOF
   }
 }
 JSON
+  cat >"${bashcov}" <<EOF
+#!${HARNESS_BASH}
+if [[ "\${1:-}" == --version ]]; then printf 'bashcov 3.3.0\n'; fi
+EOF
+  chmod 0755 "${bashcov}"
+  cat >"${bats}" <<EOF
+#!${HARNESS_BASH}
+if [[ "\${1:-}" == --version ]]; then printf 'Bats 1.14.0\n'; fi
+EOF
+  chmod 0755 "${bats}"
+  cat >"${BATS_TEST_TMPDIR}/bundle" <<EOF
+#!${HARNESS_BASH}
+printf 'Bundler version 2.4.20\n'
+EOF
+  cat >"${BATS_TEST_TMPDIR}/ruby" <<EOF
+#!${HARNESS_BASH}
+printf 'ruby 3.2.0\n'
+EOF
+  chmod 0755 "${BATS_TEST_TMPDIR}/bundle" "${BATS_TEST_TMPDIR}/ruby"
 
-  run "${MAKE_COMMAND}" --no-print-directory -s -C "${PROJECT_ROOT}" \
-    BASHCOV="${TRUE_COMMAND}" COVERAGE_DIR="${coverage_dir}" \
+  run env PATH="${BATS_TEST_TMPDIR}:${PATH}" "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
+    BASH="${HARNESS_BASH}" BATS="${bats}" BASHCOV="${bashcov}" COVERAGE_DIR=coverage \
     COVERAGE_MINIMUM=100 coverage
 
   [ "${status}" -ne 0 ]
-  [[ "${output}" == *"result set is missing"* ]]
+  [[ "${output}" == *"result set is missing"* || "${output}" == *"coverage validation failed"* ]]
 }
 
 @test "lifecycle targets forward exactly one command to the manager" {

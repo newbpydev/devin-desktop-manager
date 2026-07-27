@@ -245,3 +245,11 @@ EOF
   run "${HARNESS_BASH}" "${PREFLIGHT}" output-lock --project-root "${PROJECT_ROOT}"
   [ "${status}" -ne 2 ]
 }
+
+@test "[PMC-U5-R06] coverage runner owns a root-scoped local profile" {
+  run "${HARNESS_BASH}" "${PREFLIGHT}" coverage-run
+  [ "${status}" -eq 2 ]
+  [[ "${output}" == *"--project-root"* ]]
+
+  grep -Fq 'preflight" coverage-run' "${PROJECT_ROOT}/scripts/run-coverage"
+}

@@ -35,7 +35,7 @@ setup() {
   grep -Fq '$(call RUN_PREFLIGHT,release-check)' "${makefile}"
   grep -Eq '^test:' "${makefile}"
   grep -Eq '^coverage:' "${makefile}"
-  grep -Fq 'COVERAGE_COMMAND_NAME=bats-suite' "${makefile}"
+  grep -Fq 'BASHCOV_COMMAND_NAME=bats-suite' "${PROJECT_ROOT}/scripts/run-coverage"
 }
 
 @test "[PMC-U1-C02] manifest canary executes checkout source directly" {
@@ -51,7 +51,7 @@ setup() {
   local helper
 
   [ -x "${preflight}" ]
-  for helper in scripts/install-manager scripts/check-coverage \
+  for helper in scripts/install-manager scripts/check-coverage scripts/run-coverage \
     scripts/package-release scripts/release-check tests/fixtures/build-mini-deb; do
     grep -Fq 'preflight"' "${PROJECT_ROOT}/${helper}"
   done
@@ -179,6 +179,16 @@ setup() {
   grep -Fq 'gem "bashcov", "3.3.0"' "${PROJECT_ROOT}/Gemfile"
   grep -Fq 'bashcov (3.3.0)' "${PROJECT_ROOT}/Gemfile.lock"
   grep -Fq 'BUNDLED WITH' "${PROJECT_ROOT}/Gemfile.lock"
+}
+
+@test "[PMC-U5-C01] coverage publication has one threshold and one suite owner" {
+  grep -Fq 'COVERAGE_MINIMUM ?= 90' "${PROJECT_ROOT}/Makefile"
+  grep -Fq 'scripts/run-coverage' "${PROJECT_ROOT}/Makefile"
+  grep -Fq 'scripts/check-coverage' "${PROJECT_ROOT}/scripts/run-coverage"
+  grep -Fq 'BASHCOV_COMMAND_NAME=bats-suite' "${PROJECT_ROOT}/scripts/run-coverage"
+  run grep -F 'minimum_coverage' "${PROJECT_ROOT}/.simplecov"
+  [ "${status}" -ne 0 ]
+  [ "$(grep -c -- '--.*tests' "${PROJECT_ROOT}/scripts/run-coverage")" -eq 1 ]
 }
 
 @test "Dependabot checks pinned GitHub Actions weekly" {

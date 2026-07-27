@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -Eeuo pipefail
+export LC_ALL=C
 
 while read -r _ _ function_name; do
   unset -f "${function_name}" 2>/dev/null || true
@@ -20,7 +21,7 @@ usage() {
 main() {
   local resultset="${1:-}"
   local minimum="${2:-}"
-  local stats covered relevant percentage script_dir
+  local stats covered relevant percentage script_dir expected started now identity
 
   (($# == 2)) || usage
   script_dir="${BASH_SOURCE[0]%/*}"
@@ -59,6 +60,28 @@ main() {
       exit 1
     }
   IFS=$'\t' read -r covered relevant <<<"${stats}"
+  expected="${COVERAGE_COMMAND_NAME:-bats-suite}"
+  started="${COVERAGE_STARTED_AT:-}"
+  identity="$(jq -er --arg expected "${expected}" '
+    select(type == "object")
+    | (keys | select(length == 1 and .[0] == $expected))
+    | .[0]
+  ' "${resultset}" 2>/dev/null)" || {
+    printf 'check-coverage: result set has the wrong command identity: expected %s\n' \
+      "${expected}" >&2
+    exit 1
+  }
+  if [[ -n "${started}" ]]; then
+    [[ "${started}" =~ ^[0-9]+$ ]] || usage
+    now="$(date +%s)"
+    jq -e --arg command "${identity}" --argjson started "${started}" \
+      --argjson now "${now}" '
+      .[$command].timestamp | type == "number" and . >= $started and . <= ($now + 1)
+    ' "${resultset}" >/dev/null 2>&1 || {
+      printf 'check-coverage: result set is stale for command %s\n' "${expected}" >&2
+      exit 1
+    }
+  fi
   percentage="$(awk -v covered="${covered}" -v relevant="${relevant}" \
     'BEGIN { printf "%.2f", covered * 100 / relevant }')"
 

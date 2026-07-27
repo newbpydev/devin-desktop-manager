@@ -187,3 +187,15 @@ snapshot_tree() {
       "${digest}" >>"${output}"
   done < <("${HARNESS_TOOLS[find]:-find}" "${root}" -print0 | LC_ALL=C sort -z)
 }
+
+make_coverage_tree() {
+  (($# == 1 || $# == 2)) || return 2
+  local root="$1" command_name="${2:-bats-suite}"
+  portable_test_output_path "${root}" || return 2
+  "${HARNESS_TOOLS[mkdir]:-mkdir}" -p -- "${root}/assets" || return 1
+  printf '<html>coverage</html>\n' >"${root}/index.html" || return 1
+  printf '{}\n' >"${root}/.last_run.json" || return 1
+  printf '{}\n' >"${root}/.resultset.json.lock" || return 1
+  printf '{"%s":{"coverage":{"/project/bin/tool":{"lines":[1,1,1,1]}},"timestamp":%s}}\n' \
+    "${command_name}" "$(date +%s)" >"${root}/.resultset.json" || return 1
+}

@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+umask 077
+
+while read -r _ _ function_name; do
+  unset -f "${function_name}" 2>/dev/null || true
+done < <(declare -F)
+
+usage() {
+  printf 'Usage: run-coverage [--output-lock-fd 6] --project-root ROOT\n' >&2
+  exit 2
+}
+
+fail() {
+  printf 'coverage: error: %s\n' "$1" >&2
+  exit 1
+}
+
+canonical_output() {
+  local root="$1" value="$2" label="$3" candidate component current
+  [[ -n "${value}" && "${value}" != /* && "${value}" != *[!\ -~]* ]] ||
+    fail "${label} must be one printable project-relative path"
+  case "/${value}/" in */../*|*/./*|*//* ) fail "${label} must stay beneath the project root" ;; esac
+  current="${root}"
+  IFS=/ read -r -a components <<<"${value}"
+  for component in "${components[@]}"; do
+    current="${current}/${component}"
+    [[ ! -L "${current}" ]] || fail "${label} must not contain symbolic components"
+  done
+  candidate="$(readlink -m -- "${root}/${value}" 2>/dev/null)" ||
+    fail "${label} cannot be canonicalized"
+  [[ "${candidate}" == "${root}/"* ]] || fail "${label} must stay beneath the project root"
+  current="${root}"
+  IFS=/ read -r -a components <<<"${candidate#"${root}/"}"
+  for component in "${components[@]}"; do
+    current="${current}/${component}"
+    [[ ! -L "${current}" ]] || fail "${label} must not contain symbolic components"
+  done
+  printf '%s\n' "${candidate}"
+}
+
+resolve_tool() {
+  local value="$1" candidate directory
+  if [[ "${value}" == /* ]]; then candidate="${value}"; else candidate="$(type -P -- "${value}" 2>/dev/null || true)"; fi
+  [[ "${candidate}" == /* && -f "${candidate}" && -x "${candidate}" ]] || fail "required executable is unavailable: ${value}"
+  directory="$(CDPATH= cd -P -- "${candidate%/*}" && pwd -P)" || fail "cannot resolve executable: ${value}"
+  printf '%s/%s\n' "${directory}" "${candidate##*/}"
+}
+
+validate_lock() {
+  local root="$1" lock="${1}/.devin-desktop-manager.outputs.lock" descriptor path
+  [[ -e /proc/$$/fd/6 ]] || usage
+  descriptor="$(stat -Lc '%d:%i:%u:%F:%h' -- /proc/$$/fd/6 2>/dev/null)" || usage
+  path="$(stat -Lc '%d:%i:%u:%F:%h' -- "${lock}" 2>/dev/null)" || usage
+  [[ "${descriptor}" == "${path}" && "${path}" == *":${UID}:regular"*":1" ]] || usage
+  flock -n 6 >/dev/null 2>&1 || usage
+  if flock -n "${lock}" true 2>/dev/null; then usage; fi
+}
+
+main() {
+  local lock_fd= root= project_physical script_dir coverage_root dist_root state
+  local bashcov bats checker start stage backup parent leaf token attempt parent_created=0
+  if [[ "${1:-}" == --output-lock-fd ]]; then
+    [[ "${2:-}" == 6 ]] || usage
+    lock_fd=6
+    shift 2
+  fi
+  [[ "${1:-}" == --project-root && $# == 2 ]] || usage
+  root="$2"
+  [[ "${root}" == /* && "${root}" != *[!\ -~]* && -d "${root}" && ! -L "${root}" ]] || usage
+  project_physical="$(CDPATH= cd -P -- "${root}" 2>/dev/null && pwd -P)" || usage
+  [[ "${root%/}" == "${project_physical}" ]] || usage
+  root="${project_physical}"
+  script_dir="$(CDPATH= cd -P -- "${BASH_SOURCE[0]%/*}" && pwd -P)"
+  [[ "${script_dir}" == "${root}/scripts" ]] || usage
+
+  coverage_root="$(canonical_output "${root}" "${MAKE_COVERAGE_DIR:-coverage}" COVERAGE_DIR)"
+  dist_root="$(canonical_output "${root}" "${MAKE_DIST_DIR:-dist}" DIST_DIR)"
+  [[ "${coverage_root}" != "${dist_root}" && "${coverage_root}" != "${dist_root}/"* &&
+    "${dist_root}" != "${coverage_root}/"* ]] || fail 'COVERAGE_DIR and DIST_DIR must be separate non-nested paths'
+
+  if [[ -z "${lock_fd}" ]]; then
+    PREFLIGHT_BATS="${MAKE_BATS:-bats}" PREFLIGHT_BASHCOV="${MAKE_BASHCOV:-bashcov}" \
+      "${script_dir}/preflight" coverage-run --project-root "${root}" || exit $?
+    exec "${script_dir}/output-lock" "${root}" -- "$0" --project-root "${root}"
+  fi
+  validate_lock "${root}"
+  # shellcheck source=scripts/lib/coverage-output.bash
+  source "${script_dir}/lib/coverage-output.bash"
+
+  parent="${coverage_root%/*}"
+  if [[ ! -d "${parent}" ]]; then
+    mkdir -p -- "${parent}" || fail 'cannot create coverage output parent'
+    parent_created=1
+  fi
+  stage=
+  cleanup_output() {
+    [[ -z "${stage:-}" || ! -e "${stage}" ]] || rm -rf -- "${stage}"
+    ((parent_created == 0)) || rmdir --ignore-fail-on-non-empty -- "${parent}" 2>/dev/null || true
+  }
+  trap cleanup_output EXIT
+
+  _coverage_classify "${coverage_root}" || fail "unsafe coverage output (${_COVERAGE_REASON}); output was unchanged"
+  state="${_COVERAGE_STATE}"
+  case "${state}" in
+    repair-backup|discard-stage|public-valid-cleanup)
+      coverage_repair "${coverage_root}" "${state}" || fail 'coverage output changed during repair; output was preserved'
+      ;;
+  esac
+  _coverage_classify "${coverage_root}" || fail "unsafe coverage output (${_COVERAGE_REASON}); output was unchanged"
+  [[ "${_COVERAGE_STATE}" == absent || "${_COVERAGE_STATE}" == public-valid ]] ||
+    fail 'coverage output is not ready for publication'
+
+  leaf="${coverage_root##*/}"
+  for attempt in {0..15}; do
+    printf -v token '%06x' "$(((($$ << 4) + attempt) & 0xffffff))"
+    stage="${parent}/.${leaf}.stage.$$.${token}"
+    if mkdir -m 0700 -- "${stage}" 2>/dev/null; then break; fi
+    stage=
+  done
+  [[ -n "${stage}" ]] || fail 'cannot create exclusive coverage stage'
+  backup="${parent}/.${leaf}.backup"
+  [[ "$(stat -Lc '%d' -- "${stage}")" == "$(stat -Lc '%d' -- "${parent}")" ]] ||
+    fail 'coverage stage is on the wrong device'
+
+  bashcov="$(resolve_tool "${MAKE_BASHCOV:-bashcov}")"
+  bats="$(resolve_tool "${MAKE_BATS:-bats}")"
+  checker="${script_dir}/check-coverage" # scripts/check-coverage owns the gate.
+  start="$(date +%s)"
+  if ! (cd "${root}" && HOME="${MAKE_HOME:-${HOME:-}}" LC_ALL=C TZ=UTC \
+    COVERAGE_DIR="${stage}" BASHCOV_COMMAND_NAME=bats-suite \
+    "${bashcov}" -- "${bats}" tests); then
+    fail 'coverage runner failed; prior coverage was preserved'
+  fi
+  COVERAGE_COMMAND_NAME=bats-suite COVERAGE_STARTED_AT="${start}" \
+    "${checker}" "${stage}/.resultset.json" "${MAKE_COVERAGE_MINIMUM:-90}" ||
+    fail 'coverage validation failed; prior coverage was preserved'
+  _coverage_validate_tree "${stage}" stage ||
+    fail "generated coverage shape is invalid (${_COVERAGE_REASON}); prior coverage was preserved"
+
+  if [[ -d "${coverage_root}" ]]; then
+    [[ ! -e "${backup}" && ! -L "${backup}" ]] || fail 'coverage backup appeared during publication'
+    mv -T -- "${coverage_root}" "${backup}" || fail 'cannot stage prior coverage for replacement'
+    if ! mv -T -- "${stage}" "${coverage_root}"; then
+      mv -T -- "${backup}" "${coverage_root}" || true
+      fail 'cannot publish coverage; prior coverage restoration was attempted'
+    fi
+    stage=
+    if ! rm -rf -- "${backup}"; then
+      printf 'coverage: warning: coverage published; stale backup cleanup will retry on the next coverage operation\n' >&2
+    fi
+  else
+    mv -T -- "${stage}" "${coverage_root}" || fail 'cannot publish coverage'
+    stage=
+  fi
+  trap - EXIT
+}
+
+main "$@"

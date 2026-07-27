@@ -206,14 +206,7 @@ run_script "$$bats_path" tests
 endef
 
 define DO_COVERAGE
-bats_path=$$(resolve_executable BATS "$$MAKE_BATS") || exit $$?; \
-bashcov_path=$$(resolve_executable BASHCOV "$$MAKE_BASHCOV") || exit $$?; \
-rm -f -- "$$MAKE_COVERAGE_DIR/.resultset.json"; \
-HOME="$$MAKE_HOME" LC_ALL=C TZ=UTC COVERAGE_MINIMUM="$$MAKE_COVERAGE_MINIMUM" \
-	COVERAGE_DIR="$$MAKE_COVERAGE_DIR" COVERAGE_COMMAND_NAME=bats-suite \
-	"$$bashcov_path" -- "$$bats_path" tests; \
-run_script "$$PROJECT_ROOT/scripts/check-coverage" \
-	"$$MAKE_COVERAGE_DIR/.resultset.json" "$$MAKE_COVERAGE_MINIMUM"
+run_script "$$PROJECT_ROOT/scripts/run-coverage" --project-root "$$PROJECT_ROOT"
 endef
 
 help:
