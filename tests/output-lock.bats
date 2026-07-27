@@ -46,7 +46,7 @@ case "\${1:-check}" in
     deadline=\$((SECONDS + \${PORTABLE_TEST_TIMEOUT:-10}))
     while [[ ! -f "\${continue}" ]]; do
       ((SECONDS < deadline)) || exit 124
-      sleep 0.01
+      sleep 0.05
     done
     ;;
   spawn-child)
@@ -71,7 +71,7 @@ wait_until_unlocked() {
   local lock="$1" deadline=$((SECONDS + PORTABLE_TEST_TIMEOUT))
   until flock -n "${lock}" true 2>/dev/null; do
     ((SECONDS < deadline)) || return 1
-    sleep 0.01
+    sleep 0.05
   done
 }
 
@@ -248,4 +248,22 @@ EOF
     [[ "${output}" == *"coverage"*"output lock"* ]]
     [ ! -e "${marker}" ]
   done
+}
+
+@test "[PMC-U10-R04] non-mutating release check is rejected before lock creation" {
+  local marker="${BATS_TEST_TMPDIR}/release-check-ran"
+  local lock="${CHECKOUT}/.devin-desktop-manager.outputs.lock"
+
+  cat >"${CHECKOUT}/scripts/release-check" <<EOF
+#!${HARNESS_BASH}
+: >$(printf '%q' "${marker}")
+EOF
+  chmod 0755 "${CHECKOUT}/scripts/release-check"
+
+  run "${HARNESS_BASH}" "${CHECKOUT}/scripts/output-lock" "${CHECKOUT}" -- \
+    "${CHECKOUT}/scripts/release-check"
+
+  [ "${status}" -eq 2 ]
+  [ ! -e "${marker}" ]
+  [ ! -e "${lock}" ]
 }

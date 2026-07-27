@@ -1705,6 +1705,64 @@ EOF
   grep -Fq -- '--continue-at -' "${CURL_LOG}"
 }
 
+@test "[PMC-U2-R05] resumed download rejects a full-size partial before requesting" {
+  local partial="${BATS_TEST_TMPDIR}/artifact.part"
+  local requested="${BATS_TEST_TMPDIR}/requested"
+
+  truncate -s 2147483648 "${partial}"
+  cat >"${MOCK_BIN}/curl" <<EOF
+#!${BASH}
+: >$(printf '%q' "${requested}")
+exit 1
+EOF
+  chmod 0755 "${MOCK_BIN}/curl"
+
+  run env HOME="${TEST_HOME}" PATH="${MOCK_BIN}:${PATH}" bash -c '
+    source "$1"
+    curl_fetch_file \
+      "https://windsurf-stable.codeiumdata.com/artifact.deb" \
+      "$2" 2147483648 7200 true
+  ' _ "${MANAGER}" "${partial}"
+
+  [ "${status}" -ne 0 ]
+  [ ! -e "${requested}" ]
+  [ "$(stat -c %s -- "${partial}")" -eq 2147483648 ]
+}
+
+@test "[PMC-U2-R05] resumed download enforces remaining and combined size" {
+  local partial="${BATS_TEST_TMPDIR}/artifact.part"
+  local request="${BATS_TEST_TMPDIR}/request"
+
+  truncate -s 2147483647 "${partial}"
+  cat >"${MOCK_BIN}/curl" <<EOF
+#!${BASH}
+set -euo pipefail
+while ((\$# > 0)); do
+  case "\$1" in
+    --max-filesize) maximum="\$2"; shift 2 ;;
+    --dump-header) header="\$2"; shift 2 ;;
+    --output) response="\$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '%s\n' "\${maximum}" >$(printf '%q' "${request}")
+printf 'HTTP/1.1 206 Partial Content\r\n\r\n' >"\${header}"
+printf 'xx' >"\${response}"
+EOF
+  chmod 0755 "${MOCK_BIN}/curl"
+
+  run env HOME="${TEST_HOME}" PATH="${MOCK_BIN}:${PATH}" bash -c '
+    source "$1"
+    curl_fetch_file \
+      "https://windsurf-stable.codeiumdata.com/artifact.deb" \
+      "$2" 2147483648 7200 true
+  ' _ "${MANAGER}" "${partial}"
+
+  [ "${status}" -ne 0 ]
+  [ "$(cat "${request}")" = 1 ]
+  [ "$(stat -c %s -- "${partial}")" -eq 2147483647 ]
+}
+
 @test "failed download keeps its partial file for retry" {
   local cache="${TEST_HOME}/.cache/devin-desktop-manager"
 

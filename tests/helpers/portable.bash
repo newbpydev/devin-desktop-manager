@@ -122,7 +122,7 @@ case "\${behavior}" in
           printf 'command shim %s timed out waiting for barrier\\n' $(printf '%q' "${name}") >&2
           exit 124
         fi
-        ${HARNESS_TOOLS[sleep]:-/bin/sleep} 0.01
+        ${HARNESS_TOOLS[sleep]:-/bin/sleep} 0.05
       done
     fi
     ;;
@@ -140,7 +140,7 @@ wait_for_ready() {
   local deadline=$((SECONDS + timeout))
   while [[ ! -f "${path}" ]]; do
     ((SECONDS < deadline)) || return 1
-    "${HARNESS_TOOLS[sleep]:-/bin/sleep}" 0.01
+    "${HARNESS_TOOLS[sleep]:-/bin/sleep}" 0.05
   done
 }
 

@@ -273,6 +273,50 @@ preflight_check_commands() {
   done
 }
 
+preflight_capabilities_baseline() {
+  preflight_check_commands uname ldd readlink
+}
+
+preflight_capabilities_status() {
+  preflight_check_commands jq basename
+}
+
+preflight_capabilities_manifest_check() {
+  preflight_check_commands curl jq awk cat basename stat mktemp cp chmod rm mv
+}
+
+preflight_capabilities_download() {
+  preflight_check_commands curl jq bsdtar sha256sum awk grep
+}
+
+preflight_capabilities_release_state() {
+  preflight_check_commands jq sha256sum grep awk
+}
+
+preflight_capabilities_timed_mutation() {
+  preflight_check_commands flock stat find timeout mv mktemp unshare cp chmod rm \
+    mkdir ln rmdir cat cmp true
+}
+
+preflight_capabilities_untimed_mutation() {
+  preflight_check_commands flock stat find mv mktemp cp chmod rm mkdir ln rmdir \
+    cat cmp
+}
+
+preflight_capabilities_release_paths() {
+  preflight_check_commands dirname basename
+}
+
+preflight_capabilities_desktop_integration() {
+  preflight_check_commands desktop-file-validate update-desktop-database \
+    update-mime-database xdg-mime
+}
+
+preflight_capabilities_doctor() {
+  preflight_check_commands jq sha256sum grep awk stat find timeout unshare cat \
+    true basename
+}
+
 preflight_check_environment() {
   local name value
 
@@ -390,39 +434,41 @@ preflight_collect() {
 
   preflight_reset
   preflight_check_environment
-  preflight_check_commands uname ldd readlink
+  preflight_capabilities_baseline
   preflight_check_platform
   case "${profile}" in
     status)
-      preflight_check_commands jq basename
+      preflight_capabilities_status
       ;;
     check)
-      preflight_check_commands curl jq awk cat basename stat mktemp cp chmod rm mv
+      preflight_capabilities_manifest_check
       preflight_check_network_environment
       preflight_check_ca_bundle
       ;;
     update)
-      preflight_check_commands curl jq bsdtar sha256sum awk grep flock stat \
-        find timeout mv mktemp unshare cp chmod rm mkdir ln rmdir cat cmp true \
-        date dirname basename \
-        desktop-file-validate update-desktop-database update-mime-database xdg-mime
+      preflight_capabilities_download
+      preflight_capabilities_timed_mutation
+      preflight_check_commands date
+      preflight_capabilities_release_paths
+      preflight_capabilities_desktop_integration
       preflight_check_network_environment
       preflight_check_ca_bundle
       ;;
     rollback)
-      preflight_check_commands jq sha256sum grep awk flock stat find timeout mv \
-        mktemp unshare cp chmod rm mkdir ln rmdir cat cmp true dirname basename \
-        desktop-file-validate update-desktop-database update-mime-database xdg-mime
+      preflight_capabilities_release_state
+      preflight_capabilities_timed_mutation
+      preflight_capabilities_release_paths
+      preflight_capabilities_desktop_integration
       ;;
     set-defaults)
-      preflight_check_commands jq sha256sum grep awk flock stat find mv mktemp cp \
-        chmod rm mkdir ln rmdir cat cmp dirname basename desktop-file-validate \
-        update-desktop-database update-mime-database xdg-mime
+      preflight_capabilities_release_state
+      preflight_capabilities_untimed_mutation
+      preflight_capabilities_release_paths
+      preflight_capabilities_desktop_integration
       ;;
     doctor)
-      preflight_check_commands jq sha256sum grep awk stat find timeout unshare \
-        cat true basename desktop-file-validate update-desktop-database \
-        update-mime-database xdg-mime
+      preflight_capabilities_doctor
+      preflight_capabilities_desktop_integration
       if ! command -v kbuildsycoca6 >/dev/null 2>&1; then
         preflight_add warning optional optional.kde-cache \
           "KDE launcher cache refresh is optional" "kbuildsycoca6 is not installed" \
@@ -430,9 +476,10 @@ preflight_collect() {
       fi
       ;;
     uninstall|uninstall-yes)
-      preflight_check_commands jq sha256sum grep awk flock stat find mv mktemp cp \
-        chmod rm mkdir ln rmdir cat cmp dirname basename desktop-file-validate \
-        update-desktop-database update-mime-database xdg-mime
+      preflight_capabilities_release_state
+      preflight_capabilities_untimed_mutation
+      preflight_capabilities_release_paths
+      preflight_capabilities_desktop_integration
       if [[ "${profile}" == "uninstall" && ! -t 0 ]]; then
         preflight_add blocker interaction interaction.terminal \
           "interactive uninstall requires a terminal" "standard input is not a terminal" \
@@ -556,19 +603,21 @@ curl_fetch_file() {
   local maximum_bytes="$3"
   local maximum_time="$4"
   local resume="${5:-false}"
-  local header response status location offset=0 hop
+  local header response status location offset=0 remaining response_size final_size hop
   local -a resume_options=()
 
   network_url_is_allowed "${url}" || return 1
   if [[ "${resume}" == true && -f "${destination}" ]]; then
     offset="$(stat -c '%s' -- "${destination}")" || return 1
+    ((offset < maximum_bytes)) || return 1
     ((offset == 0)) || resume_options=(--continue-at "${offset}")
   fi
+  remaining=$((maximum_bytes - offset))
   for ((hop = 0; hop <= 5; hop++)); do
     header="$(mktemp "${TMPDIR:-/tmp}/devin-desktop-manager.header.XXXXXXXX")" ||
       return 1
     NETWORK_HEADER_TEMP="${header}"
-    response="$(mktemp "${TMPDIR:-/tmp}/devin-desktop-manager.response.XXXXXXXX")" || {
+    response="$(mktemp "${destination}.response.XXXXXXXX")" || {
       rm -f -- "${header}"
       NETWORK_HEADER_TEMP=""
       return 1
@@ -576,7 +625,7 @@ curl_fetch_file() {
     NETWORK_RESPONSE_TEMP="${response}"
     if ! curl "${CURL_SECURITY_OPTIONS[@]}" "${CURL_CA_OPTIONS[@]}" \
       --silent --show-error --max-time "${maximum_time}" \
-      --max-filesize "${maximum_bytes}" --dump-header "${header}" \
+      --max-filesize "${remaining}" --dump-header "${header}" \
       "${resume_options[@]}" --output "${response}" "${url}"; then
       rm -f -- "${header}" "${response}"
       NETWORK_HEADER_TEMP=""
@@ -587,7 +636,15 @@ curl_fetch_file() {
       "${header}")"
     case "${status}" in
       2??)
+        response_size="$(stat -c '%s' -- "${response}")" || return 1
+        ((response_size <= remaining && offset + response_size <= maximum_bytes)) || {
+          rm -f -- "${header}" "${response}"
+          NETWORK_HEADER_TEMP=""
+          NETWORK_RESPONSE_TEMP=""
+          return 1
+        }
         if ((offset > 0)); then
+          [[ "$(stat -c '%s' -- "${destination}")" == "${offset}" ]] || return 1
           cat -- "${response}" >>"${destination}" || {
             rm -f -- "${header}" "${response}"
             NETWORK_HEADER_TEMP=""
@@ -596,6 +653,8 @@ curl_fetch_file() {
           }
           rm -f -- "${response}"
           NETWORK_RESPONSE_TEMP=""
+          final_size="$(stat -c '%s' -- "${destination}")" || return 1
+          ((final_size == offset + response_size && final_size <= maximum_bytes)) || return 1
         else
           mv -Tf -- "${response}" "${destination}" || {
             rm -f -- "${header}" "${response}"

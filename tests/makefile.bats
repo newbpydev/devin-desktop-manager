@@ -2,6 +2,8 @@
 
 set -e
 
+load helpers/portable
+
 setup() {
   PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
   CALL_LOG="${BATS_TEST_TMPDIR}/manager-calls"
@@ -20,10 +22,11 @@ printf '%s\n' "$*" >>"${CALL_LOG}"
 EOF
   chmod 0755 "${MOCK_MANAGER}"
 
-  MAKE_COMMAND="$(command -v make)"
-  HARNESS_BASH="$(command -v bash)"
-  TRUE_COMMAND="$(type -P true)"
-  TIMEOUT_COMMAND="$(command -v timeout)"
+  resolve_harness_tools bash env make mv rm sleep timeout true
+  MAKE_COMMAND="${HARNESS_TOOLS[make]}"
+  HARNESS_BASH="${HARNESS_TOOLS[bash]}"
+  TRUE_COMMAND="${HARNESS_TOOLS[true]}"
+  TIMEOUT_COMMAND="${HARNESS_TOOLS[timeout]}"
 }
 
 make_fixture() {
@@ -229,18 +232,20 @@ EOF
   local nonexec="${BATS_TEST_TMPDIR}/nonexec-app"
   local stdout_file="${BATS_TEST_TMPDIR}/stdout"
   local stderr_file="${BATS_TEST_TMPDIR}/stderr"
-  local target
+  local app target
 
   : >"${nonexec}"
   chmod 0644 "${nonexec}"
 
-  for target in "${missing}" "${nonexec}"; do
-    run /bin/sh -c '"$1" --no-print-directory -s -C "$2" APP="$3" run \
-      >"$4" 2>"$5"' _ "${MAKE_COMMAND}" "${PROJECT_ROOT}" "${target}" \
-      "${stdout_file}" "${stderr_file}"
-    [ "${status}" -ne 0 ]
-    [ ! -s "${stdout_file}" ]
-    grep -Fq 'run: error: APP is not an executable file:' "${stderr_file}"
+  for app in "${missing}" "${nonexec}"; do
+    for target in run app-version; do
+      run /bin/sh -c '"$1" --no-print-directory -s -C "$2" APP="$3" "$6" \
+        >"$4" 2>"$5"' _ "${MAKE_COMMAND}" "${PROJECT_ROOT}" "${app}" \
+        "${stdout_file}" "${stderr_file}" "${target}"
+      [ "${status}" -ne 0 ]
+      [ ! -s "${stdout_file}" ]
+      grep -Fq "${target}: error: APP is not an executable file:" "${stderr_file}"
+    done
   done
 
   run "${MAKE_COMMAND}" --no-print-directory -s -C "${PROJECT_ROOT}" help
@@ -261,7 +266,7 @@ EOF
 }
 
 @test "help exposes install lifecycle quality and release commands" {
-  run make --no-print-directory -s -C "${PROJECT_ROOT}" help
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${PROJECT_ROOT}" help
 
   [ "${status}" -eq 0 ]
   [[ "${output}" == *"install-manager"* ]]
@@ -296,7 +301,7 @@ EOF
 }
 JSON
 
-  run make --no-print-directory -s -C "${PROJECT_ROOT}" \
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${PROJECT_ROOT}" \
     BASHCOV="${TRUE_COMMAND}" COVERAGE_DIR="${coverage_dir}" \
     COVERAGE_MINIMUM=100 coverage
 
@@ -311,7 +316,8 @@ JSON
   make_fixture "${root}"
   cp "${MOCK_MANAGER}" "${root}/bin/devin-desktop-manager"
   for target in status check update rollback set-defaults doctor; do
-    run make --no-print-directory -s -C "${root}" BASH="${HARNESS_BASH}" "${target}"
+    run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
+      BASH="${HARNESS_BASH}" "${target}"
     [ "${status}" -eq 0 ]
   done
 
@@ -325,7 +331,7 @@ JSON
 
   make_fixture "${root}"
   cp "${MOCK_MANAGER}" "${root}/bin/devin-desktop-manager"
-  run make --no-print-directory -s -C "${root}" \
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
     BASH="${HARNESS_BASH}" uninstall-yes
 
   [ "${status}" -eq 0 ]
@@ -336,7 +342,7 @@ JSON
 @test "install-manager atomically copies an independent executable" {
   local installed="${TEST_HOME}/.local/bin/devin-desktop-manager"
 
-  run make --no-print-directory -s -C "${PROJECT_ROOT}" \
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${PROJECT_ROOT}" \
     HOME="${TEST_HOME}" install-manager
 
   [ "${status}" -eq 0 ]
@@ -344,7 +350,7 @@ JSON
   [ ! -L "${installed}" ]
   [ "$("${installed}" --version)" = "devin-desktop-manager 0.1.0" ]
 
-  run make --no-print-directory -s -C "${PROJECT_ROOT}" \
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${PROJECT_ROOT}" \
     HOME="${TEST_HOME}" install-manager
   [ "${status}" -eq 0 ]
   [ -x "${installed}" ]
@@ -355,7 +361,7 @@ JSON
 
   mkdir -p "$(dirname "${installed}")"
   ln -s "${PROJECT_ROOT}/bin/devin-desktop-manager" "${installed}"
-  run make --no-print-directory -s -C "${PROJECT_ROOT}" \
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${PROJECT_ROOT}" \
     HOME="${TEST_HOME}" install-manager
 
   [ "${status}" -eq 0 ]
@@ -369,7 +375,7 @@ JSON
   mkdir -p "$(dirname "${installed}")"
   printf '#!/usr/bin/env bash\nexit 0\n' >"${installed}"
   chmod 0755 "${installed}"
-  run make --no-print-directory -s -C "${PROJECT_ROOT}" \
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${PROJECT_ROOT}" \
     HOME="${TEST_HOME}" install-manager
 
   [ "${status}" -ne 0 ]
@@ -400,7 +406,7 @@ JSON
 @test "development link is explicit and resolves to project source" {
   local installed="${TEST_HOME}/.local/bin/devin-desktop-manager"
 
-  run make --no-print-directory -s -C "${PROJECT_ROOT}" \
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${PROJECT_ROOT}" \
     HOME="${TEST_HOME}" link-dev
 
   [ "${status}" -eq 0 ]
@@ -426,7 +432,8 @@ JSON
 @test "[PMC-U4-R01] invalid canonical HOME fails before lock or manager publication" {
   local installed="${TEST_HOME}/.local/bin/devin-desktop-manager"
 
-  run env -u HOME make --no-print-directory -s -C "${PROJECT_ROOT}" install-manager
+  run "${HARNESS_TOOLS[env]}" -u HOME "${MAKE_COMMAND}" \
+    --no-print-directory -s -C "${PROJECT_ROOT}" install-manager
 
   [ "${status}" -ne 0 ]
   [ ! -e "${installed}" ]
@@ -435,7 +442,7 @@ JSON
 
   mkdir -p "$(dirname "${installed}")"
   printf 'caller-owned\n' >"${installed}"
-  run make --no-print-directory -s -C "${PROJECT_ROOT}" \
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${PROJECT_ROOT}" \
     HOME="${TEST_HOME}" install-manager
   [ "${status}" -ne 0 ]
   [ "$(cat "${installed}")" = caller-owned ]
@@ -460,12 +467,11 @@ JSON
     while [[ ! -e "${release}" ]]; do read -r -t 0.05 _ || true; done
   ) </dev/null &
   holder=$!
-  for _ in {1..200}; do [[ -e "${ready}" ]] && break; read -r -t 0.05 _ || true; done
-  [ -e "${ready}" ]
+  wait_for_ready "${ready}"
 
-  run make --no-print-directory -s -C "${PROJECT_ROOT}" \
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${PROJECT_ROOT}" \
     HOME="${TEST_HOME}" install-manager
-  : >"${release}"
+  release_barrier "${release}"
   wait "${holder}"
 
   [ "${status}" -ne 0 ]
@@ -514,14 +520,13 @@ EOF
     while [[ ! -e "${release}" ]]; do read -r -t 0.05 _ || true; done
   ) </dev/null &
   holder=$!
-  for _ in {1..200}; do [[ -e "${ready}" ]] && break; read -r -t 0.05 _ || true; done
-  [ -e "${ready}" ]
+  wait_for_ready "${ready}"
   ln -s "${external}" "${legacy_lock}"
 
   run "${TIMEOUT_COMMAND}" --signal=TERM --kill-after=1s 5s \
     "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
     HOME="${TEST_HOME}" install
-  : >"${release}"
+  release_barrier "${release}"
   wait "${holder}"
   [ "${status}" -ne 0 ]
   [ "${status}" -ne 124 ]
@@ -594,12 +599,11 @@ EOF
     while [[ ! -e "${release}" ]]; do read -r -t 0.05 _ || true; done
   ) </dev/null &
   holder=$!
-  for _ in {1..200}; do [[ -e "${ready}" ]] && break; read -r -t 0.05 _ || true; done
-  [ -e "${ready}" ]
+  wait_for_ready "${ready}"
 
-  run make --no-print-directory -s -C "${PROJECT_ROOT}" \
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${PROJECT_ROOT}" \
     HOME="${TEST_HOME}" install-manager
-  : >"${release}"
+  release_barrier "${release}"
   wait "${holder}"
 
   [ "${status}" -ne 0 ]
@@ -626,14 +630,16 @@ exit 0
 EOF
   chmod 0755 "${root}/bin/devin-desktop-manager"
 
-  run make --no-print-directory -s -C "${root}" HOME="${TEST_HOME}" install
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
+    HOME="${TEST_HOME}" install
   [ "${status}" -ne 0 ]
   [ -x "${installed}" ]
   [[ "${output}" == *"manager installation succeeded, but application installation did not"* ]]
   [[ "${output}" == *"rerun make install to resume"* ]]
 
   : >"${TEST_HOME}/succeed"
-  run make --no-print-directory -s -C "${root}" HOME="${TEST_HOME}" install
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
+    HOME="${TEST_HOME}" install
   [ "${status}" -eq 0 ]
 }
 

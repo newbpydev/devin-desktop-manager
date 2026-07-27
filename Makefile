@@ -125,6 +125,20 @@ define RUN_PREFLIGHT
 run_script "$$PROJECT_ROOT/scripts/preflight" $(1) --project-root "$$PROJECT_ROOT"
 endef
 
+define RESOLVE_APP
+app="$$MAKE_APP"; \
+if [ "$$APP_DEFAULT" = 1 ]; then app=$$MAKE_HOME/.local/bin/devin-desktop; fi; \
+case "$$app" in \
+	/*) ;; \
+	'') printf '%s\n' '$(1): error: APP is not an executable file: empty path' >&2; exit 1 ;; \
+	*[!\ -~]*) printf '%s\n' '$(1): error: APP contains control characters' >&2; exit 1 ;; \
+	*) printf '%s\n' "$(1): error: APP must be an absolute path: $$app" >&2; exit 1 ;; \
+esac; \
+if [ ! -f "$$app" ] || [ ! -x "$$app" ]; then \
+	printf '%s\n' "$(1): error: APP is not an executable file: $$app" >&2; exit 1; \
+fi
+endef
+
 define ACQUIRE_MANAGER_PUBLICATION_LOCKS
 publication_parent=$$MAKE_HOME/.local/bin; \
 state_home=$${MAKE_XDG_STATE_HOME:-$$MAKE_HOME/.local/state}; \
@@ -281,33 +295,13 @@ status check update rollback set-defaults doctor:
 run:
 	@$(PREPARE_SCRIPT_RUNNER); \
 	$(call RUN_PREFLIGHT,application); \
-	app="$$MAKE_APP"; \
-	if [ "$$APP_DEFAULT" = 1 ]; then app=$$MAKE_HOME/.local/bin/devin-desktop; fi; \
-	case "$$app" in \
-		/*) ;; \
-		'') printf '%s\n' 'run: error: APP is not an executable file: empty path' >&2; exit 1 ;; \
-		*[!\ -~]*) printf '%s\n' 'run: error: APP contains control characters' >&2; exit 1 ;; \
-		*) printf '%s\n' "run: error: APP must be an absolute path: $$app" >&2; exit 1 ;; \
-	esac; \
-	if [ ! -f "$$app" ] || [ ! -x "$$app" ]; then \
-		printf '%s\n' "run: error: APP is not an executable file: $$app" >&2; exit 1; \
-	fi; \
+	$(call RESOLVE_APP,run); \
 	HOME="$$MAKE_HOME" exec "$$app"
 
 app-version:
 	@$(PREPARE_SCRIPT_RUNNER); \
 	$(call RUN_PREFLIGHT,application); \
-	app="$$MAKE_APP"; \
-	if [ "$$APP_DEFAULT" = 1 ]; then app=$$MAKE_HOME/.local/bin/devin-desktop; fi; \
-	case "$$app" in \
-		/*) ;; \
-		'') printf '%s\n' 'app-version: error: APP is not an executable file: empty path' >&2; exit 1 ;; \
-		*[!\ -~]*) printf '%s\n' 'app-version: error: APP contains control characters' >&2; exit 1 ;; \
-		*) printf '%s\n' "app-version: error: APP must be an absolute path: $$app" >&2; exit 1 ;; \
-	esac; \
-	if [ ! -f "$$app" ] || [ ! -x "$$app" ]; then \
-		printf '%s\n' "app-version: error: APP is not an executable file: $$app" >&2; exit 1; \
-	fi; \
+	$(call RESOLVE_APP,app-version); \
 	HOME="$$MAKE_HOME" exec "$$app" --version
 
 test:

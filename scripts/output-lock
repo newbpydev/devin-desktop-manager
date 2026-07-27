@@ -30,7 +30,6 @@ target_for_helper() {
   case "$1" in
     scripts/run-coverage) printf 'coverage\n' ;;
     scripts/package-release) printf 'package\n' ;;
-    scripts/release-check) printf 'release-check\n' ;;
     scripts/clean-generated) printf 'clean\n' ;;
     *) return 1 ;;
   esac
@@ -123,7 +122,7 @@ main() {
     fail "${target}" resource \
       "${lock} changed during acquisition; do not delete the lock file; retry"
 
-  "${helper}" --output-lock-fd 6 "$@"
+  exec "${helper}" --output-lock-fd 6 "$@"
 }
 
 main "$@"

@@ -15,7 +15,6 @@ setup() {
 
 make_sparse_bin() {
   local bin="${BATS_TEST_TMPDIR}/sparse-bin" name
-  shift
   mkdir -p "${bin}"
   for name in "$@"; do
     ln -s "$(type -P -- "${name}")" "${bin}/${name}"
@@ -46,7 +45,7 @@ make_sparse_bin() {
 
 @test "[PMC-U3-R02] sparse SUT PATH aggregates while resolved harness tools remain usable" {
   local sparse stdout_file stderr_file
-  sparse="$(make_sparse_bin sparse sh)"
+  sparse="$(make_sparse_bin sh)"
   stdout_file="${BATS_TEST_TMPDIR}/stdout"
   stderr_file="${BATS_TEST_TMPDIR}/stderr"
 
@@ -167,7 +166,7 @@ EOF
 
 @test "[PMC-U3-R06] diagnostics are bounded deterministic blocker-first plain stderr" {
   local sparse
-  sparse="$(make_sparse_bin sparse sh)"
+  sparse="$(make_sparse_bin sh)"
 
   run env PATH="${sparse}" PREFLIGHT_BATS=$'missing\ttool' \
     PREFLIGHT_SHELLCHECK=also-missing NO_COLOR=1 TERM=dumb \
