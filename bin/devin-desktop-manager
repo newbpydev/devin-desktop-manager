@@ -37,6 +37,7 @@ readonly CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME_DIR}/.config}"
 readonly STATE_DIR="${STATE_HOME}/devin-desktop-manager"
 readonly STATE_FILE="${STATE_DIR}/state.json"
 readonly LOCK_FILE="${STATE_HOME}/devin-desktop-manager.lock"
+readonly PUBLICATION_LOCK="${BIN_DIR:-${HOME_DIR}/.local/bin}/.devin-desktop-manager.publication.lock"
 readonly TRANSACTION_JOURNAL="${STATE_HOME}/devin-desktop-manager.transaction"
 readonly TRANSACTION_DISCARD="${TRANSACTION_JOURNAL}.discard"
 readonly UNINSTALL_CLEANUP_RECORD="${STATE_HOME}/devin-desktop-manager.cleanup"
@@ -87,6 +88,10 @@ TRANSACTION_RESTORING=false
 TRANSACTION_DISCARDING=false
 TRANSACTION_DURABLE_RECOVERY=false
 LEGACY_LOCK_HELD=false
+PUBLICATION_LOCK_FD=""
+LIFECYCLE_LOCK_FD=""
+LEGACY_LOCK_FD=""
+ACTIVE_COMMAND=""
 CLEANUP_PROOF_TEMP=""
 RESTORE_TEMP_ROOT=""
 CURL_CA_SNAPSHOT=""
@@ -880,6 +885,77 @@ validate_state_home_security() {
     die "XDG_STATE_HOME must not be writable by other users: ${STATE_HOME}"
 }
 
+validate_lock_parent_security() {
+  local path="$1" label="$2" owner permissions group_mode other_mode
+
+  [[ -d "${path}" && ! -L "${path}" ]] ||
+    die "${label} parent must be a non-symbolic directory: ${path}"
+  owner="$(stat -c '%u' -- "${path}")" || die "could not inspect ${label} parent: ${path}"
+  [[ "${owner}" == "${EUID}" ]] ||
+    die "${label} parent must be owned by the current user: ${path}"
+  permissions="$(stat -c '%a' -- "${path}")" || die "could not inspect ${label} parent permissions: ${path}"
+  permissions="${permissions: -3}"
+  group_mode="${permissions:1:1}"
+  other_mode="${permissions:2:1}"
+  (((group_mode & 2) == 0 && (other_mode & 2) == 0)) ||
+    die "${label} parent must not be writable by other users: ${path}"
+}
+
+validate_lock_descriptor_identity() {
+  local fd="$1" expected="$2" label="$3"
+  local path_identity descriptor_identity device inode owner file_type links
+
+  [[ "${fd}" =~ ^[0-9]+$ && -e "/proc/self/fd/${fd}" ]] ||
+    die "${label} lock descriptor ${fd} is not open"
+  [[ -f "${expected}" && ! -L "${expected}" ]] ||
+    die "${label} lock must be a non-symbolic regular file: ${expected}"
+  path_identity="$(stat -Lc '%d:%i:%u:%F:%h' -- "${expected}")" ||
+    die "could not inspect ${label} lock: ${expected}"
+  descriptor_identity="$(stat -Lc '%d:%i:%u:%F:%h' -- "/proc/self/fd/${fd}")" ||
+    die "could not inspect ${label} lock descriptor ${fd}"
+  IFS=: read -r device inode owner file_type links <<<"${path_identity}"
+  [[ "${path_identity}" == "${descriptor_identity}" && "${owner}" == "${EUID}" &&
+    ( "${file_type}" == "regular file" || "${file_type}" == "regular empty file" ) &&
+    ( "${links}" == 1 || ( "${label}" == "legacy manager lifecycle" && "${links}" == 2 ) ) ]] ||
+    die "${label} lock descriptor ${fd} does not match its safe lock path: ${expected}"
+}
+
+validate_inherited_lock_descriptor() {
+  local fd="$1" expected="$2" label="$3"
+
+  [[ "${fd}" =~ ^[0-9]+$ && -e "/proc/self/fd/${fd}" ]] ||
+    die "${label} lock descriptor ${fd} is not open"
+  flock -n "${fd}" ||
+    die "${ACTIVE_COMMAND}: another ${label} operation is active; do not delete the lock file; rerun the same command after it exits"
+  validate_lock_descriptor_identity "${fd}" "${expected}" "${label}"
+}
+
+acquire_publication_lock() {
+  local owner links
+
+  require_commands flock stat
+  mkdir -p -- "${BIN_DIR}"
+  validate_lock_parent_security "${BIN_DIR}" "manager publication"
+  if [[ ! -e "${PUBLICATION_LOCK}" && ! -L "${PUBLICATION_LOCK}" ]]; then
+    (set -o noclobber; : >"${PUBLICATION_LOCK}") 2>/dev/null ||
+      [[ -e "${PUBLICATION_LOCK}" || -L "${PUBLICATION_LOCK}" ]] ||
+      die "could not create the manager publication lock: ${PUBLICATION_LOCK}"
+  fi
+  [[ -f "${PUBLICATION_LOCK}" && ! -L "${PUBLICATION_LOCK}" ]] ||
+    die "manager publication lock must be a non-symbolic regular file: ${PUBLICATION_LOCK}"
+  owner="$(stat -c '%u' -- "${PUBLICATION_LOCK}")" ||
+    die "could not inspect the manager publication lock: ${PUBLICATION_LOCK}"
+  links="$(stat -c '%h' -- "${PUBLICATION_LOCK}")" ||
+    die "could not inspect the manager publication lock: ${PUBLICATION_LOCK}"
+  [[ "${owner}" == "${EUID}" && "${links}" == 1 ]] ||
+    die "manager publication lock must be current-user owned and have one link: ${PUBLICATION_LOCK}"
+  exec 9<>"${PUBLICATION_LOCK}" ||
+    die "could not open the manager publication lock: ${PUBLICATION_LOCK}"
+  validate_lock_descriptor_identity 9 "${PUBLICATION_LOCK}" "manager publication"
+  validate_inherited_lock_descriptor 9 "${PUBLICATION_LOCK}" "manager publication"
+  PUBLICATION_LOCK_FD=9
+}
+
 ensure_not_root() {
   ((EUID != 0)) ||
     die "refusing to run as root; use an unprivileged desktop user"
@@ -1588,7 +1664,7 @@ fresh_markerless_install_root_is_valid() {
   [[ "${LEGACY_LOCK_HELD}" == "true" ]] || return 1
   [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" &&
     -f "${legacy_lock}" && ! -L "${legacy_lock}" &&
-    "${legacy_lock}" -ef /proc/self/fd/8 ]] || return 1
+    "${legacy_lock}" -ef /proc/self/fd/7 ]] || return 1
   unexpected="$({
     find "${INSTALL_ROOT}" -mindepth 1 -maxdepth 1 \
       ! -name '.manager.lock' \
@@ -1702,16 +1778,12 @@ acquire_existing_legacy_lock() {
   [[ -f "${legacy_lock}" && ! -L "${legacy_lock}" ]] ||
     die "legacy manager lock must be a non-symbolic regular file: ${legacy_lock}"
 
-  if ! exec 8<"${legacy_lock}"; then
+  if ! exec 7<"${legacy_lock}"; then
     die "could not open the legacy manager lock safely: ${legacy_lock}"
   fi
-  [[ -f "${legacy_lock}" && ! -L "${legacy_lock}" &&
-    "${legacy_lock}" -ef /proc/self/fd/8 ]] ||
-    die "legacy manager lock changed while it was being opened: ${legacy_lock}"
-  flock -n 8 || die "another Devin Desktop manager operation is running"
-  [[ -f "${legacy_lock}" && ! -L "${legacy_lock}" &&
-    "${legacy_lock}" -ef /proc/self/fd/8 ]] ||
-    die "legacy manager lock changed while it was being acquired: ${legacy_lock}"
+  validate_lock_descriptor_identity 7 "${legacy_lock}" "legacy manager lifecycle"
+  flock -n 7 || die "another Devin Desktop manager operation is running (${ACTIVE_COMMAND}: legacy manager lifecycle lock is active); do not delete the lock file; rerun the same command after it exits"
+  validate_lock_descriptor_identity 7 "${legacy_lock}" "legacy manager lifecycle"
   LEGACY_LOCK_HELD=true
 }
 
@@ -1768,29 +1840,35 @@ acquire_lock() {
   local lock_links
 
   require_commands stat
-  mkdir -p -- "${STATE_HOME}"
-  validate_state_home_security
-  if [[ ! -e "${LOCK_FILE}" && ! -L "${LOCK_FILE}" ]]; then
-    (set -o noclobber; : >"${LOCK_FILE}") 2>/dev/null ||
-      die "could not create the manager lock safely: ${LOCK_FILE}"
+  if [[ -n "${LIFECYCLE_LOCK_FD}" ]]; then
+    validate_state_home_security
+    validate_inherited_lock_descriptor 8 "${LOCK_FILE}" "manager lifecycle"
+  else
+    mkdir -p -- "${STATE_HOME}"
+    validate_state_home_security
+    if [[ ! -e "${LOCK_FILE}" && ! -L "${LOCK_FILE}" ]]; then
+      (set -o noclobber; : >"${LOCK_FILE}") 2>/dev/null ||
+        die "could not create the manager lock safely: ${LOCK_FILE}"
+    fi
+    [[ -f "${LOCK_FILE}" && ! -L "${LOCK_FILE}" ]] ||
+      die "manager lock must be a non-symbolic regular file: ${LOCK_FILE}"
+    lock_links="$(stat -c '%h' -- "${LOCK_FILE}")" ||
+      die "could not inspect the manager lock: ${LOCK_FILE}"
+    [[ "${lock_links}" == "1" ]] ||
+      die "manager lock must not have hard links: ${LOCK_FILE}"
+    exec 8<>"${LOCK_FILE}" || die "could not open the manager lock: ${LOCK_FILE}"
+    validate_lock_descriptor_identity 8 "${LOCK_FILE}" "manager lifecycle"
+    validate_inherited_lock_descriptor 8 "${LOCK_FILE}" "manager lifecycle"
   fi
-  [[ -f "${LOCK_FILE}" && ! -L "${LOCK_FILE}" ]] ||
-    die "manager lock must be a non-symbolic regular file: ${LOCK_FILE}"
-  lock_links="$(stat -c '%h' -- "${LOCK_FILE}")" ||
-    die "could not inspect the manager lock: ${LOCK_FILE}"
-  [[ "${lock_links}" == "1" ]] ||
-    die "manager lock must not have hard links: ${LOCK_FILE}"
-  exec 9<>"${LOCK_FILE}" || die "could not open the manager lock: ${LOCK_FILE}"
-  [[ -f "${LOCK_FILE}" && ! -L "${LOCK_FILE}" &&
-    "${LOCK_FILE}" -ef /proc/self/fd/9 ]] ||
-    die "manager lock changed while it was being opened: ${LOCK_FILE}"
-  flock -n 9 || die "another Devin Desktop manager operation is running"
-  [[ -f "${LOCK_FILE}" && ! -L "${LOCK_FILE}" &&
-    "${LOCK_FILE}" -ef /proc/self/fd/9 ]] ||
-    die "manager lock changed while it was being acquired: ${LOCK_FILE}"
   recover_transaction_partials
   recover_pending_transaction_discard
-  acquire_legacy_lock_if_needed
+  if [[ -n "${LEGACY_LOCK_FD}" ]]; then
+    validate_inherited_lock_descriptor 7 "${INSTALL_ROOT}/.manager.lock" \
+      "legacy manager lifecycle"
+    LEGACY_LOCK_HELD=true
+  else
+    acquire_legacy_lock_if_needed
+  fi
   recover_pending_transaction
   recover_pending_uninstall_cleanup
   recover_pending_release_prune
@@ -4452,7 +4530,7 @@ legacy_public_lock_bridge_is_valid() {
 
   [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" &&
     -f "${public_lock}" && ! -L "${public_lock}" &&
-    "${public_lock}" -ef /proc/self/fd/8 ]] || return 1
+    "${public_lock}" -ef /proc/self/fd/7 ]] || return 1
   directory_contains_only_entry "${INSTALL_ROOT}" "${public_lock}"
 }
 
@@ -4469,7 +4547,7 @@ staged_install_pair_is_valid() {
     -f "${public_lock}" && ! -L "${public_lock}" &&
     -f "${staged_lock}" && ! -L "${staged_lock}" &&
     "${public_lock}" -ef "${staged_lock}" &&
-    "${public_lock}" -ef /proc/self/fd/8 ]] || return 1
+    "${public_lock}" -ef /proc/self/fd/7 ]] || return 1
 
   for root in "${INSTALL_ROOT}" "${staged_root}"; do
     directory_can_be_listed "${root}" || return 1
@@ -4553,7 +4631,7 @@ discard_unrecorded_staged_install_root() {
   [[ -f "${staged_lock}" && ! -L "${staged_lock}" &&
     -f "${public_lock}" && ! -L "${public_lock}" &&
     "${staged_lock}" -ef "${public_lock}" &&
-    "${public_lock}" -ef /proc/self/fd/8 ]] || return 1
+    "${public_lock}" -ef /proc/self/fd/7 ]] || return 1
   directory_contains_only_entry "${staged_root}" "${staged_lock}" || return 1
   rm -f -- "${staged_lock}" || return 1
   rmdir -- "${staged_root}"
@@ -4572,7 +4650,7 @@ create_legacy_lock_bridge() {
   fi
   [[ -f "${staged_lock}" && ! -L "${staged_lock}" &&
     "${staged_lock}" -ef "${public_lock}" &&
-    "${public_lock}" -ef /proc/self/fd/8 ]] || return 1
+    "${public_lock}" -ef /proc/self/fd/7 ]] || return 1
   directory_contains_only_entry "${staged_root}" "${staged_lock}"
 }
 
@@ -4659,23 +4737,33 @@ command_uninstall() {
 
   require_commands jq sha256sum readlink flock awk mktemp find
   require_integration_commands
-  acquire_lock
-  require_app_stopped
-  validate_state_or_absent
-  validate_release_inventory_ownership
-  validate_linked_releases
 
   if [[ "${answer}" != "--yes" ]]; then
     if [[ ! -t 0 ]]; then
-      die "uninstall requires an interactive terminal or --yes"
+      die "uninstall requires an interactive terminal; use make uninstall-yes for prompt-free automation"
     fi
-    printf 'Remove the managed Devin Desktop application and manager? [y/N] '
-    read -r answer
+    printf 'Remove the managed Devin Desktop application and manager? [y/N] ' >&2
+    if ! IFS= read -r answer; then
+      answer=""
+    fi
+    while [[ "${answer}" == [[:space:]]* ]]; do answer="${answer:1}"; done
+    while [[ "${answer}" == *[[:space:]] ]]; do answer="${answer:0:${#answer}-1}"; done
     [[ "${answer,,}" == "y" || "${answer,,}" == "yes" ]] || {
       info "uninstall cancelled"
       return
     }
   fi
+
+  if [[ -n "${PUBLICATION_LOCK_FD}" ]]; then
+    validate_inherited_lock_descriptor 9 "${PUBLICATION_LOCK}" "manager publication"
+  else
+    acquire_publication_lock
+  fi
+  acquire_lock
+  require_app_stopped
+  validate_state_or_absent
+  validate_release_inventory_ownership
+  validate_linked_releases
 
   backup_transaction
   if ! perform_uninstall; then
@@ -4707,8 +4795,39 @@ command_uninstall() {
 }
 
 main() {
-  local command_name="${1:-help}"
+  local command_name
   local profile
+
+  while (($# > 0)); do
+    case "$1" in
+      --publication-lock-fd)
+        (($# >= 2)) || usage_die "--publication-lock-fd requires descriptor 9"
+        [[ "$2" == 9 ]] || usage_die "--publication-lock-fd must be descriptor 9"
+        PUBLICATION_LOCK_FD=9
+        shift 2
+        ;;
+      --lifecycle-lock-fd)
+        (($# >= 2)) || usage_die "--lifecycle-lock-fd requires descriptor 8"
+        [[ "$2" == 8 ]] || usage_die "--lifecycle-lock-fd must be descriptor 8"
+        LIFECYCLE_LOCK_FD=8
+        shift 2
+        ;;
+      --legacy-lock-fd)
+        (($# >= 2)) || usage_die "--legacy-lock-fd requires descriptor 7"
+        [[ "$2" == 7 ]] || usage_die "--legacy-lock-fd must be descriptor 7"
+        LEGACY_LOCK_FD=7
+        shift 2
+        ;;
+      --*) break ;;
+      *) break ;;
+    esac
+  done
+  if [[ -n "${PUBLICATION_LOCK_FD}${LIFECYCLE_LOCK_FD}${LEGACY_LOCK_FD}" &&
+    ( -z "${PUBLICATION_LOCK_FD}" || -z "${LIFECYCLE_LOCK_FD}" ) ]]; then
+    usage_die "publication and lifecycle lock descriptors must be supplied together"
+  fi
+  command_name="${1:-help}"
+  ACTIVE_COMMAND="${command_name}"
 
   case "${command_name}" in
     help|-h|--help)
@@ -4775,6 +4894,11 @@ main() {
   esac
   validate_environment
   ensure_not_root
+  if [[ -n "${PUBLICATION_LOCK_FD}" && "${command_name}" != uninstall &&
+    "${command_name}" != uninstall-yes ]]; then
+    validate_lock_parent_security "${BIN_DIR}" "manager publication"
+    validate_inherited_lock_descriptor 9 "${PUBLICATION_LOCK}" "manager publication"
+  fi
 
   case "${command_name}" in
     install|update)

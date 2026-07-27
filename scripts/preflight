@@ -24,7 +24,9 @@ WORK_DIRECTORY=""
 PROJECT_ROOT=""
 
 readonly -A PROFILE_MEMBERS=(
-  [install-manager]='install-manager-local'
+  [install-manager]='install-manager-local manager-publication-lock'
+  [install-manager-custom]='install-manager-local'
+  [manager-publication-lock]='manager-publication-lock-local'
   [check-coverage]='check-coverage-local'
   [fixture-mini-deb]='fixture-mini-deb-local'
   [manager-status]='manager-status-local'
@@ -50,6 +52,7 @@ readonly -A PROFILE_MEMBERS=(
 
 readonly -A ROOT_OPTIONAL=(
   [install-manager]=1
+  [install-manager-custom]=1
   [check-coverage]=1
   [fixture-mini-deb]=1
 )
@@ -265,6 +268,7 @@ check_feature_tool() {
       ;;
     readlink)
       capture_probe "${key}" "${RESOLVED_TOOLS[${key}]}" -m -- / || true
+      PROBE_OUTPUT="${PROBE_OUTPUT%%$'\n'*}"
       [[ "${PROBE_OUTPUT}" == / ]] || add_incompatible_command "${key}" "${value}" "${purpose}"
       ;;
     gnu-mv)
@@ -396,6 +400,11 @@ collect_local_profile() {
       check_plain_tools grep dirname mkdir mktemp rm ln install
       check_feature_tool readlink readlink 'GNU readlink physical path behavior is required' readlink
       check_feature_tool mv mv 'GNU mv no-target-directory behavior is required' gnu-mv
+      ;;
+    manager-publication-lock-local)
+      check_plain_tools id
+      check_feature_tool flock flock 'manager publication locking requires util-linux flock' flock
+      check_feature_tool stat stat 'manager lock descriptor validation requires GNU stat' stat
       ;;
     check-coverage-local)
       check_feature_tool jq jq 'jq array and object evaluation is required' jq

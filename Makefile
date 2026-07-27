@@ -125,6 +125,60 @@ define RUN_PREFLIGHT
 run_script "$$PROJECT_ROOT/scripts/preflight" $(1) --project-root "$$PROJECT_ROOT"
 endef
 
+define ACQUIRE_MANAGER_PUBLICATION_LOCKS
+publication_parent=$$MAKE_HOME/.local/bin; \
+state_home=$${MAKE_XDG_STATE_HOME:-$$MAKE_HOME/.local/state}; \
+publication_lock=$$publication_parent/.devin-desktop-manager.publication.lock; \
+lifecycle_lock=$$state_home/devin-desktop-manager.lock; \
+legacy_lock=$$MAKE_HOME/.local/opt/devin-desktop/.manager.lock; \
+current_uid=$$(id -u); \
+mkdir -p -- "$$publication_parent" "$$state_home"; \
+validate_lock_parent() { \
+	path=$$1; label=$$2; \
+	[ -d "$$path" ] && [ ! -L "$$path" ] || { printf '%s\n' "$$label parent must be a non-symbolic directory: $$path" >&2; return 1; }; \
+	owner=$$(stat -c '%u' -- "$$path") || return 1; \
+	permissions=$$(stat -c '%a' -- "$$path") || return 1; \
+	[ "$$owner" = "$$current_uid" ] || { printf '%s\n' "$$label parent must be owned by the current user: $$path" >&2; return 1; }; \
+	other=$${permissions#$${permissions%?}}; before_other=$${permissions%?}; group=$${before_other#$${before_other%?}}; \
+	[ $$((group & 2)) -eq 0 ] && [ $$((other & 2)) -eq 0 ] || { printf '%s\n' "$$label parent must not be writable by other users: $$path" >&2; return 1; }; \
+}; \
+validate_lock_parent "$$publication_parent" 'manager publication'; \
+validate_lock_parent "$$state_home" 'manager lifecycle'; \
+validate_lock_path() { \
+	path=$$1; allowed_links=$$2; \
+	[ -f "$$path" ] && [ ! -L "$$path" ] || { printf '%s\n' "install: error: unsafe manager lock path: $$path" >&2; return 1; }; \
+	metadata=$$(stat -c '%u:%h' -- "$$path") || return 1; owner=$${metadata%:*}; links=$${metadata#*:}; \
+	[ "$$owner" = "$$current_uid" ] || { printf '%s\n' "install: error: unsafe manager lock path: $$path" >&2; return 1; }; \
+	case ",$$allowed_links," in *",$$links,"*) ;; *) printf '%s\n' "install: error: unsafe manager lock path: $$path" >&2; return 1 ;; esac; \
+}; \
+validate_lock_identity() { \
+	fd=$$1; path=$$2; allowed_links=$$3; \
+	validate_lock_path "$$path" "$$allowed_links" || return 1; \
+	path_identity=$$(stat -Lc '%d:%i:%u:%F:%h' -- "$$path") || return 1; \
+	fd_identity=$$(stat -Lc '%d:%i:%u:%F:%h' -- "/proc/self/fd/$$fd") || return 1; \
+	[ "$$path_identity" = "$$fd_identity" ] || { printf '%s\n' "install: error: manager lock descriptor $$fd does not match: $$path" >&2; return 1; }; \
+}; \
+create_lock() { path=$$1; [ -e "$$path" ] || [ -L "$$path" ] || (set -C; : >"$$path") 2>/dev/null || { [ -e "$$path" ] || return 1; }; validate_lock_path "$$path" 1; }; \
+create_lock "$$publication_lock"; create_lock "$$lifecycle_lock"; \
+exec 9<>"$$publication_lock"; \
+validate_lock_identity 9 "$$publication_lock" 1; \
+flock -n 9 || { printf '%s\n' 'install: error: another manager publication operation is active; do not delete the lock file; rerun make install after it exits' >&2; exit 1; }; \
+validate_lock_identity 9 "$$publication_lock" 1; \
+exec 8<>"$$lifecycle_lock"; \
+validate_lock_identity 8 "$$lifecycle_lock" 1; \
+flock -n 8 || { printf '%s\n' 'install: error: another manager lifecycle operation is active; do not delete the lock file; rerun make install after it exits' >&2; exit 1; }; \
+validate_lock_identity 8 "$$lifecycle_lock" 1; \
+legacy_option=; \
+if [ -e "$$legacy_lock" ] || [ -L "$$legacy_lock" ]; then \
+	validate_lock_path "$$legacy_lock" 1,2; \
+	exec 7<>"$$legacy_lock"; \
+	validate_lock_identity 7 "$$legacy_lock" 1,2; \
+	flock -n 7 || { printf '%s\n' 'install: error: another legacy manager lifecycle operation is active; do not delete the lock file; rerun make install after it exits' >&2; exit 1; }; \
+	validate_lock_identity 7 "$$legacy_lock" 1,2; \
+	legacy_option='--legacy-lock-fd 7'; \
+fi
+endef
+
 define DO_LINT
 shellcheck_path=$$(resolve_executable SHELLCHECK "$$MAKE_SHELLCHECK") || exit $$?; \
 run_script -n "$$PROJECT_ROOT/bin/devin-desktop-manager" scripts/*; \
@@ -182,7 +236,7 @@ install-manager:
 	@$(PREPARE_SCRIPT_RUNNER); \
 	run_script "$$PROJECT_ROOT/scripts/preflight" install-manager; \
 	destination=$$MAKE_HOME/.local/bin/devin-desktop-manager; \
-	run_script "$$PROJECT_ROOT/scripts/install-manager" \
+	run_script "$$PROJECT_ROOT/scripts/install-manager" --canonical \
 		"$$PROJECT_ROOT/bin/devin-desktop-manager" "$$destination"
 
 link: link-dev
@@ -191,16 +245,33 @@ link-dev:
 	@$(PREPARE_SCRIPT_RUNNER); \
 	run_script "$$PROJECT_ROOT/scripts/preflight" install-manager; \
 	destination=$$MAKE_HOME/.local/bin/devin-desktop-manager; \
-	run_script "$$PROJECT_ROOT/scripts/install-manager" --link \
+	run_script "$$PROJECT_ROOT/scripts/install-manager" --link --canonical \
 		"$$PROJECT_ROOT/bin/devin-desktop-manager" "$$destination"
 
 install:
 	@$(PREPARE_SCRIPT_RUNNER); \
 	$(call RUN_PREFLIGHT,install); \
 	destination=$$MAKE_HOME/.local/bin/devin-desktop-manager; \
-	run_script "$$PROJECT_ROOT/scripts/install-manager" \
+	if [ -e "$$destination" ] || [ -L "$$destination" ]; then \
+		manageable=false; \
+		if [ -L "$$destination" ]; then \
+			resolved_destination=$$(readlink -f -- "$$destination" 2>/dev/null || true); \
+			[ "$$resolved_destination" = "$$PROJECT_ROOT/bin/devin-desktop-manager" ] && manageable=true; \
+			[ "$$manageable" = true ] || grep -Fqx 'readonly MANAGER_ID="io.github.newbpydev.devin-desktop-manager"' "$$resolved_destination" 2>/dev/null && manageable=true; \
+		else \
+			grep -Fqx 'readonly MANAGER_ID="io.github.newbpydev.devin-desktop-manager"' "$$destination" 2>/dev/null && manageable=true; \
+		fi; \
+		[ "$$manageable" = true ] || { printf '%s\n' "install: error: refusing to replace unrelated path: $$destination" >&2; exit 1; }; \
+	fi; \
+	$(ACQUIRE_MANAGER_PUBLICATION_LOCKS); \
+	run_script "$$PROJECT_ROOT/scripts/install-manager" --canonical \
+		--publication-lock-fd 9 --lifecycle-lock-fd 8 $$legacy_option \
 		"$$PROJECT_ROOT/bin/devin-desktop-manager" "$$destination"; \
-	run_script "$$PROJECT_ROOT/bin/devin-desktop-manager" install
+	if ! run_script "$$PROJECT_ROOT/bin/devin-desktop-manager" \
+		--publication-lock-fd 9 --lifecycle-lock-fd 8 $$legacy_option install; then \
+		printf '%s\n' 'install: error: manager installation succeeded, but application installation did not; recoverable state remains; rerun make install to resume' >&2; \
+		exit 1; \
+	fi
 
 status check update rollback set-defaults doctor:
 	@$(PREPARE_SCRIPT_RUNNER); \

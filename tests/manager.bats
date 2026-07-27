@@ -418,6 +418,30 @@ downgrade_to_public_0_1_layout() {
   [[ "${output}" == *"Usage: devin-desktop-manager <command>"* ]]
 }
 
+@test "[PMC-U4-R05] non-TTY uninstall rejects before publication or lifecycle state" {
+  local publication_lock="${TEST_HOME}/.local/bin/.devin-desktop-manager.publication.lock"
+  local lifecycle_lock="${TEST_HOME}/.local/state/devin-desktop-manager.lock"
+
+  run manager_env uninstall </dev/null
+
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"make uninstall-yes"* ]]
+  [ ! -e "${publication_lock}" ]
+  [ ! -e "${lifecycle_lock}" ]
+}
+
+@test "[PMC-U4-R06] uninstall-yes never reads stdin and remains a no-op when absent" {
+  run bash -c 'printf "must-not-be-read\n" | "$@"' _ env \
+    HOME="${TEST_HOME}" XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" PATH="${MOCK_BIN}:${PATH}" \
+    "${MANAGER}" uninstall-yes
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"managed application removed"* ]]
+}
+
 @test "[PMC-U2-C01] status is read-only and reports an empty installation" {
   run manager_env status
 
@@ -927,8 +951,8 @@ JSON
       acquire_legacy_lock_if_needed
       [[ "${LEGACY_LOCK_HELD:-false}" == "true" ]]
       [[ -f "${INSTALL_ROOT}/.manager.lock" &&
-        "${INSTALL_ROOT}/.manager.lock" -ef /proc/self/fd/8 ]]
-      if bash -c '\''exec 8>&-; flock -n "$1" true'\'' \
+        "${INSTALL_ROOT}/.manager.lock" -ef /proc/self/fd/7 ]]
+      if bash -c '\''exec 7>&-; flock -n "$1" true'\'' \
         _ "${INSTALL_ROOT}/.manager.lock"; then
         exit 1
       fi
@@ -2813,6 +2837,32 @@ EOF
   [ "${status}" -eq 0 ]
 }
 
+@test "[PMC-U4-R09] repeat update is idempotent and repeat rollback toggles intentionally" {
+  local second="${BATS_TEST_TMPDIR}/second.deb"
+  local second_build="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local original_current upgraded_current
+
+  install_fixture
+  original_current="$(readlink "${install_root}/current")"
+  run install_fixture
+  [ "${status}" -eq 0 ]
+  [ "$(readlink "${install_root}/current")" = "${original_current}" ]
+  [ "$(find "${install_root}/releases" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ]
+
+  "${FIXTURE_BUILDER}" "${second}" safe "${second_build}" "3.4.28"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${second_build}/Devin-linux-x64-3.4.28.deb" \
+    "${second}" "3.4.28" "${second_build}" 1783378474000
+  manager_env update
+  upgraded_current="$(readlink "${install_root}/current")"
+
+  manager_env rollback
+  manager_env rollback
+  [ "$(readlink "${install_root}/current")" = "${upgraded_current}" ]
+  [ "$(readlink "${install_root}/previous")" = "${original_current}" ]
+}
+
 @test "rollback refuses a previous release corrupted after installation" {
   local second="${BATS_TEST_TMPDIR}/second.deb"
   local second_build="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -3397,7 +3447,7 @@ EOF
         command mv "$@" || return
         public_lock="${INSTALL_ROOT}/.manager.lock"
         [[ -f "${public_lock}" && ! -L "${public_lock}" ]] || return 1
-        if bash -c '\''exec 8>&-; flock -n "$1" true'\'' _ "${public_lock}"; then
+        if bash -c '\''exec 7>&-; flock -n "$1" true'\'' _ "${public_lock}"; then
           return 1
         fi
         saw_staging_move=true
@@ -3409,7 +3459,7 @@ EOF
       [[ "${saw_staging_move}" == "true" &&
         -f "${public_lock}" && ! -L "${public_lock}" &&
         "${public_lock}" -ef "${staged_lock}" ]]
-      if bash -c '\''exec 8>&-; flock -n "$1" true'\'' _ "${public_lock}"; then
+      if bash -c '\''exec 7>&-; flock -n "$1" true'\'' _ "${public_lock}"; then
         exit 1
       fi
       restore_transaction
@@ -3475,7 +3525,7 @@ EOF
       staged_lock="${STAGED_INSTALL_ROOT}/.manager.lock"
       [[ -f "${public_lock}" && -f "${staged_lock}" &&
         "${public_lock}" -ef "${staged_lock}" ]]
-      if bash -c '\''exec 8>&-; flock -n "$1" true'\'' _ "${public_lock}"; then
+      if bash -c '\''exec 7>&-; flock -n "$1" true'\'' _ "${public_lock}"; then
         exit 1
       fi
       restore_transaction
@@ -3512,7 +3562,7 @@ EOF
       restore_staged_install_root
       [[ ! -e "${STAGED_INSTALL_ROOT}" &&
         -L "${CURRENT_LINK}" &&
-        "${INSTALL_ROOT}/.manager.lock" -ef /proc/self/fd/8 ]]
+        "${INSTALL_ROOT}/.manager.lock" -ef /proc/self/fd/7 ]]
     ' _ "${MANAGER}"
 
   [ "${status}" -eq 0 ]
@@ -3651,7 +3701,7 @@ EOF
       restore_staged_install_root
       [[ -L "${CURRENT_LINK}" &&
         ! -e "${staged_root}" &&
-        "${INSTALL_ROOT}/.manager.lock" -ef /proc/self/fd/8 ]]
+        "${INSTALL_ROOT}/.manager.lock" -ef /proc/self/fd/7 ]]
     ' _ "${MANAGER}"
 
   [ "${status}" -eq 0 ]

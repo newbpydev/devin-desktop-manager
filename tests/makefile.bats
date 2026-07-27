@@ -23,6 +23,7 @@ EOF
   MAKE_COMMAND="$(command -v make)"
   HARNESS_BASH="$(command -v bash)"
   TRUE_COMMAND="$(type -P true)"
+  TIMEOUT_COMMAND="$(command -v timeout)"
 }
 
 make_fixture() {
@@ -405,6 +406,235 @@ JSON
   [ "${status}" -eq 0 ]
   [ -L "${installed}" ]
   [ "$(readlink -f "${installed}")" = "${PROJECT_ROOT}/bin/devin-desktop-manager" ]
+}
+
+@test "[PMC-U4-R03] canonical helper rejects missing inherited lock descriptors" {
+  local installer="${PROJECT_ROOT}/scripts/install-manager"
+  local destination="${TEST_HOME}/.local/bin/devin-desktop-manager"
+
+  mkdir -p "$(dirname "${destination}")"
+  run env HOME="${TEST_HOME}" bash -c 'exec 9>&- 8>&-; exec "$@"' _ \
+    "${installer}" --canonical \
+    --publication-lock-fd 9 --lifecycle-lock-fd 8 \
+    "${PROJECT_ROOT}/bin/devin-desktop-manager" "${destination}"
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"publication lock descriptor"* ]]
+  [ ! -e "${destination}" ]
+}
+
+@test "[PMC-U4-R01] invalid canonical HOME fails before lock or manager publication" {
+  local installed="${TEST_HOME}/.local/bin/devin-desktop-manager"
+
+  run env -u HOME make --no-print-directory -s -C "${PROJECT_ROOT}" install-manager
+
+  [ "${status}" -ne 0 ]
+  [ ! -e "${installed}" ]
+  [ ! -e "${TEST_HOME}/.local/bin/.devin-desktop-manager.publication.lock" ]
+  [ ! -e "${TEST_HOME}/.local/state/devin-desktop-manager.lock" ]
+
+  mkdir -p "$(dirname "${installed}")"
+  printf 'caller-owned\n' >"${installed}"
+  run make --no-print-directory -s -C "${PROJECT_ROOT}" \
+    HOME="${TEST_HOME}" install-manager
+  [ "${status}" -ne 0 ]
+  [ "$(cat "${installed}")" = caller-owned ]
+  [ ! -e "${TEST_HOME}/.local/bin/.devin-desktop-manager.publication.lock" ]
+  [ ! -e "${TEST_HOME}/.local/state/devin-desktop-manager.lock" ]
+}
+
+@test "[PMC-U4-R02] current lifecycle contention blocks publication before replacement" {
+  local installed="${TEST_HOME}/.local/bin/devin-desktop-manager"
+  local lifecycle_lock="${TEST_HOME}/.local/state/devin-desktop-manager.lock"
+  local ready="${BATS_TEST_TMPDIR}/lifecycle.ready"
+  local release="${BATS_TEST_TMPDIR}/lifecycle.release"
+  local holder
+
+  mkdir -p "$(dirname "${installed}")" "$(dirname "${lifecycle_lock}")"
+  cp "${PROJECT_ROOT}/bin/devin-desktop-manager" "${installed}"
+  printf 'preserve-current-manager\n' >>"${installed}"
+  (
+    exec 8<>"${lifecycle_lock}"
+    flock -n 8
+    : >"${ready}"
+    while [[ ! -e "${release}" ]]; do read -r -t 0.05 _ || true; done
+  ) </dev/null &
+  holder=$!
+  for _ in {1..200}; do [[ -e "${ready}" ]] && break; read -r -t 0.05 _ || true; done
+  [ -e "${ready}" ]
+
+  run make --no-print-directory -s -C "${PROJECT_ROOT}" \
+    HOME="${TEST_HOME}" install-manager
+  : >"${release}"
+  wait "${holder}"
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"manager lifecycle operation is active"* ]]
+  grep -Fq preserve-current-manager "${installed}"
+}
+
+@test "[PMC-U4-R02] unsafe legacy lock objects fail bounded before publication" {
+  local root="${BATS_TEST_TMPDIR}/unsafe-legacy-checkout"
+  local legacy_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local legacy_lock="${legacy_root}/.manager.lock"
+  local installed="${TEST_HOME}/.local/bin/devin-desktop-manager"
+  local external="${BATS_TEST_TMPDIR}/external-lock"
+  local ready="${BATS_TEST_TMPDIR}/external.ready"
+  local release="${BATS_TEST_TMPDIR}/external.release"
+  local holder
+
+  make_fixture "${root}"
+  cat >"${root}/bin/devin-desktop-manager" <<'EOF'
+#!/usr/bin/env bash
+readonly MANAGER_ID="io.github.newbpydev.devin-desktop-manager"
+if [[ "${1:-}" == internal-preflight ]]; then
+  printf 'DDM-PREFLIGHT\0%s\0%s\0' 1 0
+  exit 0
+fi
+exit 0
+EOF
+  chmod 0755 "${root}/bin/devin-desktop-manager"
+  mkdir -p "${legacy_root}"
+
+  mkfifo "${legacy_lock}"
+  run "${TIMEOUT_COMMAND}" --signal=TERM --kill-after=1s 5s \
+    "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
+    HOME="${TEST_HOME}" install
+  [ "${status}" -ne 0 ]
+  [ "${status}" -ne 124 ]
+  [[ "${output}" == *"unsafe manager lock path"* ]]
+  [ ! -e "${installed}" ]
+
+  rm -f "${legacy_lock}"
+  : >"${external}"
+  (
+    exec 7<>"${external}"
+    flock -n 7
+    : >"${ready}"
+    while [[ ! -e "${release}" ]]; do read -r -t 0.05 _ || true; done
+  ) </dev/null &
+  holder=$!
+  for _ in {1..200}; do [[ -e "${ready}" ]] && break; read -r -t 0.05 _ || true; done
+  [ -e "${ready}" ]
+  ln -s "${external}" "${legacy_lock}"
+
+  run "${TIMEOUT_COMMAND}" --signal=TERM --kill-after=1s 5s \
+    "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
+    HOME="${TEST_HOME}" install
+  : >"${release}"
+  wait "${holder}"
+  [ "${status}" -ne 0 ]
+  [ "${status}" -ne 124 ]
+  [[ "${output}" == *"unsafe manager lock path"* ]]
+  [[ "${output}" != *"operation is active"* ]]
+  [ ! -e "${installed}" ]
+}
+
+@test "[PMC-U3-R04] manager publication lock tools fail before canonical state" {
+  local root="${BATS_TEST_TMPDIR}/lock-tool-checkout"
+  local shim_bin="${BATS_TEST_TMPDIR}/lock-tool-bin"
+  local installed="${TEST_HOME}/.local/bin/devin-desktop-manager"
+
+  make_fixture "${root}"
+  mkdir -p "${shim_bin}"
+  cat >"${shim_bin}/flock" <<'EOF'
+#!/usr/bin/env bash
+printf 'not util-linux\n'
+exit 0
+EOF
+  chmod 0755 "${shim_bin}/flock"
+
+  run env PATH="${shim_bin}:${PATH}" "${MAKE_COMMAND}" --no-print-directory -s \
+    -C "${root}" HOME="${TEST_HOME}" install-manager
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"command.flock"* ]]
+  [[ "${output}" == *"incompatible command"* ]]
+  [ ! -e "${installed}" ]
+  [ ! -e "${TEST_HOME}/.local/bin" ]
+  [ ! -e "${TEST_HOME}/.local/state" ]
+  grep -Fq "[manager-publication-lock]='manager-publication-lock-local'" \
+    "${root}/scripts/preflight"
+
+  run env PATH="${shim_bin}:${PATH}" "${root}/scripts/install-manager" \
+    "${root}/bin/devin-desktop-manager" "${BATS_TEST_TMPDIR}/custom-manager"
+  [ "${status}" -eq 0 ]
+}
+
+@test "[PMC-U4-R04] direct custom helper publication remains caller-owned" {
+  local destination="${BATS_TEST_TMPDIR}/custom/manager"
+
+  mkdir -p "$(dirname "${destination}")"
+  run "${PROJECT_ROOT}/scripts/install-manager" \
+    "${PROJECT_ROOT}/bin/devin-desktop-manager" "${destination}"
+  [ "${status}" -eq 0 ]
+  [ -x "${destination}" ]
+
+  run env HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/install-manager" --link \
+    "${PROJECT_ROOT}/bin/devin-desktop-manager" "${destination}"
+  [ "${status}" -eq 0 ]
+  [ -L "${destination}" ]
+  [ ! -e "${TEST_HOME}/.local/bin/.devin-desktop-manager.publication.lock" ]
+}
+
+@test "[PMC-U4-R08] busy canonical publication lock preserves the manager" {
+  local installed="${TEST_HOME}/.local/bin/devin-desktop-manager"
+  local publication_lock="${TEST_HOME}/.local/bin/.devin-desktop-manager.publication.lock"
+  local ready="${BATS_TEST_TMPDIR}/publication.ready"
+  local release="${BATS_TEST_TMPDIR}/publication.release"
+  local holder
+
+  mkdir -p "$(dirname "${installed}")"
+  cp "${PROJECT_ROOT}/bin/devin-desktop-manager" "${installed}"
+  printf 'sentinel\n' >>"${installed}"
+  (
+    exec 9<>"${publication_lock}"
+    flock -n 9
+    : >"${ready}"
+    while [[ ! -e "${release}" ]]; do read -r -t 0.05 _ || true; done
+  ) </dev/null &
+  holder=$!
+  for _ in {1..200}; do [[ -e "${ready}" ]] && break; read -r -t 0.05 _ || true; done
+  [ -e "${ready}" ]
+
+  run make --no-print-directory -s -C "${PROJECT_ROOT}" \
+    HOME="${TEST_HOME}" install-manager
+  : >"${release}"
+  wait "${holder}"
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"another manager publication operation is active"* ]]
+  [[ "${output}" == *"do not delete"* ]]
+  grep -Fq sentinel "${installed}"
+}
+
+@test "[PMC-U4-R07] partial install reports resumable manager-only state" {
+  local root="${BATS_TEST_TMPDIR}/partial-checkout"
+  local installed="${TEST_HOME}/.local/bin/devin-desktop-manager"
+
+  make_fixture "${root}"
+  cat >"${root}/bin/devin-desktop-manager" <<'EOF'
+#!/usr/bin/env bash
+readonly MANAGER_ID="io.github.newbpydev.devin-desktop-manager"
+if [[ "${1:-}" == internal-preflight ]]; then
+  printf 'DDM-PREFLIGHT\0%s\0%s\0' 1 0
+  exit 0
+fi
+while [[ "${1:-}" == --*-lock-fd ]]; do shift 2; done
+[[ -e "${HOME}/succeed" ]] || exit 42
+exit 0
+EOF
+  chmod 0755 "${root}/bin/devin-desktop-manager"
+
+  run make --no-print-directory -s -C "${root}" HOME="${TEST_HOME}" install
+  [ "${status}" -ne 0 ]
+  [ -x "${installed}" ]
+  [[ "${output}" == *"manager installation succeeded, but application installation did not"* ]]
+  [[ "${output}" == *"rerun make install to resume"* ]]
+
+  : >"${TEST_HOME}/succeed"
+  run make --no-print-directory -s -C "${root}" HOME="${TEST_HOME}" install
+  [ "${status}" -eq 0 ]
 }
 
 @test "package output is byte-for-byte deterministic" {
