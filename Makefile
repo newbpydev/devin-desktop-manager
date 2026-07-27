@@ -220,6 +220,11 @@ run_script "$$PROJECT_ROOT/scripts/output-lock" "$$PROJECT_ROOT" -- \
 	$(1) "$(VERSION)" "$$MAKE_DIST_DIR"
 endef
 
+define DO_LOCKED_CLEAN
+run_script "$$PROJECT_ROOT/scripts/output-lock" "$$PROJECT_ROOT" -- \
+	"$$PROJECT_ROOT/scripts/clean-generated" --project-root "$$PROJECT_ROOT"
+endef
+
 help:
 	@printf '%s\n' \
 		'Devin Desktop Manager $(VERSION)' \
@@ -370,4 +375,4 @@ uninstall-yes:
 clean:
 	@$(PREPARE_SCRIPT_RUNNER); \
 	$(call RUN_PREFLIGHT,clean); \
-	rm -rf -- "$$MAKE_DIST_DIR" "$$MAKE_COVERAGE_DIR"
+	$(DO_LOCKED_CLEAN)

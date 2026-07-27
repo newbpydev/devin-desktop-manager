@@ -131,6 +131,10 @@ _coverage_classify() {
   }
   parent="${root%/*}"
   leaf="${root##*/}"
+  if [[ ! -e "${root}" && ! -L "${root}" && ! -e "${parent}" && ! -L "${parent}" ]]; then
+    _COVERAGE_STATE=absent
+    return 0
+  fi
   [[ -n "${leaf}" && -d "${parent}" && ! -L "${parent}" ]] || {
     _COVERAGE_REASON=outside-root
     return 1

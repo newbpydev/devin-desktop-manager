@@ -199,3 +199,31 @@ make_coverage_tree() {
   printf '{"%s":{"coverage":{"/project/bin/tool":{"lines":[1,1,1,1]}},"timestamp":%s}}\n' \
     "${command_name}" "$(date +%s)" >"${root}/.resultset.json" || return 1
 }
+
+make_package_pair() {
+  (($# == 1 || $# == 2)) || return 2
+  local root="$1" archive_name="${2:-devin-desktop-manager-1.2.3.tar.gz}"
+  portable_test_output_path "${root}" || return 2
+  "${HARNESS_TOOLS[mkdir]:-mkdir}" -p -- "${root}" || return 1
+  printf 'package:%s\n' "${archive_name}" >"${root}/${archive_name}" || return 1
+  (cd "${root}" && "${HARNESS_TOOLS[sha256sum]:-sha256sum}" -- \
+    "${archive_name}" >SHA256SUMS)
+}
+
+make_clean_checkout() {
+  (($# == 1)) || return 2
+  local root="$1"
+  portable_test_output_path "${root}" || return 2
+  "${HARNESS_TOOLS[mkdir]:-mkdir}" -p -- "${root}/scripts/lib" || return 1
+  "${HARNESS_TOOLS[cp]:-cp}" "${PROJECT_ROOT}/Makefile" "${root}/Makefile" || return 1
+  "${HARNESS_TOOLS[cp]:-cp}" \
+    "${PROJECT_ROOT}/scripts/preflight" \
+    "${PROJECT_ROOT}/scripts/output-lock" \
+    "${PROJECT_ROOT}/scripts/clean-generated" \
+    "${root}/scripts/" || return 1
+  "${HARNESS_TOOLS[cp]:-cp}" \
+    "${PROJECT_ROOT}/scripts/lib/coverage-output.bash" \
+    "${PROJECT_ROOT}/scripts/lib/package-output.bash" \
+    "${root}/scripts/lib/" || return 1
+  "${HARNESS_TOOLS[chmod]:-chmod}" 0755 -- "${root}/scripts/"* || return 1
+}

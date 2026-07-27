@@ -22,7 +22,7 @@ printf '%s\n' "$*" >>"${CALL_LOG}"
 EOF
   chmod 0755 "${MOCK_MANAGER}"
 
-  resolve_harness_tools bash cmp env flock git make mv rm sleep tar timeout true
+  resolve_harness_tools bash chmod cmp cp env find flock git make mkdir mv readlink rm sha256sum sleep stat tar timeout true
   MAKE_COMMAND="${HARNESS_TOOLS[make]}"
   HARNESS_BASH="${HARNESS_TOOLS[bash]}"
   TRUE_COMMAND="${HARNESS_TOOLS[true]}"
@@ -45,6 +45,10 @@ make_fixture() {
     cp "${PROJECT_ROOT}/scripts/run-coverage" "${PROJECT_ROOT}/scripts/output-lock" \
       "${PROJECT_ROOT}/scripts/check-coverage" "${root}/scripts/"
     cp "${PROJECT_ROOT}/scripts/lib/coverage-output.bash" "${root}/scripts/lib/"
+  fi
+  if [[ -f "${PROJECT_ROOT}/scripts/clean-generated" ]]; then
+    cp "${PROJECT_ROOT}/scripts/clean-generated" "${root}/scripts/"
+    cp "${PROJECT_ROOT}/scripts/lib/package-output.bash" "${root}/scripts/lib/"
   fi
 }
 
@@ -310,9 +314,17 @@ EOF
 }
 
 @test "[PMC-U5-C01] coverage target enforces the public repository threshold" {
+  local default_profile official_profile union_preflight locked_coverage
   grep -Fq 'coverage:' "${PROJECT_ROOT}/Makefile"
   grep -Fq 'COVERAGE_MINIMUM ?= 90' "${PROJECT_ROOT}/Makefile"
-  grep -Fq '$(call RUN_PREFLIGHT,release-check)' "${PROJECT_ROOT}/Makefile"
+  default_profile="$(grep -nF 'preflight_profile=release-check;' "${PROJECT_ROOT}/Makefile")"
+  official_profile="$(grep -nF 'preflight_profile=release-check-official;' "${PROJECT_ROOT}/Makefile")"
+  union_preflight="$(grep -nF '$(call RUN_PREFLIGHT,$$preflight_profile);' "${PROJECT_ROOT}/Makefile")"
+  locked_coverage="$(grep -nF '$(DO_LOCKED_COVERAGE);' "${PROJECT_ROOT}/Makefile")"
+  [ "${default_profile%%:*}" -lt "${official_profile%%:*}" ]
+  [ "${official_profile%%:*}" -lt "${union_preflight%%:*}" ]
+  [ "${union_preflight%%:*}" -lt "${locked_coverage%%:*}" ]
+  [ "$(grep -Fc '$(DO_LOCKED_COVERAGE);' "${PROJECT_ROOT}/Makefile")" -eq 1 ]
   grep -Fq 'make coverage' "${PROJECT_ROOT}/CONTRIBUTING.md"
   run grep -F 'minimum_coverage' "${PROJECT_ROOT}/.simplecov"
   [ "${status}" -ne 0 ]
@@ -880,4 +892,89 @@ EOF
   grep -Fq "package <--output-lock-fd 6 --project-root ${root} 0.1.0 dist>" "${log}"
   run grep -F 'tests' "${log}"
   [ "${status}" -eq 1 ]
+}
+
+@test "[PMC-U7-R01] clean removes validated outputs and repeats as a no-op" {
+  local root="${BATS_TEST_TMPDIR}/clean-checkout"
+  make_clean_checkout "${root}"
+  make_coverage_tree "${root}/coverage"
+  printf 'asset\n' >"${root}/coverage/assets/report.css"
+  make_package_pair "${root}/dist" devin-desktop-manager-0.1.0.tar.gz
+
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
+    BASH="${HARNESS_BASH}" clean
+  [ "${status}" -eq 0 ]
+  [ ! -e "${root}/coverage" ]
+  [ ! -e "${root}/dist" ]
+
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
+    BASH="${HARNESS_BASH}" clean
+  [ "${status}" -eq 0 ]
+  [ -z "${output}" ]
+
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
+    BASH="${HARNESS_BASH}" COVERAGE_DIR=generated/reports/coverage \
+    DIST_DIR=generated/releases/dist clean
+  [ "${status}" -eq 0 ]
+  [ ! -e "${root}/generated" ]
+}
+
+@test "[PMC-U7-R02] one unsafe domain leaves both output domains byte-identical" {
+  local root="${BATS_TEST_TMPDIR}/clean-checkout"
+  make_clean_checkout "${root}"
+  make_coverage_tree "${root}/coverage"
+  make_package_pair "${root}/dist" devin-desktop-manager-0.1.0.tar.gz
+  printf 'corrupt\n' >>"${root}/dist/devin-desktop-manager-0.1.0.tar.gz"
+  snapshot_tree "${root}/coverage" "${BATS_TEST_TMPDIR}/coverage-before"
+  snapshot_tree "${root}/dist" "${BATS_TEST_TMPDIR}/dist-before"
+
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
+    BASH="${HARNESS_BASH}" clean
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"coverage and dist were unchanged"* ]]
+  snapshot_tree "${root}/coverage" "${BATS_TEST_TMPDIR}/coverage-after"
+  snapshot_tree "${root}/dist" "${BATS_TEST_TMPDIR}/dist-after"
+  cmp "${BATS_TEST_TMPDIR}/coverage-before" "${BATS_TEST_TMPDIR}/coverage-after"
+  cmp "${BATS_TEST_TMPDIR}/dist-before" "${BATS_TEST_TMPDIR}/dist-after"
+}
+
+@test "[PMC-U7-R03] clean preserves unknown dist regular siblings" {
+  local root="${BATS_TEST_TMPDIR}/clean-checkout"
+  make_clean_checkout "${root}"
+  make_package_pair "${root}/dist" devin-desktop-manager-0.1.0.tar.gz
+  printf 'foreign\n' >"${root}/dist/keep.txt"
+  printf 'older unrelated\n' >"${root}/dist/other-0.0.1.zip"
+
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
+    BASH="${HARNESS_BASH}" clean
+  [ "${status}" -eq 0 ]
+  [ "$(<"${root}/dist/keep.txt")" = foreign ]
+  [ "$(<"${root}/dist/other-0.0.1.zip")" = "older unrelated" ]
+  [ ! -e "${root}/dist/SHA256SUMS" ]
+  [ ! -e "${root}/dist/devin-desktop-manager-0.1.0.tar.gz" ]
+}
+
+@test "[PMC-U7-R05] clean fails fast on output contention and succeeds on retry" {
+  local root="${BATS_TEST_TMPDIR}/clean-checkout" ready="${BATS_TEST_TMPDIR}/ready"
+  local continue="${BATS_TEST_TMPDIR}/continue" holder
+  make_clean_checkout "${root}"
+  make_coverage_tree "${root}/coverage"
+  : >"${root}/.devin-desktop-manager.outputs.lock"
+  "${HARNESS_BASH}" -c 'exec 6<>"$1"; flock 6; : >"$2"; while [[ ! -e "$3" ]]; do sleep 0.05; done' \
+    _ "${root}/.devin-desktop-manager.outputs.lock" "${ready}" "${continue}" &
+  holder=$!
+  wait_for_ready "${ready}"
+
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
+    BASH="${HARNESS_BASH}" clean
+  release_barrier "${continue}"
+  wait "${holder}"
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"held by another output operation"* ]]
+  [ -d "${root}/coverage" ]
+
+  run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
+    BASH="${HARNESS_BASH}" clean
+  [ "${status}" -eq 0 ]
+  [ ! -e "${root}/coverage" ]
 }

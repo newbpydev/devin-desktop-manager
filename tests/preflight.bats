@@ -293,3 +293,13 @@ EOF
   [[ "${output}" == *"command.tail"* ]]
   [[ "${output}" != *"package handoff"* ]]
 }
+
+@test "[PMC-U7-R06] clean owns one root-scoped local profile" {
+  run "${HARNESS_BASH}" "${PREFLIGHT}" clean
+  [ "${status}" -eq 2 ]
+  [[ "${output}" == *"--project-root"* ]]
+
+  run "${HARNESS_BASH}" "${PREFLIGHT}" clean --project-root "${PROJECT_ROOT}"
+  [ "${status}" -ne 2 ]
+  grep -Fq "[clean]='clean-local output-lock'" "${PREFLIGHT}"
+}

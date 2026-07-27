@@ -134,7 +134,7 @@ _package_validate_sidecar() {
 }
 
 _package_classify() {
-  local root="$1" root_device path name suffix
+  local root="$1" root_device path name suffix parent
   local public_checksum= backup_archive
   local -a entries=() public_archives=() stages=() backups=()
   _PACKAGE_STATE=unsafe
@@ -143,8 +143,19 @@ _package_classify() {
   _PACKAGE_STAGE=
   _PACKAGE_BACKUP=
 
-  [[ "${root}" == /* && "${root}" != *[!\ -~]* && "${root}" != / &&
-    -d "${root}" && ! -L "${root}" ]] || {
+  [[ "${root}" == /* && "${root}" != *[!\ -~]* && "${root}" != / ]] || {
+    _PACKAGE_REASON=outside-root
+    return 1
+  }
+  parent="${root%/*}"
+  if [[ ! -e "${root}" && ! -L "${root}" ]]; then
+    if [[ (! -e "${parent}" && ! -L "${parent}") ||
+      (-d "${parent}" && ! -L "${parent}") ]]; then
+      _PACKAGE_STATE=absent
+      return 0
+    fi
+  fi
+  [[ -d "${root}" && ! -L "${root}" ]] || {
     _PACKAGE_REASON=outside-root
     return 1
   }

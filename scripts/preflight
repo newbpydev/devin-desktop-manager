@@ -51,7 +51,7 @@ readonly -A PROFILE_MEMBERS=(
   [release-check-official]='release-check release-contract-official'
   [install]='install-manager manager-update'
   [application]='application-local'
-  [clean]='clean-local'
+  [clean]='clean-local output-lock'
 )
 
 readonly -A ROOT_OPTIONAL=(
@@ -499,7 +499,14 @@ collect_local_profile() {
       command_name="${command_name%-local}"
       collect_manager_protocol "${command_name}"
       ;;
-    application-local|clean-local)
+    clean-local)
+      check_plain_tools find mktemp rm rmdir sha256sum sort tail
+      check_feature_tool jq jq 'clean coverage validation requires jq object evaluation' jq
+      check_feature_tool readlink readlink 'clean output path validation requires GNU readlink' readlink
+      check_feature_tool mv mv 'clean output repair requires GNU mv' gnu-mv
+      check_feature_tool stat stat 'clean candidate validation requires GNU stat' stat
+      ;;
+    application-local)
       ;;
     *) usage ;;
   esac

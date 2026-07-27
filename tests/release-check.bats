@@ -22,18 +22,49 @@ setup() {
   resolve_harness_tools bash chmod cmp find flock git gzip mkdir mv readlink rm sha256sum sleep sort stat tar
 }
 
-make_package_pair() {
-  local root="$1" archive_name="${2:-devin-desktop-manager-1.2.3.tar.gz}"
-  portable_test_output_path "${root}" || return 2
-  mkdir -p -- "${root}"
-  printf 'package:%s\n' "${archive_name}" >"${root}/${archive_name}"
-  (cd "${root}" && sha256sum -- "${archive_name}" >SHA256SUMS)
-}
-
 classify_package() {
   local root="$1" result="${BATS_TEST_TMPDIR}/package-classification"
   run bash -c 'source "$1"; package_classify "$2" >"$3"; status=$?; mapfile -d "" -t fields <"$3"; printf "%s|%s\n" "${fields[0]:-}" "${fields[1]:-}"; exit "$status"' \
     _ "${PACKAGE_LIBRARY}" "${root}" "${result}"
+}
+
+@test "[PMC-U7-R02] unsafe coverage preserves a valid package pair" {
+  local root="${BATS_TEST_TMPDIR}/clean-checkout"
+  make_clean_checkout "${root}"
+  make_coverage_tree "${root}/coverage"
+  printf 'foreign\n' >"${root}/coverage/unknown"
+  make_package_pair "${root}/dist"
+  snapshot_tree "${root}/coverage" "${BATS_TEST_TMPDIR}/coverage-before"
+  snapshot_tree "${root}/dist" "${BATS_TEST_TMPDIR}/dist-before"
+
+  run "${root}/scripts/clean-generated" --project-root "${root}"
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"unknown-coverage-entry"* ]]
+  snapshot_tree "${root}/coverage" "${BATS_TEST_TMPDIR}/coverage-after"
+  snapshot_tree "${root}/dist" "${BATS_TEST_TMPDIR}/dist-after"
+  cmp "${BATS_TEST_TMPDIR}/coverage-before" "${BATS_TEST_TMPDIR}/coverage-after"
+  cmp "${BATS_TEST_TMPDIR}/dist-before" "${BATS_TEST_TMPDIR}/dist-after"
+}
+
+@test "[PMC-U7-R06] direct clean enforces FD6 root usage and stderr failures" {
+  local root="${BATS_TEST_TMPDIR}/clean-checkout"
+  local stdout_file="${BATS_TEST_TMPDIR}/stdout" stderr_file="${BATS_TEST_TMPDIR}/stderr"
+  make_clean_checkout "${root}"
+
+  run "${root}/scripts/clean-generated" --output-lock-fd 6 --project-root "${root}"
+  [ "${status}" -eq 2 ]
+  [[ "${output}" == Usage:* ]]
+
+  mkdir -p "${root}/coverage"
+  printf 'foreign\n' >"${root}/coverage/unknown"
+  run "${HARNESS_TOOLS[bash]}" -c '"$1" --project-root "$2" >"$3" 2>"$4"' \
+    _ "${root}/scripts/clean-generated" "${root}" "${stdout_file}" "${stderr_file}"
+  [ "${status}" -eq 1 ]
+  [ ! -s "${stdout_file}" ]
+  grep -Fq 'unknown-coverage-entry' "${stderr_file}"
+
+  run "${PROJECT_ROOT}/scripts/clean-generated" --project-root "${root}"
+  [ "${status}" -eq 2 ]
 }
 
 repair_package() {

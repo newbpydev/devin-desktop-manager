@@ -335,3 +335,56 @@ EOF
   [ -f "${checkout}/coverage/.resultset.json" ]
   [ ! -e "${checkout}/.coverage.backup" ]
 }
+
+@test "[PMC-U7-R04] both domains classify before repair or removal" {
+  local root="${BATS_TEST_TMPDIR}/clean-checkout"
+  local backup="${root}/.coverage.backup"
+  make_clean_checkout "${root}"
+  make_coverage_tree "${backup}"
+  make_package_pair "${root}/dist" devin-desktop-manager-1.2.3.tar.gz
+  printf 'corrupt\n' >>"${root}/dist/devin-desktop-manager-1.2.3.tar.gz"
+  snapshot_tree "${backup}" "${BATS_TEST_TMPDIR}/coverage-before"
+  snapshot_tree "${root}/dist" "${BATS_TEST_TMPDIR}/dist-before"
+
+  run "${root}/scripts/clean-generated" --project-root "${root}"
+  [ "${status}" -eq 1 ]
+  [ -d "${backup}" ]
+  [ ! -e "${root}/coverage" ]
+  snapshot_tree "${backup}" "${BATS_TEST_TMPDIR}/coverage-after"
+  snapshot_tree "${root}/dist" "${BATS_TEST_TMPDIR}/dist-after"
+  cmp "${BATS_TEST_TMPDIR}/coverage-before" "${BATS_TEST_TMPDIR}/coverage-after"
+  cmp "${BATS_TEST_TMPDIR}/dist-before" "${BATS_TEST_TMPDIR}/dist-after"
+
+  rm -rf "${root}/dist"
+  make_package_pair "${root}/dist/.devin-desktop-manager.package.backup" \
+    devin-desktop-manager-1.2.3.tar.gz
+  chmod 0700 "${root}/dist/.devin-desktop-manager.package.backup"
+  run "${root}/scripts/clean-generated" --project-root "${root}"
+  [ "${status}" -eq 0 ]
+  [ ! -e "${backup}" ]
+  [ ! -e "${root}/coverage" ]
+  [ ! -e "${root}/dist" ]
+}
+
+@test "[PMC-U7-R02] invalid clean roots fail before lock creation" {
+  local root="${BATS_TEST_TMPDIR}/clean-checkout" outside="${BATS_TEST_TMPDIR}/outside"
+  local value
+  make_clean_checkout "${root}"
+  printf 'sentinel\n' >"${outside}"
+
+  for value in /absolute ../outside . dist $'bad\tpath'; do
+    rm -f "${root}/.devin-desktop-manager.outputs.lock"
+    run env MAKE_COVERAGE_DIR="${value}" MAKE_DIST_DIR=dist \
+      "${root}/scripts/clean-generated" --project-root "${root}"
+    [ "${status}" -eq 1 ]
+    [ ! -e "${root}/.devin-desktop-manager.outputs.lock" ]
+    [ "$(<"${outside}")" = sentinel ]
+  done
+
+  mkdir -p "${root}/real"
+  ln -s real "${root}/symbolic"
+  run env MAKE_COVERAGE_DIR=symbolic/coverage MAKE_DIST_DIR=dist \
+    "${root}/scripts/clean-generated" --project-root "${root}"
+  [ "${status}" -eq 1 ]
+  [ ! -e "${root}/.devin-desktop-manager.outputs.lock" ]
+}
