@@ -198,7 +198,8 @@ setup() {
   local makefile="${PROJECT_ROOT}/Makefile" release_check="${PROJECT_ROOT}/scripts/release-check"
   grep -Fq '$(call RUN_PREFLIGHT,$$preflight_profile)' "${makefile}"
   grep -Fq 'preflight_profile=release-check-official' "${makefile}"
-  [ "$(grep -c '\$(DO_LOCKED_COVERAGE)' "${makefile}")" -eq 1 ]
+  [ "$(grep -Fc '$(DO_LOCKED_COVERAGE);' "${makefile}")" -eq 1 ]
+  [ "$(grep -Fc '$(DO_LOCKED_COVERAGE)' "${makefile}")" -eq 2 ]
   [ "$(grep -c 'scripts/package-release' "${makefile}")" -eq 1 ]
   grep -Fq -- '--project-root "$$PROJECT_ROOT"' "${makefile}"
   grep -Fq -- '--release-tag' "${makefile}"

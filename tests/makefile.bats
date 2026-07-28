@@ -324,7 +324,7 @@ EOF
   [ "${default_profile%%:*}" -lt "${official_profile%%:*}" ]
   [ "${official_profile%%:*}" -lt "${union_preflight%%:*}" ]
   [ "${union_preflight%%:*}" -lt "${locked_coverage%%:*}" ]
-  [ "$(grep -Fc '$(DO_LOCKED_COVERAGE);' "${PROJECT_ROOT}/Makefile")" -eq 1 ]
+  [ "$(grep -Fc '$(DO_LOCKED_COVERAGE)' "${PROJECT_ROOT}/Makefile")" -eq 2 ]
   grep -Fq 'make coverage' "${PROJECT_ROOT}/CONTRIBUTING.md"
   run grep -F 'minimum_coverage' "${PROJECT_ROOT}/.simplecov"
   [ "${status}" -ne 0 ]
@@ -748,10 +748,7 @@ EOF
   printf 'must not ship\n' >"${repository}/untracked-secret.txt"
   printf 'dirty tracked\n' >"${repository}/README.md"
 
-  : >"${repository}/.devin-desktop-manager.outputs.lock"
-  run "${HARNESS_BASH}" -c 'exec 6<>"$1"; flock -n 6; "$2" --project-root "$3" --output-lock-fd 6 0.1.0 dist' \
-    _ "${repository}/.devin-desktop-manager.outputs.lock" \
-    "${repository}/scripts/package-release" "${repository}"
+  run_locked_package_fixture "${repository}" 0.1.0 dist
 
   [ "${status}" -eq 0 ]
   run tar -tzf "${dist_dir}/devin-desktop-manager-0.1.0.tar.gz"
@@ -808,26 +805,17 @@ EOF
   git -C "${repository}" -c user.name=Test -c user.email=test@example.invalid \
     commit --quiet -m fixture
 
-  : >"${repository}/.devin-desktop-manager.outputs.lock"
-  run "${HARNESS_BASH}" -c 'exec 6<>"$1"; flock -n 6; "$2" --project-root "$3" --output-lock-fd 6 0.1.0 dist' \
-    _ "${repository}/.devin-desktop-manager.outputs.lock" \
-    "${repository}/scripts/package-release" "${repository}"
+  run_locked_package_fixture "${repository}" 0.1.0 dist
   [ "${status}" -eq 0 ]
   [ -f "${repository}/dist/SHA256SUMS" ]
 
-  : >"${extracted}/.devin-desktop-manager.outputs.lock"
-  run "${HARNESS_BASH}" -c 'exec 6<>"$1"; flock -n 6; "$2" --project-root "$3" --output-lock-fd 6 0.1.0 dist' \
-    _ "${extracted}/.devin-desktop-manager.outputs.lock" \
-    "${extracted}/scripts/package-release" "${extracted}"
+  run_locked_package_fixture "${extracted}" 0.1.0 dist
   [ "${status}" -ne 0 ]
   [[ "${output}" == *"exact Git root"* ]]
   [ ! -e "${extracted}/dist" ]
 
   git -C "${BATS_TEST_TMPDIR}/parent" init --quiet
-  : >"${nested}/.devin-desktop-manager.outputs.lock"
-  run "${HARNESS_BASH}" -c 'exec 6<>"$1"; flock -n 6; "$2" --project-root "$3" --output-lock-fd 6 0.1.0 dist' \
-    _ "${nested}/.devin-desktop-manager.outputs.lock" \
-    "${nested}/scripts/package-release" "${nested}"
+  run_locked_package_fixture "${nested}" 0.1.0 dist
   [ "${status}" -ne 0 ]
   [[ "${output}" == *"exact Git root"* ]]
   [ ! -e "${nested}/dist" ]

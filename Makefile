@@ -205,10 +205,6 @@ bats_path=$$(resolve_executable BATS "$$MAKE_BATS") || exit $$?; \
 run_script "$$bats_path" tests
 endef
 
-define DO_COVERAGE
-run_script "$$PROJECT_ROOT/scripts/run-coverage" --project-root "$$PROJECT_ROOT"
-endef
-
 define DO_LOCKED_COVERAGE
 run_script "$$PROJECT_ROOT/scripts/output-lock" "$$PROJECT_ROOT" -- \
 	"$$PROJECT_ROOT/scripts/run-coverage" --project-root "$$PROJECT_ROOT"
@@ -321,7 +317,7 @@ test:
 coverage:
 	@$(PREPARE_SCRIPT_RUNNER); \
 	$(call RUN_PREFLIGHT,coverage); \
-	$(DO_COVERAGE)
+	$(DO_LOCKED_COVERAGE)
 
 lint:
 	@$(PREPARE_SCRIPT_RUNNER); \
