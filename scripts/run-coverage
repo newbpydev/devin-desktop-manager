@@ -130,7 +130,7 @@ main() {
   start="$(date +%s)"
   if ! (cd "${root}" && HOME="${MAKE_HOME:-${HOME:-}}" LC_ALL=C TZ=UTC \
     COVERAGE_DIR="${stage}" BASHCOV_COMMAND_NAME=bats-suite \
-    "${bashcov}" -- "${bats}" tests); then
+    "${bashcov}" -- "${script_dir}/run-coverage-suite" "${bats}" tests); then
     fail 'coverage runner failed; prior coverage was preserved'
   fi
   COVERAGE_COMMAND_NAME=bats-suite COVERAGE_STARTED_AT="${start}" \

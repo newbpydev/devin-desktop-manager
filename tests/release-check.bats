@@ -383,10 +383,10 @@ run_locked_package() {
   make_package_pair "${root}"
   printf 'foreign\n' >"${root}/keep.txt"
 
-  run bash -c 'source "$1"; package_repair "$2" public-valid-cleanup' \
+  run bash -c 'exec 6>&-; source "$1"; package_repair "$2" public-valid-cleanup' \
     _ "${PACKAGE_LIBRARY}" "${root}"
   [ "${status}" -eq 2 ]
-  run bash -c 'source "$1"; package_removal_set "$2"' \
+  run bash -c 'exec 6>&-; source "$1"; package_removal_set "$2"' \
     _ "${PACKAGE_LIBRARY}" "${root}"
   [ "${status}" -eq 2 ]
 

@@ -32,7 +32,7 @@ setup() {
   grep -Eq '^verify:$' "${makefile}"
   grep -Eq '^release-check:$' "${makefile}"
   grep -Fq '$(call RUN_PREFLIGHT,verify)' "${makefile}"
-  grep -Fq '$(call RUN_PREFLIGHT,$$preflight_profile)' "${makefile}"
+  grep -Fq '$(call RUN_BUNDLED_PREFLIGHT,$$preflight_profile)' "${makefile}"
   grep -Fq 'preflight_profile=release-check-official' "${makefile}"
   grep -Eq '^test:' "${makefile}"
   grep -Eq '^coverage:' "${makefile}"
@@ -207,7 +207,7 @@ setup() {
 
 @test "[PMC-U6-C01] release route owns one coverage suite and one package handoff" {
   local makefile="${PROJECT_ROOT}/Makefile" release_check="${PROJECT_ROOT}/scripts/release-check"
-  grep -Fq '$(call RUN_PREFLIGHT,$$preflight_profile)' "${makefile}"
+  grep -Fq '$(call RUN_BUNDLED_PREFLIGHT,$$preflight_profile)' "${makefile}"
   grep -Fq 'preflight_profile=release-check-official' "${makefile}"
   [ "$(grep -Fc '$(DO_LOCKED_COVERAGE);' "${makefile}")" -eq 1 ]
   [ "$(grep -Fc '$(DO_LOCKED_COVERAGE)' "${makefile}")" -eq 2 ]

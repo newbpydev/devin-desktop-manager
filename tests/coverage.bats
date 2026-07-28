@@ -35,7 +35,8 @@ make_coverage_checkout() {
   local root="$1"
   mkdir -p "${root}/scripts/lib" "${root}/test-bin"
   cp "${PROJECT_ROOT}/scripts/output-lock" "${PROJECT_ROOT}/scripts/preflight" \
-    "${PROJECT_ROOT}/scripts/run-coverage" "${PROJECT_ROOT}/scripts/check-coverage" \
+    "${PROJECT_ROOT}/scripts/run-coverage" "${PROJECT_ROOT}/scripts/run-coverage-suite" \
+    "${PROJECT_ROOT}/scripts/check-coverage" \
     "${root}/scripts/"
   cp "${COVERAGE_LIBRARY}" "${root}/scripts/lib/coverage-output.bash"
   cat >"${root}/test-bin/ruby" <<EOF
@@ -44,7 +45,10 @@ printf 'ruby 3.2.0\n'
 EOF
   cat >"${root}/test-bin/bundle" <<EOF
 #!${HARNESS_TOOLS[bash]}
-printf 'Bundler version 2.4.20\n'
+if [[ "\${1:-}" == --version ]]; then printf 'Bundler version 2.4.20\n'; exit 0; fi
+[[ "\${1:-}" == exec ]] || exit 2
+shift
+exec "\$@"
 EOF
   chmod 0755 "${root}/test-bin/ruby" "${root}/test-bin/bundle"
   chmod 0755 "${root}/scripts/"*
@@ -199,7 +203,8 @@ EOF
   local checkout="${BATS_TEST_TMPDIR}/checkout"
   mkdir -p "${checkout}/scripts/lib"
   cp "${PROJECT_ROOT}/scripts/output-lock" "${PROJECT_ROOT}/scripts/preflight" \
-    "${PROJECT_ROOT}/scripts/run-coverage" "${checkout}/scripts/"
+    "${PROJECT_ROOT}/scripts/run-coverage" "${PROJECT_ROOT}/scripts/run-coverage-suite" \
+    "${checkout}/scripts/"
   cp "${COVERAGE_LIBRARY}" "${checkout}/scripts/lib/coverage-output.bash"
   chmod 0755 "${checkout}/scripts/"*
   mv "${backup}" "${checkout}/.coverage.backup"
@@ -270,7 +275,8 @@ EOF
   local checkout="${BATS_TEST_TMPDIR}/checkout" value
   mkdir -p "${checkout}/scripts/lib"
   cp "${PROJECT_ROOT}/scripts/output-lock" "${PROJECT_ROOT}/scripts/preflight" \
-    "${PROJECT_ROOT}/scripts/run-coverage" "${checkout}/scripts/"
+    "${PROJECT_ROOT}/scripts/run-coverage" "${PROJECT_ROOT}/scripts/run-coverage-suite" \
+    "${checkout}/scripts/"
   cp "${COVERAGE_LIBRARY}" "${checkout}/scripts/lib/coverage-output.bash"
   chmod 0755 "${checkout}/scripts/"*
 

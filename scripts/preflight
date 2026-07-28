@@ -257,6 +257,25 @@ check_versioned_tool() {
   fi
 }
 
+check_bundled_versioned_tool() {
+  local key="$1" value="$2" required="$3" pattern="$4" purpose="$5"
+  local PROBE_OUTPUT="" version=""
+  resolve_executable "${key}" "${value}" "${purpose}" || return 0
+  [[ -n "${RESOLVED_TOOLS[bundler]:-}" ]] || return 0
+  resolve_executable env env 'isolated bundled capability probes require env' || return 0
+  if capture_probe "${key}" "${RESOLVED_TOOLS[env]}" \
+    "BUNDLE_GEMFILE=${PROJECT_ROOT}/Gemfile" "${RESOLVED_TOOLS[bundler]}" exec \
+    "${RESOLVED_TOOLS[${key}]}" --version; then
+    if [[ "${PROBE_OUTPUT}" =~ ${pattern} ]]; then
+      version="${BASH_REMATCH[1]}"
+    fi
+  fi
+  if [[ -z "${version}" ]] || ! version_at_least "${version}" "${required}"; then
+    add_incompatible_command "${key}" "${PROBE_OUTPUT:-no version output}" \
+      "${purpose}; requires ${key^} ${required} or newer"
+  fi
+}
+
 check_feature_tool() {
   local key="$1" value="$2" purpose="$3" probe="$4"
   local PROBE_OUTPUT=""
@@ -445,7 +464,7 @@ collect_local_profile() {
           add_incompatible_command bundler "${PROBE_OUTPUT:-no version output}" \
             'coverage requires Bundler 2.4.20'
       fi
-      check_versioned_tool bashcov "${PREFLIGHT_BASHCOV:-bashcov}" 3.3 \
+      check_bundled_versioned_tool bashcov "${PREFLIGHT_BASHCOV:-bashcov}" 3.3 \
         'bashcov[[:space:]]+([0-9]+\.[0-9]+([.][0-9]+)?)' \
         'coverage requires Bashcov 3.3 or newer'
       collect_profile test

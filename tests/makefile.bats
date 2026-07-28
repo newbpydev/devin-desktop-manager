@@ -43,7 +43,8 @@ make_fixture() {
   fi
   if [[ -f "${PROJECT_ROOT}/scripts/run-coverage" ]]; then
     cp "${PROJECT_ROOT}/scripts/run-coverage" "${PROJECT_ROOT}/scripts/output-lock" \
-      "${PROJECT_ROOT}/scripts/check-coverage" "${root}/scripts/"
+      "${PROJECT_ROOT}/scripts/check-coverage" "${PROJECT_ROOT}/scripts/run-coverage-suite" \
+      "${root}/scripts/"
     cp "${PROJECT_ROOT}/scripts/lib/coverage-output.bash" "${root}/scripts/lib/"
   fi
   if [[ -f "${PROJECT_ROOT}/scripts/clean-generated" ]]; then
@@ -319,7 +320,7 @@ EOF
   grep -Fq 'COVERAGE_MINIMUM ?= 90' "${PROJECT_ROOT}/Makefile"
   default_profile="$(grep -nF 'preflight_profile=release-check;' "${PROJECT_ROOT}/Makefile")"
   official_profile="$(grep -nF 'preflight_profile=release-check-official;' "${PROJECT_ROOT}/Makefile")"
-  union_preflight="$(grep -nF '$(call RUN_PREFLIGHT,$$preflight_profile);' "${PROJECT_ROOT}/Makefile")"
+  union_preflight="$(grep -nF '$(call RUN_BUNDLED_PREFLIGHT,$$preflight_profile);' "${PROJECT_ROOT}/Makefile")"
   locked_coverage="$(grep -nF '$(DO_LOCKED_COVERAGE);' "${PROJECT_ROOT}/Makefile")"
   [ "${default_profile%%:*}" -lt "${official_profile%%:*}" ]
   [ "${official_profile%%:*}" -lt "${union_preflight%%:*}" ]
@@ -337,7 +338,8 @@ EOF
   local bats="${BATS_TEST_TMPDIR}/bats-ok"
 
   make_fixture "${root}"
-  mkdir -p "${coverage_dir}"
+  cp "${PROJECT_ROOT}/Gemfile" "${PROJECT_ROOT}/Gemfile.lock" "${root}/"
+  make_coverage_tree "${coverage_dir}"
   cat >"${coverage_dir}/.resultset.json" <<'JSON'
 {
   "stale": {
@@ -349,6 +351,7 @@ EOF
 JSON
   cat >"${bashcov}" <<EOF
 #!${HARNESS_BASH}
+[[ "\${BUNDLE_ACTIVE:-}" == 1 ]] || exit 23
 if [[ "\${1:-}" == --version ]]; then printf 'bashcov 3.3.0\n'; fi
 EOF
   chmod 0755 "${bashcov}"
@@ -359,7 +362,11 @@ EOF
   chmod 0755 "${bats}"
   cat >"${BATS_TEST_TMPDIR}/bundle" <<EOF
 #!${HARNESS_BASH}
-printf 'Bundler version 2.4.20\n'
+if [[ "\${1:-}" == --version ]]; then printf 'Bundler version 2.4.20\n'; exit 0; fi
+[[ "\${1:-}" == exec ]] || exit 2
+shift
+export BUNDLE_ACTIVE=1
+exec "\$@"
 EOF
   cat >"${BATS_TEST_TMPDIR}/ruby" <<EOF
 #!${HARNESS_BASH}
@@ -863,8 +870,15 @@ EOF
 [[ "\${1:-}" != --version ]] || { printf 'ShellCheck - shell script analysis tool\nversion: 0.10.0\n'; exit 0; }
 printf 'lint\n' >>$(printf '%q' "${log}")
 EOF
+  cat >"${shim_bin}/bundle" <<'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" == exec ]] || exit 2
+shift
+exec "$@"
+EOF
+  : >"${root}/Gemfile"
   chmod 0755 "${root}/bin/devin-desktop-manager" "${root}/scripts/"* \
-    "${shim_bin}/shellcheck"
+    "${shim_bin}/bundle" "${shim_bin}/shellcheck"
 
   run env PATH="${shim_bin}:${PATH}" "${MAKE_COMMAND}" --no-print-directory -s \
     -C "${root}" BASH="${HARNESS_BASH}" SHELLCHECK="${shim_bin}/shellcheck" \

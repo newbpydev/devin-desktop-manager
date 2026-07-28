@@ -102,6 +102,14 @@ endef
 define PREPARE_SCRIPT_RUNNER
 $(RESOLVE_BASH); \
 run_script() { \
+  if [ "$${1:-}" = --bundle ]; then \
+    shift; \
+    bundle_path=$$(resolve_executable BUNDLE bundle) || exit $$?; \
+    set -- "$$env_path" BUNDLE_GEMFILE="$$PROJECT_ROOT/Gemfile" \
+      "$$bundle_path" exec "$$bash_path" --noprofile --norc "$$@"; \
+  else \
+    set -- "$$bash_path" --noprofile --norc "$$@"; \
+  fi; \
   BASH_ENV= ENV= LC_ALL=C TZ=UTC \
   HOME="$$MAKE_HOME" PATH="$$MAKE_PATH" \
   XDG_CONFIG_HOME="$$MAKE_XDG_CONFIG_HOME" \
@@ -117,12 +125,16 @@ run_script() { \
     -u TAR_OPTIONS -u GZIP -u ENV -u BASH_ENV \
     "$$bash_path" --noprofile --norc -c \
     'while read -r _ _ fn; do unset -f "$$fn" 2>/dev/null || true; done < <(declare -F); exec "$$@"' \
-    make-bootstrap "$$bash_path" --noprofile --norc "$$@"; \
+    make-bootstrap "$$@"; \
 }
 endef
 
 define RUN_PREFLIGHT
 run_script "$$PROJECT_ROOT/scripts/preflight" $(1) --project-root "$$PROJECT_ROOT"
+endef
+
+define RUN_BUNDLED_PREFLIGHT
+run_script --bundle "$$PROJECT_ROOT/scripts/preflight" $(1) --project-root "$$PROJECT_ROOT"
 endef
 
 define RESOLVE_APP
@@ -211,7 +223,7 @@ run_script "$$bats_path" tests
 endef
 
 define DO_LOCKED_COVERAGE
-run_script "$$PROJECT_ROOT/scripts/output-lock" "$$PROJECT_ROOT" -- \
+run_script --bundle "$$PROJECT_ROOT/scripts/output-lock" "$$PROJECT_ROOT" -- \
 	"$$PROJECT_ROOT/scripts/run-coverage" --project-root "$$PROJECT_ROOT"
 endef
 
@@ -321,7 +333,7 @@ test:
 
 coverage:
 	@$(PREPARE_SCRIPT_RUNNER); \
-	$(call RUN_PREFLIGHT,coverage); \
+	$(call RUN_BUNDLED_PREFLIGHT,coverage); \
 	$(DO_LOCKED_COVERAGE)
 
 lint:
@@ -348,7 +360,7 @@ release-check:
 	fi; \
 	preflight_profile=release-check; \
 	if [ -n "$$release_tag" ]; then preflight_profile=release-check-official; fi; \
-	$(call RUN_PREFLIGHT,$$preflight_profile); \
+	$(call RUN_BUNDLED_PREFLIGHT,$$preflight_profile); \
 	$(DO_LINT); \
 	$(DO_LOCKED_COVERAGE); \
 	run_script "$$PROJECT_ROOT/scripts/release-check" \
