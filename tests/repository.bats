@@ -260,6 +260,7 @@ setup() {
 @test "[PMC-U8-R02] focused userland jobs share the tagged smoke suite" {
   local ci="${PROJECT_ROOT}/.github/workflows/ci.yml"
   local runner="${PROJECT_ROOT}/tests/run-portability-smoke"
+  local fixture="${PROJECT_ROOT}/tests/fixtures/portability-userland.Dockerfile"
 
   [ -x "${runner}" ]
   for file in makefile preflight output-lock manager coverage release-check repository; do
@@ -267,6 +268,7 @@ setup() {
   done
   grep -Fq 'U2-R0[2345]' "${runner}"
   grep -Fq 'U8-R0[1-4]' "${runner}"
+  [ "$(grep -c 'bats binutils' "${fixture}")" -eq 2 ]
   [ "$(grep -c 'tests/run-portability-smoke --assert-offline' "${ci}")" -eq 4 ]
   run bash -c 'for job in portable-debian portable-fedora portable-minimum-toolchain; do
     block="$(sed -n "/^  ${job}:/,/^  [a-z]/p" "$1")"
