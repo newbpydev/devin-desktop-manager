@@ -77,9 +77,11 @@ repair_package() {
 make_package_checkout() {
   local root="$1"
   mkdir -p "${root}/scripts/lib"
-  cp "${PROJECT_ROOT}/scripts/package-release" "${root}/scripts/package-release"
+  cp "${PROJECT_ROOT}/scripts/package-release" "${PROJECT_ROOT}/scripts/output-lock" \
+    "${PROJECT_ROOT}/scripts/preflight" "${root}/scripts/"
   cp "${PACKAGE_LIBRARY}" "${root}/scripts/lib/package-output.bash"
-  chmod 0755 "${root}/scripts/package-release"
+  chmod 0755 "${root}/scripts/package-release" "${root}/scripts/output-lock" \
+    "${root}/scripts/preflight"
   printf '/dist*/\n/.devin-desktop-manager.outputs.lock\n' >"${root}/.gitignore"
   printf 'tracked\n' >"${root}/README.md"
   git -C "${root}" init --quiet
@@ -397,14 +399,16 @@ run_locked_package() {
   [ "${#lines[@]}" -eq 2 ]
 }
 
-@test "[PMC-U6-R01] package-release requires an exact Git root contained output and inherited lock" {
+@test "[PMC-U6-R01] package-release requires an exact Git root and contained output" {
   local repository="${BATS_TEST_TMPDIR}/repository" outside="${BATS_TEST_TMPDIR}/outside"
   local extracted="${BATS_TEST_TMPDIR}/extracted" nested="${repository}/nested"
   make_package_checkout "${repository}"
 
   run "${repository}/scripts/package-release" --project-root "${repository}" 1.2.3 dist
-  [ "${status}" -eq 2 ]
-  [ ! -e "${repository}/dist" ]
+  [ "${status}" -eq 0 ]
+  [ -f "${repository}/.devin-desktop-manager.outputs.lock" ]
+  [ -f "${repository}/dist/devin-desktop-manager-1.2.3.tar.gz" ]
+  [ -f "${repository}/dist/SHA256SUMS" ]
 
   mkdir -p "${extracted}/scripts/lib" "${nested}"
   cp "${repository}/scripts/package-release" "${extracted}/scripts/package-release"
