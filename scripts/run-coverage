@@ -44,7 +44,7 @@ resolve_tool() {
   local value="$1" candidate directory
   if [[ "${value}" == /* ]]; then candidate="${value}"; else candidate="$(type -P -- "${value}" 2>/dev/null || true)"; fi
   [[ "${candidate}" == /* && -f "${candidate}" && -x "${candidate}" ]] || fail "required executable is unavailable: ${value}"
-  directory="$(CDPATH= cd -P -- "${candidate%/*}" && pwd -P)" || fail "cannot resolve executable: ${value}"
+  directory="$(CDPATH='' cd -P -- "${candidate%/*}" && pwd -P)" || fail "cannot resolve executable: ${value}"
   printf '%s/%s\n' "${directory}" "${candidate##*/}"
 }
 
@@ -59,7 +59,7 @@ validate_lock() {
 }
 
 main() {
-  local lock_fd= root= project_physical script_dir coverage_root dist_root state
+  local lock_fd="" root="" project_physical script_dir coverage_root dist_root state
   local bashcov bats checker start stage backup parent leaf token attempt parent_created=0
   if [[ "${1:-}" == --output-lock-fd ]]; then
     [[ "${2:-}" == 6 ]] || usage
@@ -69,10 +69,10 @@ main() {
   [[ "${1:-}" == --project-root && $# == 2 ]] || usage
   root="$2"
   [[ "${root}" == /* && "${root}" != *[!\ -~]* && -d "${root}" && ! -L "${root}" ]] || usage
-  project_physical="$(CDPATH= cd -P -- "${root}" 2>/dev/null && pwd -P)" || usage
+  project_physical="$(CDPATH='' cd -P -- "${root}" 2>/dev/null && pwd -P)" || usage
   [[ "${root%/}" == "${project_physical}" ]] || usage
   root="${project_physical}"
-  script_dir="$(CDPATH= cd -P -- "${BASH_SOURCE[0]%/*}" && pwd -P)"
+  script_dir="$(CDPATH='' cd -P -- "${BASH_SOURCE[0]%/*}" && pwd -P)"
   [[ "${script_dir}" == "${root}/scripts" ]] || usage
 
   coverage_root="$(canonical_output "${root}" "${MAKE_COVERAGE_DIR:-coverage}" COVERAGE_DIR)"

@@ -40,7 +40,7 @@ validate_lock_parent() {
 
 validate_descriptor_identity() {
   local fd="$1" expected="$2" label="$3" path_identity descriptor_identity
-  local device inode owner file_type links
+  local owner file_type links
 
   [[ "${fd}" =~ ^[0-9]+$ && -e "/proc/self/fd/${fd}" ]] ||
     die "${label} lock descriptor ${fd} is not open"
@@ -50,7 +50,7 @@ validate_descriptor_identity() {
     die "could not inspect ${label} lock: ${expected}"
   descriptor_identity="$(stat -Lc '%d:%i:%u:%F:%h' -- "/proc/self/fd/${fd}")" ||
     die "could not inspect ${label} lock descriptor ${fd}"
-  IFS=: read -r device inode owner file_type links <<<"${path_identity}"
+  IFS=: read -r _ _ owner file_type links <<<"${path_identity}"
   [[ "${path_identity}" == "${descriptor_identity}" && "${owner}" == "${EUID}" &&
     ( "${file_type}" == "regular file" || "${file_type}" == "regular empty file" ) &&
     ( "${links}" == 1 || ( "${label}" == "legacy manager lifecycle" && "${links}" == 2 ) ) ]] ||
@@ -144,7 +144,7 @@ main() {
 
   script_dir="${BASH_SOURCE[0]%/*}"
   [[ "${script_dir}" != "${BASH_SOURCE[0]}" ]] || script_dir=.
-  script_dir="$(CDPATH= cd -P -- "${script_dir}" && pwd -P)"
+  script_dir="$(CDPATH='' cd -P -- "${script_dir}" && pwd -P)"
   if [[ "${canonical}" == true ]]; then
     "${script_dir}/preflight" install-manager
   else

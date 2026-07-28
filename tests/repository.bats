@@ -39,6 +39,17 @@ setup() {
   grep -Fq 'BASHCOV_COMMAND_NAME=bats-suite' "${PROJECT_ROOT}/scripts/run-coverage"
 }
 
+@test "[PMC-U1-C01] lint policy covers manager scripts and source libraries without directories" {
+  local makefile="${PROJECT_ROOT}/Makefile"
+
+  grep -Fq '"$$PROJECT_ROOT/bin/devin-desktop-manager"' "${makefile}"
+  grep -Fq '"$$PROJECT_ROOT"/scripts/*' "${makefile}"
+  grep -Fq '"$$PROJECT_ROOT"/scripts/lib/*.bash' "${makefile}"
+  grep -Fq '[ -f "$$shell_file" ] || continue' "${makefile}"
+  grep -Fq 'set -- "$$@" "$$shell_file"' "${makefile}"
+  grep -Fq '"$$shellcheck_path" -x -P "$$PROJECT_ROOT" "$$@"' "${makefile}"
+}
+
 @test "[PMC-U1-C02] manifest canary executes checkout source directly" {
   local canary="${PROJECT_ROOT}/.github/workflows/manifest-canary.yml"
 

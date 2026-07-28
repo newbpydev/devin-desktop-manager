@@ -223,25 +223,28 @@ _coverage_require_lock() {
 
 coverage_repair() {
   (($# == 2)) || return 2
-  local root="$1" expected="$2" parent leaf stage
+  local root="$1" expected="$2" parent leaf
+  local -a stage_candidates=()
   case "${expected}" in repair-backup|discard-stage|public-valid-cleanup) ;; *) return 2 ;; esac
   _coverage_require_lock || return 2
   _coverage_classify "${root}" || return 1
   [[ "${_COVERAGE_STATE}" == "${expected}" ]] || return 1
   parent="${root%/*}"
   leaf="${root##*/}"
-  stage=("${parent}/.${leaf}.stage."*)
+  stage_candidates=("${parent}/.${leaf}.stage."*)
   case "${expected}" in
     repair-backup)
       mv -T -- "${parent}/.${leaf}.backup" "${root}" || return 1
-      [[ ! -e "${stage[0]}" && ! -L "${stage[0]}" ]] || rm -rf -- "${stage[0]}"
+      [[ ! -e "${stage_candidates[0]}" && ! -L "${stage_candidates[0]}" ]] ||
+        rm -rf -- "${stage_candidates[0]}"
       ;;
     discard-stage)
-      rm -rf -- "${stage[0]}" || return 1
+      rm -rf -- "${stage_candidates[0]}" || return 1
       ;;
     public-valid-cleanup)
       [[ ! -e "${parent}/.${leaf}.backup" ]] || rm -rf -- "${parent}/.${leaf}.backup" || return 1
-      [[ ! -e "${stage[0]}" && ! -L "${stage[0]}" ]] || rm -rf -- "${stage[0]}" || return 1
+      [[ ! -e "${stage_candidates[0]}" && ! -L "${stage_candidates[0]}" ]] ||
+        rm -rf -- "${stage_candidates[0]}" || return 1
       ;;
   esac
 }

@@ -26,7 +26,7 @@ main() {
   (($# == 2)) || usage
   script_dir="${BASH_SOURCE[0]%/*}"
   [[ "${script_dir}" != "${BASH_SOURCE[0]}" ]] || script_dir=.
-  script_dir="$(CDPATH= cd -P -- "${script_dir}" && pwd -P)"
+  script_dir="$(CDPATH='' cd -P -- "${script_dir}" && pwd -P)"
   "${script_dir}/preflight" check-coverage
   [[ -f "${resultset}" ]] ||
     {

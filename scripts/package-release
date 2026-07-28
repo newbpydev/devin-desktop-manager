@@ -22,7 +22,7 @@ physical_root() {
   local value="$1" physical
   [[ "${value}" == /* && "${value}" != *[!\ -~]* && -d "${value}" && ! -L "${value}" ]] ||
     fail 'project root must be an absolute physical directory'
-  physical="$(CDPATH= cd -P -- "${value}" 2>/dev/null && pwd -P)" ||
+  physical="$(CDPATH='' cd -P -- "${value}" 2>/dev/null && pwd -P)" ||
     fail 'project root cannot be resolved physically'
   [[ "${value%/}" == "${physical}" ]] ||
     fail 'project root must not contain symbolic components'
@@ -53,11 +53,11 @@ canonical_output() {
 
 validate_git_root() {
   local root="$1" top head
-  head="$(git -C "${root}" rev-parse --verify HEAD^{commit} 2>/dev/null)" ||
+  head="$(git -C "${root}" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" ||
     fail 'packaging requires an exact Git root with a valid HEAD'
   top="$(git -C "${root}" rev-parse --show-toplevel 2>/dev/null)" ||
     fail 'packaging requires an exact Git root with a valid HEAD'
-  top="$(CDPATH= cd -P -- "${top}" 2>/dev/null && pwd -P)" ||
+  top="$(CDPATH='' cd -P -- "${top}" 2>/dev/null && pwd -P)" ||
     fail 'Git top-level cannot be resolved physically'
   [[ "${top}" == "${root}" ]] ||
     fail 'packaging requires the selected project root to equal the exact Git root'
@@ -103,9 +103,9 @@ restore_backup_pair() {
 }
 
 main() {
-  local root_value= release_tag= workflow_commit= lock_fd=
+  local root_value="" release_tag="" workflow_commit="" lock_fd=""
   local version output_value script_dir root head output archive_name output_device
-  local file_list= token stage= stage_archive stage_checksum backup archive_name_prior
+  local file_list="" token stage="" stage_archive stage_checksum backup archive_name_prior
   local state prior=0 parent_created=0 attempt
 
   while [[ "${1:-}" == --* ]]; do
@@ -136,11 +136,11 @@ main() {
   [[ "${version}" =~ ^[0-9]+[.][0-9]+[.][0-9]+([.-][0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] ||
     fail "invalid release version: ${version}"
 
-  script_dir="$(CDPATH= cd -P -- "${BASH_SOURCE[0]%/*}" 2>/dev/null && pwd -P)" || usage
+  script_dir="$(CDPATH='' cd -P -- "${BASH_SOURCE[0]%/*}" 2>/dev/null && pwd -P)" || usage
   if [[ -n "${root_value}" ]]; then
     root="$(physical_root "${root_value}")"
   else
-    root="$(CDPATH= cd -P -- "${script_dir}/.." 2>/dev/null && pwd -P)" || usage
+    root="$(CDPATH='' cd -P -- "${script_dir}/.." 2>/dev/null && pwd -P)" || usage
   fi
   head="$(validate_git_root "${root}")"
   output="$(canonical_output "${root}" "${output_value}")"
@@ -149,7 +149,9 @@ main() {
     validate_release_mode "${root}" "${version}" "${head}" "${release_tag}" "${workflow_commit}"
 
   if [[ ! -d "${output}" ]]; then
-    mkdir -m 0700 -p -- "${output}" || fail 'cannot create OUTPUT_DIRECTORY'
+    if ! mkdir -p -- "${output}" || ! chmod 0700 -- "${output}"; then
+      fail 'cannot create OUTPUT_DIRECTORY'
+    fi
     parent_created=1
   fi
   output_device="$(stat -Lc '%d' -- "${output}" 2>/dev/null)" || fail 'cannot inspect OUTPUT_DIRECTORY'

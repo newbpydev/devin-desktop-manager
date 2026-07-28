@@ -195,9 +195,14 @@ endef
 
 define DO_LINT
 shellcheck_path=$$(resolve_executable SHELLCHECK "$$MAKE_SHELLCHECK") || exit $$?; \
-run_script -n "$$PROJECT_ROOT/bin/devin-desktop-manager" scripts/*; \
-LC_ALL=C TZ=UTC "$$shellcheck_path" \
-	"$$PROJECT_ROOT/bin/devin-desktop-manager" scripts/*
+set --; \
+for shell_file in "$$PROJECT_ROOT/bin/devin-desktop-manager" \
+	"$$PROJECT_ROOT"/scripts/* "$$PROJECT_ROOT"/scripts/lib/*.bash; do \
+	[ -f "$$shell_file" ] || continue; \
+	run_script -n "$$shell_file"; \
+	set -- "$$@" "$$shell_file"; \
+done; \
+LC_ALL=C TZ=UTC "$$shellcheck_path" -x -P "$$PROJECT_ROOT" "$$@"
 endef
 
 define DO_TEST

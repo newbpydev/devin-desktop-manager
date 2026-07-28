@@ -76,6 +76,8 @@ escape_field() {
 
   for ((index = 0; index < ${#value} && index < PREFLIGHT_MAX_FIELD_BYTES; index++)); do
     byte="${value:index:1}"
+    # SC1003 misreads the literal backslash pattern and replacement below as single-quote escaping.
+    # shellcheck disable=SC1003
     case "${byte}" in
       $'\t') output+='\t' ;;
       $'\n') output+='\n' ;;
@@ -162,7 +164,7 @@ resolve_executable() {
     return 1
   fi
   directory="${candidate%/*}"
-  physical="$(CDPATH= cd -P -- "${directory}" 2>/dev/null && pwd -P)" || {
+  physical="$(CDPATH='' cd -P -- "${directory}" 2>/dev/null && pwd -P)" || {
     add_incompatible_command "${key}" "$(escape_field "${candidate}")" \
       'executable directory must resolve physically'
     return 1
@@ -317,7 +319,7 @@ check_plain_tools() {
 
 collect_manager_protocol() {
   local command_name="$1" manager="${PROJECT_ROOT}/bin/devin-desktop-manager"
-  local output_file error_file status magic version count index extra
+  local output_file error_file status magic version count index _extra
   local severity category key purpose observed remediation
 
   [[ -f "${manager}" && -x "${manager}" ]] || {
@@ -365,15 +367,15 @@ collect_manager_protocol() {
     return
   fi
   for ((index = 0; index < count; index++)); do
-    IFS= read -r -d '' severity <&3 && IFS= read -r -d '' category <&3 &&
-      IFS= read -r -d '' key <&3 && IFS= read -r -d '' purpose <&3 &&
-      IFS= read -r -d '' observed <&3 && IFS= read -r -d '' remediation <&3 || {
+    if ! IFS= read -r -d '' severity <&3 || ! IFS= read -r -d '' category <&3 ||
+      ! IFS= read -r -d '' key <&3 || ! IFS= read -r -d '' purpose <&3 ||
+      ! IFS= read -r -d '' observed <&3 || ! IFS= read -r -d '' remediation <&3; then
       exec 3<&-
       add_finding blocker environment manager.protocol \
         'checkout manager capability protocol must be complete' \
         'truncated manager protocol record' 'Use the manager from this checkout and retry.'
       return
-    }
+    fi
     if [[ "${severity}" != blocker && "${severity}" != warning ]] ||
       [[ ! "${category}" =~ ^(environment|path|platform|command|interaction|optional)$ ]] ||
       [[ ! "${key}" =~ ^[a-z0-9.-]{1,64}$ ]] ||
@@ -389,7 +391,7 @@ collect_manager_protocol() {
     add_finding "${severity}" "${category}" "manager.${key}" "${purpose}" \
       "${observed}" "${remediation}"
   done
-  if IFS= read -r -n 1 extra <&3; then
+  if IFS= read -r -n 1 _extra <&3; then
     add_finding blocker environment manager.protocol \
       'checkout manager capability protocol must end after its records' \
       'extra manager protocol data' 'Use the manager from this checkout and retry.'
@@ -461,12 +463,12 @@ collect_local_profile() {
     exact-git-root-local)
       local head top physical
       if resolve_executable git git 'package and release operations require Git'; then
-        head="$("${RESOLVED_TOOLS[git]}" -C "${PROJECT_ROOT}" rev-parse --verify HEAD^{commit} 2>/dev/null || true)"
+        head="$("${RESOLVED_TOOLS[git]}" -C "${PROJECT_ROOT}" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)"
         top="$("${RESOLVED_TOOLS[git]}" -C "${PROJECT_ROOT}" rev-parse --show-toplevel 2>/dev/null || true)"
         if [[ -n "${top}" ]]; then
-          physical="$(CDPATH= cd -P -- "${top}" 2>/dev/null && pwd -P)" || physical=
+          physical="$(CDPATH='' cd -P -- "${top}" 2>/dev/null && pwd -P)" || physical=""
         else
-          physical=
+          physical=""
         fi
         [[ "${head}" =~ ^[0-9a-f]{40}$ && "${physical}" == "${PROJECT_ROOT}" ]] ||
           add_finding blocker environment git.exact-root \
@@ -529,7 +531,7 @@ collect_profile() {
 validate_project_root() {
   local root="$1" physical
   [[ "${root}" == /* && "${root}" != *[!\ -~]* && -d "${root}" && ! -L "${root}" ]] || return 1
-  physical="$(CDPATH= cd -P -- "${root}" 2>/dev/null && pwd -P)" || return 1
+  physical="$(CDPATH='' cd -P -- "${root}" 2>/dev/null && pwd -P)" || return 1
   [[ "${root%/}" == "${physical}" ]] || return 1
   PROJECT_ROOT="${physical}"
 }

@@ -28,7 +28,7 @@ _package_archive_name_valid() {
 }
 
 _package_list_entries() {
-  local directory="$1" list= attempt
+  local directory="$1" list="" attempt
   _PACKAGE_ENTRIES=()
   for attempt in {0..15}; do
     list="${TMPDIR:-/tmp}/devin-desktop-manager.package-list.${UID}.$$.$RANDOM.${attempt}"
@@ -61,12 +61,12 @@ _package_validate_file() {
 
 _package_validate_checksum() {
   local archive="$1" checksum="$2" archive_name="$3"
-  local line extra expected actual
+  local line _extra expected actual
   IFS= read -r line <"${checksum}" || {
     _PACKAGE_REASON=invalid-public
     return 1
   }
-  if IFS= read -r extra < <(tail -n +2 -- "${checksum}"); then
+  if IFS= read -r _extra < <(tail -n +2 -- "${checksum}"); then
     _PACKAGE_REASON=invalid-public
     return 1
   fi
@@ -82,13 +82,13 @@ _package_validate_checksum() {
   }
   actual="${actual%% *}"
   [[ "${actual}" == "${expected}" ]] || {
-    _PACKAGE_REASON=checksum-mismatch
+    _PACKAGE_REASON="checksum-mismatch"
     return 1
   }
 }
 
 _package_validate_sidecar() {
-  local directory="$1" root_device="$2" path name kind archive= checksum= count=0
+  local directory="$1" root_device="$2" path name kind archive="" checksum="" count=0
   local -a entries=()
   [[ "$(_package_path_kind "${directory}")" == directory ]] || {
     kind="$(_package_path_kind "${directory}")"
@@ -135,7 +135,7 @@ _package_validate_sidecar() {
 
 _package_classify() {
   local root="$1" root_device path name suffix parent
-  local public_checksum= backup_archive
+  local public_checksum="" backup_archive
   local -a entries=() public_archives=() stages=() backups=()
   _PACKAGE_STATE=unsafe
   _PACKAGE_REASON=

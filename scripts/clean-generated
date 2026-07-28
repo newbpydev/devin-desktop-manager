@@ -123,7 +123,7 @@ remove_validated_sets() {
 }
 
 main() {
-  local lock_fd= root project_physical script_dir coverage_root dist_root
+  local lock_fd="" root project_physical script_dir coverage_root dist_root
   local coverage_status=0 package_status=0 coverage_state coverage_reason
   local package_state package_reason coverage_list package_list
   declare -ga COVERAGE_REMOVALS=() PACKAGE_REMOVALS=()
@@ -136,10 +136,10 @@ main() {
   [[ "${1:-}" == --project-root && $# == 2 ]] || usage
   root="$2"
   [[ "${root}" == /* && "${root}" != *[!\ -~]* && -d "${root}" && ! -L "${root}" ]] || usage
-  project_physical="$(CDPATH= cd -P -- "${root}" 2>/dev/null && pwd -P)" || usage
+  project_physical="$(CDPATH='' cd -P -- "${root}" 2>/dev/null && pwd -P)" || usage
   [[ "${root%/}" == "${project_physical}" ]] || usage
   root="${project_physical}"
-  script_dir="$(CDPATH= cd -P -- "${BASH_SOURCE[0]%/*}" 2>/dev/null && pwd -P)" || usage
+  script_dir="$(CDPATH='' cd -P -- "${BASH_SOURCE[0]%/*}" 2>/dev/null && pwd -P)" || usage
   [[ "${script_dir}" == "${root}/scripts" ]] || usage
 
   coverage_root="$(canonical_output "${root}" "${MAKE_COVERAGE_DIR:-coverage}" COVERAGE_DIR)"

@@ -21,7 +21,7 @@ physical_root() {
   local value="$1" physical
   [[ "${value}" == /* && "${value}" != *[!\ -~]* && -d "${value}" && ! -L "${value}" ]] ||
     fail 'project root must be an absolute directory with a physical path'
-  physical="$(CDPATH= cd -P -- "${value}" 2>/dev/null && pwd -P)" ||
+  physical="$(CDPATH='' cd -P -- "${value}" 2>/dev/null && pwd -P)" ||
     fail 'project root cannot be resolved physically'
   [[ "${value%/}" == "${physical}" ]] || fail 'project root must not contain symbolic components'
   printf '%s\n' "${physical}"
@@ -49,11 +49,11 @@ canonical_dist() {
 
 validate_exact_git_root() {
   local root="$1" top head
-  head="$(git -C "${root}" rev-parse --verify HEAD^{commit} 2>/dev/null)" ||
+  head="$(git -C "${root}" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" ||
     fail 'selected project root must be the exact Git root with a valid HEAD'
   top="$(git -C "${root}" rev-parse --show-toplevel 2>/dev/null)" ||
     fail 'selected project root must be the exact Git root with a valid HEAD'
-  top="$(CDPATH= cd -P -- "${top}" 2>/dev/null && pwd -P)" ||
+  top="$(CDPATH='' cd -P -- "${top}" 2>/dev/null && pwd -P)" ||
     fail 'Git top-level cannot be resolved physically'
   [[ "${top}" == "${root}" ]] ||
     fail 'selected project root must be the exact Git root with a valid HEAD'
@@ -81,7 +81,7 @@ validate_handoff() {
 }
 
 main() {
-  local root_value= release_tag= version script_dir root head profile
+  local root_value="" release_tag="" version script_dir root head profile
   local manager_version make_version tag_type peeled workflow_commit status
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
@@ -102,11 +102,11 @@ main() {
   version="$1"
   [[ "${version}" =~ ^[0-9]+[.][0-9]+[.][0-9]+([.-][0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] ||
     fail "invalid release version: ${version}"
-  script_dir="$(CDPATH= cd -P -- "${BASH_SOURCE[0]%/*}" 2>/dev/null && pwd -P)" || usage
+  script_dir="$(CDPATH='' cd -P -- "${BASH_SOURCE[0]%/*}" 2>/dev/null && pwd -P)" || usage
   if [[ -n "${root_value}" ]]; then
     root="$(physical_root "${root_value}")"
   else
-    root="$(CDPATH= cd -P -- "${script_dir}/.." 2>/dev/null && pwd -P)" || usage
+    root="$(CDPATH='' cd -P -- "${script_dir}/.." 2>/dev/null && pwd -P)" || usage
   fi
   head="$(validate_exact_git_root "${root}")"
   if [[ -n "${release_tag}" ]]; then

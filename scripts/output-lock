@@ -21,7 +21,7 @@ validate_root() {
   local root="$1" physical
   [[ "${root}" == /* && "${root}" != *[!\ -~]* && -d "${root}" && ! -L "${root}" ]] ||
     usage
-  physical="$(CDPATH= cd -P -- "${root}" 2>/dev/null && pwd -P)" || usage
+  physical="$(CDPATH='' cd -P -- "${root}" 2>/dev/null && pwd -P)" || usage
   [[ "${root%/}" == "${physical}" ]] || usage
   printf '%s\n' "${physical}"
 }
@@ -54,7 +54,7 @@ main() {
 
   script_dir="${BASH_SOURCE[0]%/*}"
   [[ "${script_dir}" != "${BASH_SOURCE[0]}" ]] || script_dir=.
-  script_dir="$(CDPATH= cd -P -- "${script_dir}" && pwd -P)"
+  script_dir="$(CDPATH='' cd -P -- "${script_dir}" && pwd -P)"
   [[ "${script_dir}" == "${root}/scripts" ]] || usage
   if ! preflight_output="$("${script_dir}/preflight" output-lock --project-root "${root}" 2>&1)"; then
     fail "${target}" capability \
