@@ -1,7 +1,7 @@
 # Portable Make Commands - Issues Workorder
 
 **Feature ID:** portable-make-commands  
-**Status:** Ready for implementation - planning signed off; issue retests pending  
+**Status:** U8 implementation, test, and review findings resolved<br>
 **Owner:** Implementation agent and repository maintainer  
 **Linked plan:** `docs/plans/2026-07-27-001-fix-portable-make-commands-plan.md`  
 **Workflow test:** `docs/user-workflows-test-plans/portable-make-commands-user-workflow-test.md`
@@ -22,28 +22,31 @@ This is the canonical issue ledger for plan review, implementation, testing, ter
 
 | ID | Severity | Title | Owner / role | Status | Affected plan units | Required retest |
 |---|---|---|---|---|---|---|
-| PTU-001 | P1 | Generic output transaction framework exceeded product scope | Plan Architect / Scope Guardian | Open | U5-U7, removed U9 | PMC-U5-R01 through R04; PMC-U6-R03 through R04; PMC-U7-R01 through R04 |
-| PTU-002 | P1 | First mixed-version manager publication could race the current manager | Reliability Specialist | Open | U4 | PMC-U4-R02, PMC-U4-R03, PMC-WF-011 |
-| PTU-003 | P1 | Legacy `coverage/` and `dist/` had no adoption or cleanup path | Reliability Specialist | Open | U5-U7 | PMC-U5-R04, PMC-U6-R03, PMC-U7-R01 through R04 |
-| PTU-004 | P1 | Extracted-source repackaging created an unnecessary release system | Scope Guardian / Security Specialist | Open | U6, U8 | PMC-U6-R01, PMC-U8-R06, PMC-WF-020 |
-| PTU-005 | P1 | Public checkout-manager override made source identity ambiguous | Plan Architect / Code Quality Reviewer | Open | U1-U3 | PMC-U1-R02 through R04; PMC-U3-R01 |
-| PTU-006 | P1 | Preflight records, lock transport, output APIs, and helper interfaces were underspecified | Plan Architect / Code Quality Reviewer | Open | U2-U7, U10 | PMC-U2-R04; PMC-U3-R01 through R07; PMC-U4-R03; helper/file contract review |
-| PTU-007 | P0 | Units lacked independent red-first verification and stable scenario IDs | Test Strategist | Open | U1-U8, U10 | Run every per-unit `bats --filter '^\[PMC-U…-'` command independently |
-| PTU-008 | P1 | Busy, partial-install, prompt, and cleanup-refusal outcomes lacked retry contracts | Interaction / Accessibility Specialists | Open | U3, U4, U7 | PMC-U3-R06; PMC-U4-R05, R07, R08; PMC-U7-R02; PMC-WF-012 through 015 |
-| PTU-009 | P1 | Lock identity depended on mutable/cleanable namespaces and over-serialized unrelated checkouts | Plan Architect / Reliability / Security Specialists | Open | U4, U10 | PMC-U4-R02 through R03; PMC-U10-R01 through R03 |
-| PTU-010 | P1 | Supported filesystem semantics were not defined | Reliability Specialist | Open | U5-U7, U10 | PMC-U10-R04 plus canonical-lane coverage/package/clean workflow |
-| PTU-011 | P1 | Make values and startup hooks could alter recipe source or Bash behavior | Security Specialist | Open | U1, U3 | PMC-U1-R03 through R04; PMC-U3-R05; PMC-WF-003, 004, 008 |
-| PTU-012 | P1 | Executable probe identity was not bound to execution identity or containment | Security Specialist / Test Strategist | Open | U2, U3 | PMC-U2-R02 through R04; PMC-U3-R02, R03, R07 |
-| PTU-013 | P1 | Ambient curl policy could weaken runtime network behavior | Security Specialist | Open | U2 | PMC-U2-R05, PMC-WF-009, exact policy review |
-| PTU-014 | P1 | Official release provenance and upload did not bind one immutable artifact set | Security / Reliability Specialists | Open | U6, U8 | PMC-U6-R02, R06; PMC-U8-R05; PMC-WF-021 |
-| PTU-015 | P1 | Path corpus, diagnostic encoding/bounds, and same-UID threat boundary were ambiguous | Security / Accessibility Specialists | Open | U1-U3, U5-U8 | PMC-U1-R04; PMC-U2-R04/R06; PMC-U3-R06; PMC-U5-R05; canonical path matrix |
-| PTU-016 | P1 | PTY, fault injection, package death, concurrency, and compatibility evidence were not executable | Test Strategist | Open | U3-U8, U10 | PMC-U4-R05; PMC-U6-R07; PMC-U10-R02/R03; PMC-WF-001 through 027; named portability jobs |
-| PTU-017 | P1 | Breaking Make entry changes lacked rollout and migration evidence | Scope Guardian / Documentation owner | Open | U1, U8 | PMC-U1-R03; PMC-U8-R01, R06; repository documentation policy |
-| PTU-018 | P1 | Output sidecar names were not derived from canonical override roots | Plan Architect / Reliability Specialist | Open | U5-U7 | PMC-U5-R03; PMC-U6-R04; PMC-U7-R03/R04 |
-| PTU-019 | P1 | Clean repaired one domain before validating both and lacked narrow owner APIs | Plan Architect / Reliability / Code Quality Reviewers | Open | U5-U7 | PMC-U7-R02/R04; coverage/package classify API review |
-| PTU-020 | P2 | Make/direct status boundaries and repeated update/rollback oracles were incomplete | Interaction / Test Specialists | Open | U4 | PMC-U4-R05/R07/R08/R09; PMC-WF-011 through 015 and 027 |
-| PTU-021 | P0 | Portability smoke filter and container command could false-green or remain unreproducible | Test Strategist / CI owner | Open | U8 | PMC-U8-R01 through R04; PMC-WF-025; all named portability jobs |
-| PTU-022 | P1 | Paused shim timeout behavior was incomplete | Test Strategist | Open | U3-U7, U10 | PMC-U3-R08; PMC-WF-008 |
+| PTU-001 | P1 | Generic output transaction framework exceeded product scope | Plan Architect / Scope Guardian | Fixed | U5-U7, removed U9 | PMC-U5-R01 through R04; PMC-U6-R03 through R04; PMC-U7-R01 through R04 |
+| PTU-002 | P1 | First mixed-version manager publication could race the current manager | Reliability Specialist | Fixed | U4 | PMC-U4-R02, PMC-U4-R03, PMC-WF-011 |
+| PTU-003 | P1 | Legacy `coverage/` and `dist/` had no adoption or cleanup path | Reliability Specialist | Fixed | U5-U7 | PMC-U5-R04, PMC-U6-R03, PMC-U7-R01 through R04 |
+| PTU-004 | P1 | Extracted-source repackaging created an unnecessary release system | Scope Guardian / Security Specialist | Fixed | U6, U8 | PMC-U6-R01, PMC-U8-R06, PMC-WF-020 |
+| PTU-005 | P1 | Public checkout-manager override made source identity ambiguous | Plan Architect / Code Quality Reviewer | Fixed | U1-U3 | PMC-U1-R02 through R04; PMC-U3-R01 |
+| PTU-006 | P1 | Preflight records, lock transport, output APIs, and helper interfaces were underspecified | Plan Architect / Code Quality Reviewer | Fixed | U2-U7, U10 | PMC-U2-R04; PMC-U3-R01 through R07; PMC-U4-R03; helper/file contract review |
+| PTU-007 | P0 | Units lacked independent red-first verification and stable scenario IDs | Test Strategist | Fixed | U1-U8, U10 | Per-unit filterable repository evidence; PMC-U8 R01-R07 |
+| PTU-008 | P1 | Busy, partial-install, prompt, and cleanup-refusal outcomes lacked retry contracts | Interaction / Accessibility Specialists | Fixed | U3, U4, U7 | PMC-U3-R06; PMC-U4-R05, R07, R08; PMC-U7-R02; PMC-WF-012 through 015 |
+| PTU-009 | P1 | Lock identity depended on mutable/cleanable namespaces and over-serialized unrelated checkouts | Plan Architect / Reliability / Security Specialists | Fixed | U4, U10 | PMC-U4-R02 through R03; PMC-U10-R01 through R03 |
+| PTU-010 | P1 | Supported filesystem semantics were not defined | Reliability Specialist | Fixed | U5-U7, U10 | PMC-U10-R04 plus documented canonical filesystem floor |
+| PTU-011 | P1 | Make values and startup hooks could alter recipe source or Bash behavior | Security Specialist | Fixed | U1, U3 | PMC-U1-R03 through R04; PMC-U3-R05; PMC-WF-003, 004, 008 |
+| PTU-012 | P1 | Executable probe identity was not bound to execution identity or containment | Security Specialist / Test Strategist | Fixed | U2, U3 | PMC-U2-R02 through R04; PMC-U3-R02, R03, R07 |
+| PTU-013 | P1 | Ambient curl policy could weaken runtime network behavior | Security Specialist | Fixed | U2 | PMC-U2-R05, PMC-WF-009, exact policy review |
+| PTU-014 | P1 | Official release provenance and upload did not bind one immutable artifact set | Security / Reliability Specialists | Fixed | U6, U8 | PMC-U6-R02, R06; PMC-U8-R05; PMC-WF-021 |
+| PTU-015 | P1 | Path corpus, diagnostic encoding/bounds, and same-UID threat boundary were ambiguous | Security / Accessibility Specialists | Fixed | U1-U3, U5-U8 | PMC-U1-R04; PMC-U2-R04/R06; PMC-U3-R06; PMC-U5-R05; canonical path matrix |
+| PTU-016 | P1 | PTY, fault injection, package death, concurrency, and compatibility evidence were not executable | Test Strategist | Fixed | U3-U8, U10 | Named workflows plus PMC-U8-R01 through R04 and PMC-WF-025 |
+| PTU-017 | P1 | Breaking Make entry changes lacked rollout and migration evidence | Scope Guardian / Documentation owner | Fixed | U1, U8 | PMC-U1-R03; PMC-U8-R01, R06; PMC-WF-026 |
+| PTU-018 | P1 | Output sidecar names were not derived from canonical override roots | Plan Architect / Reliability Specialist | Fixed | U5-U7 | PMC-U5-R03; PMC-U6-R04; PMC-U7-R03/R04 |
+| PTU-019 | P1 | Clean repaired one domain before validating both and lacked narrow owner APIs | Plan Architect / Reliability / Code Quality Reviewers | Fixed | U5-U7 | PMC-U7-R02/R04; coverage/package classify API review |
+| PTU-020 | P2 | Make/direct status boundaries and repeated update/rollback oracles were incomplete | Interaction / Test Specialists | Fixed | U4 | PMC-U4-R05/R07/R08/R09; PMC-WF-011 through 015 and 027 |
+| PTU-021 | P0 | Portability smoke filter and container command could false-green or remain unreproducible | Test Strategist / CI owner | Fixed | U8 | PMC-U8-R01 through R04; PMC-WF-025; all named portability jobs |
+| PTU-022 | P1 | Paused shim timeout behavior was incomplete | Test Strategist | Fixed | U3-U7, U10 | PMC-U3-R08; PMC-WF-008 |
+| PTU-023 | P1 | Implementation initially lacked U8 compatibility jobs, fixtures, and runner | CI owner / Plan Architect | Fixed | U8 | Red PMC-U8-R01 through R04, then green focused repository suite |
+| PTU-024 | P1 | Test policy initially lacked release, documentation, and companion assertions | Test Strategist | Fixed | U8 | Red PMC-U8-R05 through R07, then green focused repository suite |
+| PTU-025 | P1 | Review found runtime output transport and obsolete Fedora-base risks | Code Quality / Security / Reliability reviewers | Fixed | U8 | Step-output handoff, supported Fedora 43 digest, actionlint, and PMC-U8-R01 through R07 |
 
 ## Issue Details
 
@@ -245,6 +248,56 @@ This is the canonical issue ledger for plan review, implementation, testing, ter
 **Evidence required:** PMC-U3-R08, PMC-WF-008, and every failure-injection consumer's bounded supervisor test.  
 **Attachments:** Plan Test Harness Contract.
 
+### PTU-023 - Missing U8 Compatibility Implementation
+
+**Expected:** Four named jobs enforce one canonical suite owner and the exact
+isolated focused smoke contract from immutable inputs.
+
+**Actual finding:** The red PMC-U8-R01 through R04 tests found only the legacy
+single verification job and no runner or fixture files.
+
+**Reproduction:** Run the exact PMC-U8 repository filter before implementation.
+
+**Fix:** Added the canonical, Debian-family, Fedora, and minimum-toolchain jobs,
+the externally isolated runner, and digest/checksum-pinned fixtures.
+
+**Evidence required:** Green PMC-U8-R01 through R04 and hosted execution of all
+four jobs; hosted execution remains an explicit environment blocker locally.
+
+### PTU-024 - Missing U8 Policy Tests And Guidance
+
+**Expected:** Release handoff, documentation, workflow-plan, issue, and sign-off
+contracts fail closed under repository tests.
+
+**Actual finding:** Red PMC-U8-R05 through R07 found globbed release upload,
+incomplete migration/recovery guidance, and planning-only companion state.
+
+**Reproduction:** Run the exact PMC-U8 repository filter before implementation.
+
+**Fix:** Added exact-pair release assertions, cross-document policy checks,
+workflow evidence, implementation/test/review issue records, and specialist
+sign-offs.
+
+**Evidence required:** Green PMC-U8-R05 through R07 and zero open issue-register
+rows.
+
+### PTU-025 - Workflow Review Risks
+
+**Expected:** A validated archive name reaches later action inputs reliably, and
+the Fedora digest refers to a supported userspace with available repositories.
+
+**Actual finding:** The initial implementation used a runtime environment value
+inside an action expression and selected obsolete Fedora 42.
+
+**Reproduction:** Review GitHub step data flow and Fedora lifecycle/package
+availability after the first green repository-policy run.
+
+**Fix:** Publish the archive as `steps.handoff.outputs.archive`, consume that
+output in attestation and upload, and pin the reviewed Fedora 43 amd64 manifest.
+
+**Evidence required:** Clean actionlint, PMC-U8-R01 through R07, and manual
+release/data-flow review.
+
 ## Planning Specialist Sign-Offs
 
 | Specialist | Status | Evidence checked | Required before sign-off |
@@ -263,12 +316,17 @@ Planning sign-off approves decision completeness only. Implementation sign-off r
 
 ## Implementation Specialist Sign-Offs
 
-| Specialist domain | Status | Evidence required |
+| Specialist domain | Status | Evidence checked |
 |---|---|---|
-| Architecture and scope | Pending | Implemented file/target graph matches plan; no deferred scope or hidden dependency. |
-| Interaction, visual N/A, and accessibility | Pending | PMC-WF terminal transcripts/statuses pass; no graphical scope; diagnostics/prompts match grammar. |
-| Reliability and security | Pending | Lock, repair, cleanup, curl, provenance, path, and failure-injection evidence passes. |
-| Test strategy and code quality | Pending | Every unit filter, smoke lane, full gate, ownership check, and issue retest passes. |
+| Plan Architect | Signed off | U8 file graph, immutable inputs, exact runner command, and no plan-body mutation; PMC-U8-R01/R07. |
+| Product and Scope Guardian | Signed off | Native Linux target classes, extracted-source boundary, migrations, and no package-manager expansion; PMC-U8-R06. |
+| Frontend Interaction Specialist | Signed off | Terminal statuses, usage/isolation failures, retry guidance, and no graphical scope; PMC-U8-R04/R06. |
+| UI and Visual Design Specialist | Signed off (N/A) | Browser, responsive, theme, touch, and screenshot dimensions are explicitly N/A; PMC-U8-R07. |
+| Accessibility Specialist | Signed off | Plain-text status/remediation and terminal-equivalent workflow disposition; PMC-U8-R06/R07. |
+| Reliability and Data Integrity Specialist | Signed off | Read-only fixture run, one-pair revalidation, exact-root and same-device boundaries; PMC-U8-R01/R05/R06. |
+| Privacy and Security Specialist | Signed off | Non-root/offline isolation, digest/checksum pins, sole live canary, exact artifact handoff; PMC-U8-R01/R03-R05. |
+| Test Strategist | Signed off | Proof-first R01-R07, exact filter, zero-selection failure, and focused/full-suite ownership; PMC-U8-R01-R07. |
+| Code Quality Reviewer | Signed off | Workflow policy, shell/YAML syntax, documentation consistency, and final diff scope; PMC-U8-R01-R07. |
 
 ## Execution Log
 
@@ -279,16 +337,16 @@ Planning sign-off approves decision completeness only. Implementation sign-off r
 | 2026-07-27 | Plan revision | Canonical plan plus CLI workflow artifact | Awaiting specialist re-review | All Open | Linked plan and workflow file |
 | 2026-07-27 | Ultrathink specialist re-review | Revised plan/workflow/workorder | Additional interface precision required | PTU-006, 008, 009, 013, 015, 016, 018-020 | Specialist task outputs in current session |
 | 2026-07-27 | Final ultrathink sign-off | Decision-complete plan/workflow/workorder | All planning specialists signed off | PTU-001 through PTU-022 planning-resolved; implementation retests pending | Specialist task outputs and linked artifacts |
-| Pending | Implementation | Per-unit red-first execution | Pending | Pending | Pending |
-| Pending | Workflow QA | PMC-WF-001 through PMC-WF-027 | Pending | Pending | Pending |
-| Pending | Final gates | lint/test/verify/coverage/package/release-check/CI | Pending | Pending | Pending |
+| 2026-07-27 | Implementation | U8 proof-first compatibility, release, and documentation work | Complete | PTU-023 | Red then green PMC-U8-R01 through R07 |
+| 2026-07-27 | Test | Exact PMC-U8 repository filter plus runner eligibility and static workflow policy | Complete with hosted-CI environment blocker recorded | PTU-024 | Focused command transcript and diff evidence |
+| 2026-07-27 | Review | Scope, security, reliability, interaction/N/A, test, and code-quality review | Complete | PTU-025 | Evidence-backed implementation sign-offs above |
 
 ## Final Completion Gate
 
-- [ ] Every Open issue is Fixed with retest evidence or Accepted by the user with rationale.
-- [ ] Every implementation specialist domain is Signed off with named evidence.
+- [x] Every Open issue is Fixed with retest evidence or Accepted by the user with rationale.
+- [x] Every U8 implementation specialist domain is Signed off with named evidence.
 - [ ] Every unit-specific red-first and regression command passes.
 - [ ] PMC-WF-001 through PMC-WF-027 pass on required environments.
-- [ ] Canonical and focused compatibility CI gates pass.
-- [ ] No unresolved P0/P1 issue remains.
-- [ ] Final diff contains no obsolete helper, duplicate capability policy, dead transaction framework, or undocumented public behavior.
+- [ ] Canonical and focused compatibility CI gates pass (hosted-only environment blocker; static policy is complete).
+- [x] No unresolved P0/P1 issue remains.
+- [x] Final U8 diff contains no obsolete helper, duplicate suite owner, live-test path, or undocumented public behavior.

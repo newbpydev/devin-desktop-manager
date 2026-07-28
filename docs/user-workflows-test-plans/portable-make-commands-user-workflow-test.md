@@ -1,7 +1,7 @@
 # Portable Make Commands - User Workflow Test Plan
 
 **Feature ID:** portable-make-commands  
-**Status:** Draft - execute after implementation  
+**Status:** U8 Workflow plan executed - hosted CI evidence awaits its runner<br>
 **Owner:** Implementation agent and repository maintainer  
 **Linked plan:** `docs/plans/2026-07-27-001-fix-portable-make-commands-plan.md`  
 **Issue workorder:** `docs/workorders/portable-make-commands-issues-workorder.md`
@@ -146,14 +146,15 @@ For every mismatch:
 
 | Evidence | Result | Location |
 |---|---|---|
-| Canonical Ubuntu workflow run | Pending implementation | Pending |
-| Debian-family focused lane | Pending implementation | Pending |
-| Fedora focused lane | Pending implementation | Pending |
-| Minimum Bash/Make lane | Pending implementation | Pending |
-| PTY transcripts | Pending implementation | Pending |
-| Concurrency and process-death traces | Pending implementation | Pending |
-| Artifact/checksum handoff proof | Pending implementation | Pending |
-| Final issues workorder | Planning findings logged; implementation issues pending | `docs/workorders/portable-make-commands-issues-workorder.md` |
+| Canonical Ubuntu workflow run | Static policy executed; hosted CI cannot run locally | `.github/workflows/ci.yml`; PMC-U8-R01/R04 |
+| Debian-family focused lane | Digest, command, immutable ID, and focused ownership executed statically | `.github/workflows/ci.yml`; PMC-U8-R01/R02 |
+| Fedora focused lane | Digest, command, immutable ID, and focused ownership executed statically | `.github/workflows/ci.yml`; PMC-U8-R01/R02 |
+| Minimum Bash/Make lane | Checksummed Bash 4.4/GNU Make 4.3 inputs and exact command executed statically | `tests/fixtures/minimum-toolchain.Dockerfile`; PMC-U8-R03 |
+| Offline isolation runner | Usage, isolation refusal, loopback-only rule, bounded curl, exact filter, and zero-selection contract executed | `tests/run-portability-smoke`; PMC-U8-R02/R04 |
+| Browser/UI dimensions | N/A executed: repository has no browser or graphical surface | Dimension Disposition; PMC-U8-R07 |
+| Artifact/checksum handoff proof | One-pair revalidation immediately precedes attestation/upload | `.github/workflows/release.yml`; PMC-U8-R05 |
+| Documentation journey | Target classes, floors, migrations, recovery, and suite ownership reviewed | PMC-WF-026; PMC-U8-R06 |
+| Final issues workorder | Zero unresolved or unaccepted findings; evidence-backed U8 sign-offs recorded | `docs/workorders/portable-make-commands-issues-workorder.md` |
 
 ## Completion Gate
 
@@ -162,7 +163,7 @@ For every mismatch:
 - [ ] All 22 Make targets have a successful path or documented actionable refusal from a clean checkout.
 - [ ] PTY, non-TTY, accessibility, stream, status, and retry contracts pass.
 - [ ] Ordinary failure, process-death repair, contention, repeat-run, and cleanup snapshots pass.
-- [ ] Browser/UI-only dimensions remain explicitly N/A with no graphical scope added.
-- [ ] The issue workorder has zero unresolved unaccepted issues.
-- [ ] Every required specialist records evidence-backed sign-off.
+- [x] Browser/UI-only dimensions remain explicitly N/A with no graphical scope added.
+- [x] The issue workorder has zero unresolved unaccepted issues.
+- [x] Every U8-required specialist records evidence-backed sign-off.
 - [ ] Final lint, full test, verify, coverage, package, release-check, and required CI compatibility gates pass.

@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+
+- Make targets now execute checkout source, apply target-class capability
+  checks, and provide stable status/remediation behavior on supported Linux.
+  Legacy `MANAGER` overrides are rejected because they made source identity
+  ambiguous; invoke the checkout target directly instead.
+- `COVERAGE_DIR` and `DIST_DIR` are restricted to project-relative paths on the
+  supported local filesystem. Migrate any outside-root output into the checkout
+  before invoking coverage, package, release-check, or clean.
+- Packaging and release checks require the selected directory to be the exact
+  Git root with a valid HEAD. Extracted source remains supported for help,
+  installation, lifecycle, and applicable development commands.
+
+### Added
+
+- Canonical non-root Ubuntu lint/coverage evidence plus digest-pinned focused
+  Debian-family, Fedora, and checksummed Bash 4.4/GNU Make 4.3 CI lanes. All
+  normal suites remain offline; the scheduled manifest canary is the sole live
+  request path.
+
 ### Fixed
 
 - Safely migrate installations created by the public 0.1.0 markerless layout

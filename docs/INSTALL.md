@@ -5,11 +5,14 @@
 Devin Desktop Manager v0.1 supports glibc-based Linux x86_64 desktops with:
 
 - Bash 4.4 or newer;
+- GNU Make compatible with 4.3 behavior or newer;
 - `curl`, `jq`, `bsdtar`, `sha256sum`, `flock`, `ldd`, `readlink`, `find`,
   `timeout`, `unshare`, and standard POSIX text tools;
 - `desktop-file-validate`, `update-desktop-database`,
   `update-mime-database`, and `xdg-mime`;
 - unprivileged user namespaces.
+- a local same-device filesystem that supports atomic rename, advisory `flock`,
+  stable inode identity, and single-link regular files for managed output.
 
 KDE's `kbuildsycoca6` is optional. When present, the manager refreshes the KDE
 cache; its absence does not prevent installation on GNOME, Cinnamon, XFCE, or
@@ -17,30 +20,11 @@ other XDG-compatible desktops.
 
 ## Dependencies
 
-Ubuntu 24.04 / Debian:
-
-```bash
-sudo apt-get update
-sudo apt-get install curl jq libarchive-tools util-linux \
-  desktop-file-utils shared-mime-info xdg-utils
-```
-
-Arch Linux / CachyOS:
-
-```bash
-sudo pacman -S --needed bash curl jq libarchive util-linux \
-  desktop-file-utils shared-mime-info xdg-utils
-```
-
-Fedora:
-
-```bash
-sudo dnf install bash curl jq bsdtar util-linux \
-  desktop-file-utils shared-mime-info xdg-utils
-```
-
-Package names can differ on derivatives. The manager reports every missing
-command before changing an installation.
+Install the capabilities above using your operating system's documentation.
+Package names and package manager commands differ between distributions, so the
+project does not guess or run one. Preflight reports every missing or
+incompatible target-specific capability before changing an installation; use
+that generic remediation list to select packages for your system.
 
 ## Install from a versioned release
 
@@ -58,6 +42,12 @@ make doctor
 Release artifacts also receive GitHub artifact attestations. See
 [docs/RELEASING.md](RELEASING.md) for verification guidance.
 
+An extracted source archive supports `make help`, installation, lifecycle, and
+applicable development target classes. `make package` and `make release-check`
+intentionally refuse extracted source because release provenance requires the
+selected path to be the exact Git root with a valid HEAD. Clone the repository
+and run those release-engineering targets from its physical top level.
+
 ## Install from Git
 
 ```bash
@@ -70,6 +60,13 @@ make doctor
 
 No command requires `sudo`. Running the manager as root is intentionally
 refused. Add `~/.local/bin` to `PATH` if your distribution does not already.
+
+Checkout targets always execute `bin/devin-desktop-manager`. The legacy
+`MANAGER=...` Make override is no longer accepted; call a separately installed
+manager directly when that is what you intend to test. `COVERAGE_DIR` and
+`DIST_DIR` must be project-relative. Move legacy outside-root output into a
+project-relative directory or archive it elsewhere, then retry the same
+command.
 
 ## Existing path collisions
 
@@ -86,6 +83,13 @@ directory. The next mutating command acquires the manager lock and restores
 that journal before starting new work. If interruption happens after an
 uninstall commits, a separate validated cleanup record lets the next mutation
 remove only the manager-owned staged release tree.
+
+Busy operations fail without mutation. Wait for the named holder to exit and
+retry the same command; do not remove persistent lock files. For an unsafe
+coverage or package candidate, preserve it, follow the exact inspection or
+move-aside remediation printed on stderr, and rerun the command. Direct helper
+usage errors return status 2, operational/isolation failures return status 1,
+and Make callers should rely only on zero versus nonzero.
 
 ## User namespaces
 

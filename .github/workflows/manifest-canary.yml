@@ -26,5 +26,5 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes jq libarchive-tools
 
-      - name: Check the official channel without mutation
+      - name: Perform the repository's sole live request without mutation
         run: bin/devin-desktop-manager check

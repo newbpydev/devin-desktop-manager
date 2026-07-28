@@ -11,13 +11,18 @@ Only repository maintainers publish releases.
    followed by `bundle install`, then run `bundle exec make release-check`. The
    committed lockfile fixes Bashcov 3.3.0 and its dependency graph; the command
    runs lint, behavior tests, the 90% line-coverage gate, version consistency,
-   and deterministic packaging with `SHA256SUMS`.
+    and deterministic packaging with `SHA256SUMS`.
 4. Review the archive contents and test installation from that archive in a
    disposable user account or VM.
 5. Confirm the scheduled manifest canary is green.
 
-To validate an extracted or staged source tree with the checker from this
-checkout, set `RELEASE_CHECK_PROJECT_ROOT` to that absolute directory.
+Release engineering requires the selected physical directory to be the exact
+Git root with a valid HEAD on a local same-device filesystem. Extracted source
+is supported for help, installation, lifecycle, and applicable development
+target classes, but never for `package` or `release-check`. Do not redirect
+`DIST_DIR` to outside-root output; migrate legacy output to a project-relative
+directory before release validation. The legacy `MANAGER` override is not a
+release input because checkout targets always execute reviewed source.
 
 ## Tag and draft
 
@@ -32,6 +37,13 @@ The release workflow rejects lightweight tags, version mismatches, and coverage
 below 90%. It re-runs verification, creates the deterministic source archive and
 `SHA256SUMS`, generates a GitHub artifact attestation, and creates a draft
 GitHub release. It never packages or uploads Devin Desktop.
+
+Immediately before attestation and upload, the workflow reruns the official
+release contract against the clean workflow/tag commit. It rejects dirty input,
+extra archives, an altered checksum, or a workflow/tag mismatch and hands off
+exactly one explicitly named archive plus one `SHA256SUMS`. Status 1 requires
+preserving the pair, applying the printed remediation, and retrying the same
+command; direct status 2 means the invocation itself is invalid.
 
 ## Publish
 
