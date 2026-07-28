@@ -253,6 +253,7 @@ setup() {
   [ "$(grep -c 'BASE_IMAGE: .*@sha256:[0-9a-f]\{64\}' "${ci}")" -eq 3 ]
   [ "$(grep -c 'docker image inspect --format' "${ci}")" -eq 3 ]
   [ "$(grep -c -- '--network none --user 10001:10001 --read-only' "${ci}")" -eq 3 ]
+  [ "$(grep -c -- '--tmpfs /tmp:rw,exec,uid=10001,gid=10001,mode=1777' "${ci}")" -eq 3 ]
   grep -Fq 'Legacy `MANAGER`' "${PROJECT_ROOT}/CHANGELOG.md"
   grep -Fq 'outside-root output' "${PROJECT_ROOT}/CHANGELOG.md"
 }
