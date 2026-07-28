@@ -251,9 +251,11 @@ fi
 printf '%s\n' "\$*" >>"${CURL_LOG}"
 output=""
 header=""
+continue_at=""
 url="\${!#}"
 while ((\$# > 0)); do
   case "\$1" in
+    --continue-at) continue_at="\$2"; shift 2 ;;
     --output) output="\$2"; shift 2 ;;
     --dump-header) header="\$2"; shift 2 ;;
     *) shift ;;
@@ -281,7 +283,13 @@ else
     printf 'partial fixture\n' >"\${output}"
     exit 22
   fi
-  cp -- "${fixture}" "\${output}"
+  if [[ -n "\${continue_at}" ]]; then
+    destination="\${output%%.response.*}"
+    offset="\$(stat -c '%s' -- "\${destination}")"
+    tail -c "+\$((offset + 1))" -- "${fixture}" >"\${output}"
+  else
+    cp -- "${fixture}" "\${output}"
+  fi
 fi
 EOF
   chmod 0755 "${MOCK_BIN}/curl"
@@ -1710,7 +1718,7 @@ EOF
   mkdir -p "${cache}"
   printf '%s\n' 'io.github.newbpydev.devin-desktop-manager schema=1' \
     >"${cache}/.devin-desktop-manager-owned"
-  printf 'partial\n' >"${partial}"
+  head -c 8 -- "${FIXTURE}" >"${partial}"
 
   run manager_env update
 

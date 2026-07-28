@@ -20,7 +20,7 @@ fail() {
 physical_root() {
   local value="$1" physical
   [[ "${value}" == /* && "${value}" != *[!\ -~]* && -d "${value}" && ! -L "${value}" ]] ||
-    fail 'project root must be an absolute physical directory'
+    fail 'project root must be an absolute directory with a physical path'
   physical="$(CDPATH= cd -P -- "${value}" 2>/dev/null && pwd -P)" ||
     fail 'project root cannot be resolved physically'
   [[ "${value%/}" == "${physical}" ]] || fail 'project root must not contain symbolic components'

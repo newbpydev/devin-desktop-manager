@@ -333,7 +333,7 @@ preflight_check_environment() {
       "${value}" == *$'\n'* || "${value}" == *$'\r'* ||
       "${value}" == *$'\t'* || "${value}" == *$'\e'* ]]; then
       preflight_add blocker path "path.${name,,}" \
-        "${name} must be an absolute path without control bytes" "${value}" \
+        "${name} must be set to an absolute path without control bytes" "${value}" \
         "Set ${name} to a safe absolute directory and retry."
     fi
   done
@@ -604,6 +604,7 @@ curl_fetch_file() {
   local maximum_bytes="$3"
   local maximum_time="$4"
   local resume="${5:-false}"
+  local keep_partial="${6:-false}"
   local header response status location offset=0 remaining response_size final_size hop
   local curl_status
   local -a resume_options=()
@@ -612,7 +613,7 @@ curl_fetch_file() {
   if [[ "${resume}" == true && -f "${destination}" ]]; then
     offset="$(stat -c '%s' -- "${destination}")" || return 1
     ((offset < maximum_bytes)) || return 1
-    ((offset == 0)) || resume_options=(--continue-at "${offset}")
+    ((offset == 0)) || resume_options=(--continue-at -)
   fi
   remaining=$((maximum_bytes - offset))
   for ((hop = 0; hop <= 5; hop++)); do
@@ -632,10 +633,36 @@ curl_fetch_file() {
       :
     else
       curl_status=$?
-      rm -f -- "${header}" "${response}"
+      rm -f -- "${header}"
       NETWORK_HEADER_TEMP=""
+      if ((curl_status == 63)); then
+        rm -f -- "${response}"
+        NETWORK_RESPONSE_TEMP=""
+        return "${CURL_FETCH_SIZE_LIMIT_STATUS}"
+      fi
+      if [[ "${keep_partial}" == true ]]; then
+        response_size="$(stat -c '%s' -- "${response}" 2>/dev/null || printf 0)"
+        if ((response_size > 0 && response_size <= remaining &&
+          offset + response_size <= maximum_bytes)); then
+          if ((offset > 0)); then
+            if [[ "$(stat -c '%s' -- "${destination}" 2>/dev/null || true)" == "${offset}" ]] &&
+              cat -- "${response}" >>"${destination}"; then
+              final_size="$(stat -c '%s' -- "${destination}" 2>/dev/null || printf 0)"
+              if ((final_size != offset + response_size || final_size > maximum_bytes)); then
+                rm -f -- "${response}"
+                NETWORK_RESPONSE_TEMP=""
+                return 1
+              fi
+            fi
+          else
+            if mv -Tf -- "${response}" "${destination}"; then
+              NETWORK_RESPONSE_TEMP=""
+            fi
+          fi
+        fi
+      fi
+      rm -f -- "${response}"
       NETWORK_RESPONSE_TEMP=""
-      ((curl_status == 63)) && return "${CURL_FETCH_SIZE_LIMIT_STATUS}"
       return 1
     fi
     status="$(awk '/^HTTP\/[0-9.]+ [0-9][0-9][0-9]/ { code=$2 } END { print code }' \
@@ -4200,10 +4227,10 @@ download_release() {
   if [[ ! -f "${artifact}" ]]; then
     info "downloading official Devin Desktop ${version}"
     if [[ -f "${partial}" ]]; then
-      curl_fetch_file "${url}" "${partial}" 2147483648 7200 true ||
+      curl_fetch_file "${url}" "${partial}" 2147483648 7200 true true ||
         die "download failed; the partial file was kept for retry"
     else
-      curl_fetch_file "${url}" "${partial}" 2147483648 7200 ||
+      curl_fetch_file "${url}" "${partial}" 2147483648 7200 false true ||
         die "download failed; the partial file was kept for retry"
     fi
     mv -- "${partial}" "${artifact}"
