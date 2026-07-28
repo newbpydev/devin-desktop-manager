@@ -710,7 +710,20 @@ EOF
 @test "check rejects an oversized manifest" {
   cat >"${MOCK_BIN}/curl" <<'EOF'
 #!/usr/bin/env bash
-head -c 1048577 /dev/zero | tr '\0' x
+set -euo pipefail
+if [[ "${1:-}" == "--disable" && "${2:-}" == "--version" ]]; then
+  printf 'curl 8.0 test\nProtocols: http https\nFeatures: SSL\n'
+  exit 0
+fi
+while (($# > 0)); do
+  case "$1" in
+    --dump-header) header="$2"; shift 2 ;;
+    --output) output="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf 'HTTP/1.1 200 OK\r\n\r\n' >"${header}"
+head -c 1048577 /dev/zero | tr '\0' x >"${output}"
 EOF
   chmod 0755 "${MOCK_BIN}/curl"
 
