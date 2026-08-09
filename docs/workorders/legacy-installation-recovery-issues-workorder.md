@@ -34,7 +34,7 @@ This is the canonical ledger for plan-review findings and later implementation, 
 | LIR-ISS-006 | Reported doctor output / U3 | CLI interaction, reliability | P1 | Fixed | Doctor emits seven derivative failures, while its unlocked diagnosis must never become mutation authority. | Retain root-cause, read-only, and locked revalidation regressions. | LIR-U3-R01/R04/R06; LIR-WF-001/010/011 |
 | LIR-ISS-007 | Ultrathink recovery audit / U2 | Reliability, data migration | P1 | Fixed | Marker/metadata and transaction interruption windows need executable retry oracles. | Retain deterministic restore/retry and tamper-revalidation tests. | LIR-U2-R06/R09; LIR-WF-009 |
 | LIR-ISS-008 | Scope/test review / U4 | Portability, test strategy | P1 | In progress | A focused compatibility filter can false-green or a new workflow could duplicate suite ownership. | Run the unchanged four hosted job owners at the implementation head; all three local container userlands are green. | LIR-U4-R01/R02; LIR-WF-013 |
-| LIR-ISS-009 | Release audit / U4 | Documentation, release | P1 | In progress | Users with the broken `0.1.0` manager need fixed source before recovery; old `update` cannot update the manager itself. | Run the clean `0.1.1` release-check, then preserve separate publish authority. | LIR-U4-R03/R04/R06; LIR-WF-014 |
+| LIR-ISS-009 | Release audit / U4 | Documentation, release | P1 | Fixed | Users with the broken `0.1.0` manager need fixed source before recovery; old `update` cannot update the manager itself. | Retain bootstrap, version/schema, release-contract, and package regressions; publication remains separately authorized. | LIR-U4-R03/R04/R06; LIR-WF-014 |
 | LIR-ISS-010 | Review correction / U4 | Manual acceptance | P1 | Blocked | A live rollback check could leave the affected machine on the old release and conflate local/hosted/manual evidence. | After current-head hosted success and explicit approval, run rollback twice on the preserved host and uninstall only in a disposable environment. | LIR-U4-R05; LIR-WF-015/016 |
 | LIR-ISS-011 | Coherence/scope review / U3-U4 | Scope guardian, maintainability | P2 | Fixed | Shared documentation/workflow ownership could cause duplicate edits and unnecessary CI churn. | Keep prose ownership in U4 and the existing CI workflow unchanged. | File ownership review; LIR-U4-R03/R06 |
 
@@ -167,6 +167,7 @@ These sign-offs mean the planning pack was reviewed for decision completeness. T
 | 2026-08-09 | Aggregate verification | `make verify` | Pass: 325/325 Bats tests plus Bash syntax and ShellCheck | LIR-ISS-001-009/011 | Current implementation session |
 | 2026-08-09 | Locked coverage | `make coverage` with pinned Bundler 2.4.20 and Bashcov 3.3.0 in an unprivileged Ruby 3.2 container | Pass: 85.82% (5,545/6,461), required 84.00% | LIR-ISS-001-009/011 | Generated report validated before generated-output cleanup |
 | 2026-08-09 | Local cross-userland portability | Existing offline smoke in pinned Debian, pinned Fedora, and checksummed Bash 4.4/GNU Make 4.3 containers | Pass: 52/52 in each lane, non-root, read-only checkout, network disabled | LIR-ISS-008 | Current implementation session; hosted counterparts remain pending |
+| 2026-08-09 | Clean release readiness | `make release-check` on the clean local implementation commit | Pass: release coverage 85.85% (5,550/6,465), consistent `v0.1.1` contract, archive and `SHA256SUMS` created | LIR-ISS-009 | Commit `07b73b58ea549379495203bc6c4c46751ec5f5fd`; no tag or publication |
 
 ## Implementation And Release Gate
 
@@ -174,7 +175,7 @@ These sign-offs mean the planning pack was reviewed for decision completeness. T
 - [x] Every named focused test passes for the intended reason.
 - [x] Aggregate `make verify` and locked coverage pass.
 - [ ] Portability selection is non-empty and all existing hosted lanes pass at one head.
-- [ ] `0.1.1` release-check and deterministic package pass with unchanged schema constants.
+- [x] `0.1.1` release-check and deterministic package pass with unchanged schema constants.
 - [ ] Affected-host and disposable-environment workflows are manually accepted and separately evidenced.
 - [ ] Every Planned issue is Fixed by its named evidence, or an explicit user-accepted blocker is recorded.
 - [ ] Remaining unaccepted Open/Blocked P0/P1 issues: 0.

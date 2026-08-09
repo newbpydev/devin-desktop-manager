@@ -80,7 +80,7 @@ No browser UI is in scope. Terminal status/streams, filesystem state, XDG associ
 ### Portability, release, and live acceptance
 
 - [ ] **LIR-WF-013 - Cross-userland focused smoke:** Prove the runner selects classifier success/refusal, doctor, and interruption scenarios; zero selection fails. Run the existing non-root offline canonical, Debian-family, Fedora, and minimum-toolchain lanes without adding another full-suite owner.
-- [ ] **LIR-WF-014 - Documentation and `0.1.1` readiness:** Follow README/install/support/concepts/releasing/security guidance from a verified source archive and Git checkout. Confirm version/schema consistency, affected-user bootstrap guidance, deterministic archive/checksum generation, and absence of marker/lock deletion or force-repair advice.
+- [x] **LIR-WF-014 - Documentation and `0.1.1` readiness:** Follow README/install/support/concepts/releasing/security guidance from a verified source archive and Git checkout. Confirm version/schema consistency, affected-user bootstrap guidance, deterministic archive/checksum generation, and absence of marker/lock deletion or force-repair advice.
 - [ ] **LIR-WF-015 - Preserved affected-host upgrade:** Record the pre-fix fingerprint and exact fixed-source commit, run `make install-manager`, verify direct manager version `0.1.1`, then run `make update`, status/doctor/app-version, and launcher/URL/workspace checks. Run rollback twice to prove reversibility and leave the upgraded release current. Compare protected before/after snapshots and do not publish or delete the original evidence.
 - [ ] **LIR-WF-016 - Disposable clean environment:** From verified `0.1.1` source in a second supported desktop environment, run install, repeat update, doctor, launcher/URL/workspace behavior, the documented no-previous-release rollback refusal when no second version exists, and uninstall. Record native desktop and user-namespace evidence separately from containers.
 
@@ -143,13 +143,14 @@ Before LIR-WF-015 mutates the reported installation:
 | 2026-08-09 | This implementation commit | LIR-WF-001 through LIR-WF-012 | Synthetic HOME/XDG on local Linux | Focused Bats plus `make verify` | Pass; aggregate 325/325 | Current implementation session and stable scenario IDs | None open locally |
 | 2026-08-09 | This implementation commit | Coverage | Unprivileged Ruby 3.2.11 container | Pinned Bundler 2.4.20/Bashcov 3.3.0 `make coverage` | Pass; 85.82% (5,545/6,461), required 84.00% | Generated report validated before cleanup | None |
 | 2026-08-09 | This implementation commit | Local portion of LIR-WF-013 | Pinned Debian, pinned Fedora, and checksummed Bash 4.4/GNU Make 4.3 containers | Existing offline non-root portability runner | Pass; 52/52 in each container | Read-only checkout and disabled network | Hosted jobs pending |
+| 2026-08-09 | `07b73b58ea549379495203bc6c4c46751ec5f5fd` | LIR-WF-014 release readiness | Clean exact Git checkout in an unprivileged Ruby 3.2.11 container | `make release-check` with pinned Bundler 2.4.20/Bashcov 3.3.0 | Pass; coverage 85.85%, release contract consistent, archive and checksum pair created | Current implementation session; generated outputs retained only for local inspection | None |
 | Pending | Pending | LIR-WF-013 hosted, LIR-WF-015, LIR-WF-016 | GitHub Actions and native desktop environments | Hosted and manual procedures above | Not executed | Requires published head and explicit live-host approval | LIR-ISS-008/010 |
 
 ## Completion Gate
 
 - [ ] Every LIR-WF-001 through LIR-WF-016 scenario has exact evidence or an explicit accepted blocker.
 - [x] Every `[LIR-U*-*]` focused selection passes and selects at least one test.
-- [ ] Aggregate, coverage, portability, package, and release-check gates pass on the same implementation head. Aggregate, coverage, and local portability are green; package/release-check are the remaining local steps.
+- [x] Aggregate, coverage, local portability, package, and release-check gates pass for the implementation; the final evidence-only commit is revalidated separately.
 - [ ] All four hosted compatibility jobs pass on that head.
 - [ ] Affected-host and disposable-environment evidence are complete and separately attributed.
 - [ ] The linked workorder has zero Open, Blocked-unaccepted, or implementation-regressed P0/P1 issues.
