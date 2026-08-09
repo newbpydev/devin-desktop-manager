@@ -151,6 +151,13 @@ if [ ! -f "$$app" ] || [ ! -x "$$app" ]; then \
 fi
 endef
 
+define EXEC_APP
+HOME="$$MAKE_HOME" XDG_CONFIG_HOME="$$MAKE_XDG_CONFIG_HOME" \
+XDG_DATA_HOME="$$MAKE_XDG_DATA_HOME" XDG_STATE_HOME="$$MAKE_XDG_STATE_HOME" \
+XDG_CACHE_HOME="$$MAKE_XDG_CACHE_HOME" XDG_RUNTIME_DIR="$$MAKE_XDG_RUNTIME_DIR" \
+TMPDIR="$$MAKE_TMPDIR" exec "$$app" $(1)
+endef
+
 define ACQUIRE_MANAGER_PUBLICATION_LOCKS
 publication_parent=$$MAKE_HOME/.local/bin; \
 state_home=$${MAKE_XDG_STATE_HOME:-$$MAKE_HOME/.local/state}; \
@@ -318,13 +325,13 @@ run:
 	@$(PREPARE_SCRIPT_RUNNER); \
 	$(call RUN_PREFLIGHT,application); \
 	$(call RESOLVE_APP,run); \
-	HOME="$$MAKE_HOME" exec "$$app"
+	$(call EXEC_APP,)
 
 app-version:
 	@$(PREPARE_SCRIPT_RUNNER); \
 	$(call RUN_PREFLIGHT,application); \
 	$(call RESOLVE_APP,app-version); \
-	HOME="$$MAKE_HOME" exec "$$app" --version
+	$(call EXEC_APP,--version)
 
 test:
 	@$(PREPARE_SCRIPT_RUNNER); \

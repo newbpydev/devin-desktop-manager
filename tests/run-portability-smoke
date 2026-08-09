@@ -15,12 +15,15 @@ fail() {
 
 [[ "$#" -eq 1 && "$1" == --assert-offline ]] || usage
 [[ "$(id -u)" -ne 0 ]] || fail 'must run as a non-root user'
-[[ -d /sys/class/net ]] || fail 'cannot inspect network isolation'
+[[ -r /proc/net/dev ]] || fail 'cannot inspect network isolation'
 
 interfaces=()
 while IFS= read -r interface; do
-  interfaces+=("${interface##*/}")
-done < <(printf '%s\n' /sys/class/net/*)
+  [[ "${interface}" != *'|'* ]] || continue
+  interface="${interface%%:*}"
+  interface="${interface//[[:space:]]/}"
+  [[ -z "${interface}" ]] || interfaces+=("${interface}")
+done </proc/net/dev
 [[ "${#interfaces[@]}" -eq 1 && "${interfaces[0]}" == lo ]] ||
   fail 'external isolation is required; only the loopback interface may exist'
 

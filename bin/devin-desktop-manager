@@ -283,7 +283,7 @@ preflight_capabilities_status() {
 }
 
 preflight_capabilities_manifest_check() {
-  preflight_check_commands curl jq awk cat basename stat mktemp cp chmod rm mv
+  preflight_check_commands curl jq awk cat basename stat mktemp cp chmod rm mv timeout
 }
 
 preflight_capabilities_download() {
@@ -608,7 +608,7 @@ curl_fetch_file() {
   local resume="${5:-false}"
   local keep_partial="${6:-false}"
   local header response status location offset=0 remaining response_size final_size hop
-  local curl_status
+  local curl_status remaining_time started_at="${SECONDS}"
   local -a resume_options=()
 
   network_url_is_allowed "${url}" || return 1
@@ -619,6 +619,8 @@ curl_fetch_file() {
   fi
   remaining=$((maximum_bytes - offset))
   for ((hop = 0; hop <= 5; hop++)); do
+    remaining_time=$((maximum_time - (SECONDS - started_at)))
+    ((remaining_time > 0)) || return 1
     header="$(mktemp "${TMPDIR:-/tmp}/devin-desktop-manager.header.XXXXXXXX")" ||
       return 1
     NETWORK_HEADER_TEMP="${header}"
@@ -628,8 +630,10 @@ curl_fetch_file() {
       return 1
     }
     NETWORK_RESPONSE_TEMP="${response}"
-    if curl "${CURL_SECURITY_OPTIONS[@]}" "${CURL_CA_OPTIONS[@]}" \
-      --silent --show-error --max-time "${maximum_time}" \
+    if timeout --signal=TERM --kill-after=1s "${remaining_time}s" \
+      curl "${CURL_SECURITY_OPTIONS[@]}" "${CURL_CA_OPTIONS[@]}" \
+      --silent --show-error --max-time "${remaining_time}" \
+      --retry-max-time "${remaining_time}" \
       --max-filesize "${remaining}" --dump-header "${header}" \
       "${resume_options[@]}" --output "${response}" "${url}"; then
       :

@@ -284,6 +284,14 @@ setup() {
   [ "${status}" -eq 0 ]
 }
 
+@test "[PMC-U8-R02] Fedora fixture installs the split script utility" {
+  local fixture="${PROJECT_ROOT}/tests/fixtures/portability-userland.Dockerfile"
+
+  run bash -c 'sed -n "/elif command -v dnf/,/dnf clean all/p" "$1" |
+    grep -Fq "tar util-linux util-linux-script xdg-utils"' _ "${fixture}"
+  [ "${status}" -eq 0 ]
+}
+
 @test "[PMC-U8-R03] minimum fixture pins Bash 4.4 and GNU Make 4.3 inputs" {
   local ci="${PROJECT_ROOT}/.github/workflows/ci.yml"
   local fixture="${PROJECT_ROOT}/tests/fixtures/minimum-toolchain.Dockerfile"
@@ -305,7 +313,9 @@ setup() {
   run env PORTABILITY_SMOKE_SKIP_TESTS=1 "${runner}" --assert-offline
   [ "${status}" -eq 1 ]
   grep -Fq '$(id -u)' "${runner}"
-  grep -Fq '/sys/class/net' "${runner}"
+  grep -Fq '/proc/net/dev' "${runner}"
+  run grep -F '/sys/class/net' "${runner}"
+  [ "${status}" -ne 0 ]
   grep -Fq 'curl --disable --silent --show-error --max-time 2' "${runner}"
   grep -Fq 'https://example.com/' "${runner}"
   grep -Fq 'No tests were selected' "${runner}"

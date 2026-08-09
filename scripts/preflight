@@ -338,19 +338,26 @@ check_plain_tools() {
 
 collect_manager_protocol() {
   local command_name="$1" manager="${PROJECT_ROOT}/bin/devin-desktop-manager"
-  local output_file error_file status magic version count index _extra
+  local output_file error_file status magic version count index _extra network_name
   local severity category key purpose observed remediation
+  local -a manager_network_environment=()
 
   [[ -f "${manager}" && -x "${manager}" ]] || {
     add_missing_command manager "${manager}" 'checkout manager preflight is required'
     return
   }
+  resolve_executable bash "${BASH}" 'checkout manager preflight requires the selected Bash' || return
   resolve_executable timeout timeout 'bounded manager preflight requires util-linux timeout' || return
   resolve_executable env env 'isolated manager preflight requires env' || return
   resolve_executable stat stat 'bounded manager protocol validation requires stat' || return
   ensure_probe_workspace || return
   output_file="${WORK_DIRECTORY}/manager-output"
   error_file="${WORK_DIRECTORY}/manager-error"
+  for network_name in HTTPS_PROXY https_proxy NO_PROXY no_proxy CURL_CA_BUNDLE; do
+    if [[ -v ${network_name} ]]; then
+      manager_network_environment+=("${network_name}=${!network_name}")
+    fi
+  done
   if [[ "${command_name}" == uninstall ]]; then
     exec 4<&0
   else
@@ -360,8 +367,10 @@ collect_manager_protocol() {
     XDG_DATA_HOME="${XDG_DATA_HOME:-}" XDG_STATE_HOME="${XDG_STATE_HOME:-}" \
     XDG_CACHE_HOME="${XDG_CACHE_HOME:-}" XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
     TMPDIR="${TMPDIR:-}" LC_ALL=C TZ=UTC BASH_ENV= ENV= \
+    "${manager_network_environment[@]}" \
     "${RESOLVED_TOOLS[timeout]}" --signal=TERM --kill-after=1s \
-    "${PREFLIGHT_PROBE_SECONDS}s" "${manager}" internal-preflight 1 \
+    "${PREFLIGHT_PROBE_SECONDS}s" "${RESOLVED_TOOLS[bash]}" --noprofile --norc \
+    "${manager}" internal-preflight 1 \
     "${command_name}" <&4 >"${output_file}" 2>"${error_file}"; then
     status=0
   else

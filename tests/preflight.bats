@@ -115,6 +115,25 @@ EOF
   [ ! -e "${marker}" ]
 }
 
+@test "[PMC-U3-R03] manager protocol uses selected Bash when PATH Bash is unusable" {
+  local root="${BATS_TEST_TMPDIR}/checkout" shim_bin="${BATS_TEST_TMPDIR}/shim-bin"
+  mkdir -p "${root}/bin" "${shim_bin}"
+  cat >"${root}/bin/devin-desktop-manager" <<'EOF'
+#!/usr/bin/env bash
+printf 'DDM-PREFLIGHT\0%s\0%s\0' 1 0
+EOF
+  cat >"${shim_bin}/bash" <<'EOF'
+#!/bin/sh
+exit 86
+EOF
+  chmod 0755 "${root}/bin/devin-desktop-manager" "${shim_bin}/bash"
+
+  run env PATH="${shim_bin}:${PATH}" "${HARNESS_BASH}" "${PREFLIGHT}" \
+    manager-status --project-root "${root}"
+
+  [ "${status}" -eq 0 ]
+}
+
 @test "[PMC-U3-R04] composite preflight completes before sequential or parallel child effects" {
   local root="${BATS_TEST_TMPDIR}/checkout" log="${BATS_TEST_TMPDIR}/effects"
   mkdir -p "${root}/bin" "${root}/scripts"
@@ -141,6 +160,36 @@ EOF
     BASH="${HARNESS_BASH}" HOME="${BATS_TEST_TMPDIR}/home" install
   [ "${status}" -ne 0 ]
   [ ! -e "${log}" ]
+}
+
+@test "[PMC-U3-R04] manager protocol sees network settings before mutation" {
+  local root="${BATS_TEST_TMPDIR}/checkout"
+  mkdir -p "${root}/bin"
+  cat >"${root}/bin/devin-desktop-manager" <<'EOF'
+#!/usr/bin/env bash
+if [[ -v HTTPS_PROXY && -v https_proxy && "${HTTPS_PROXY}" != "${https_proxy}" ]]; then
+  printf 'DDM-PREFLIGHT\0%s\0%s\0' 1 1
+  printf 'blocker\0environment\0environment.https-proxy\0purpose\0conflict\0retry\0'
+  exit 1
+fi
+if [[ -n "${CURL_CA_BUNDLE:-}" && "${CURL_CA_BUNDLE}" != /* ]]; then
+  printf 'DDM-PREFLIGHT\0%s\0%s\0' 1 1
+  printf 'blocker\0path\0path.curl-ca-bundle\0purpose\0unsafe\0retry\0'
+  exit 1
+fi
+printf 'DDM-PREFLIGHT\0%s\0%s\0' 1 0
+EOF
+  chmod 0755 "${root}/bin/devin-desktop-manager"
+
+  run env HTTPS_PROXY=https://one.invalid https_proxy=https://two.invalid \
+    "${HARNESS_BASH}" "${PREFLIGHT}" manager-check --project-root "${root}"
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *'manager.environment.https-proxy'* ]]
+
+  run env -u HTTPS_PROXY -u https_proxy CURL_CA_BUNDLE=relative-ca.pem \
+    "${HARNESS_BASH}" "${PREFLIGHT}" manager-check --project-root "${root}"
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *'manager.path.curl-ca-bundle'* ]]
 }
 
 @test "[PMC-U3-R05] Make sanitizes Bash startup locale timezone and tool configuration" {

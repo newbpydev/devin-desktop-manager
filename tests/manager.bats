@@ -705,6 +705,43 @@ EOF
     "${CURL_LOG}"
 }
 
+@test "[PMC-U2-R05] one deadline bounds curl retries and redirect hops" {
+  local destination="${BATS_TEST_TMPDIR}/response" calls="${BATS_TEST_TMPDIR}/calls"
+  cat >"${MOCK_BIN}/curl" <<EOF
+#!${BASH}
+set -euo pipefail
+printf '%s\n' "\$*" >>$(printf '%q' "${calls}")
+while ((\$# > 0)); do
+  case "\$1" in
+    --dump-header) header="\$2"; shift 2 ;;
+    --output) response="\$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [[ "\$(wc -l <$(printf '%q' "${calls}"))" -eq 1 ]]; then
+  sleep 2
+  printf 'HTTP/1.1 302 Found\r\nLocation: https://windsurf-stable.codeiumdata.com/next\r\n\r\n' >"\${header}"
+  : >"\${response}"
+else
+  printf 'HTTP/1.1 200 OK\r\n\r\n' >"\${header}"
+  printf 'ok\n' >"\${response}"
+fi
+EOF
+  chmod 0755 "${MOCK_BIN}/curl"
+
+  run env HOME="${TEST_HOME}" PATH="${MOCK_BIN}:${PATH}" bash -c '
+    source "$1"
+    curl_fetch_file \
+      "https://windsurf-stable.codeium.com/api/update/linux-x64-deb/stable/latest" \
+      "$2" 1024 1
+  ' _ "${MANAGER}" "${destination}"
+
+  [ "${status}" -ne 0 ]
+  [ "$(wc -l <"${calls}")" -eq 1 ]
+  grep -Fq -- '--retry-max-time 1' "${calls}"
+  [ ! -e "${destination}" ]
+}
+
 @test "check accepts the exact official stable artifact shape" {
   write_manifest_curl \
     "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"

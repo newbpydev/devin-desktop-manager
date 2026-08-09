@@ -262,6 +262,44 @@ EOF
   [[ "${output}" != *$'\t'* ]]
 }
 
+@test "[PMC-U1-R04] application targets restore caller XDG environment" {
+  local root="${BATS_TEST_TMPDIR}/checkout" app="${BATS_TEST_TMPDIR}/app"
+  local home="${BATS_TEST_TMPDIR}/home" config="${BATS_TEST_TMPDIR}/config"
+  local data="${BATS_TEST_TMPDIR}/data" state="${BATS_TEST_TMPDIR}/state"
+  local cache="${BATS_TEST_TMPDIR}/cache" runtime="${BATS_TEST_TMPDIR}/runtime"
+  local temporary="${BATS_TEST_TMPDIR}/temporary" target
+  make_fixture "${root}"
+  mkdir -p "${home}" "${config}" "${data}" "${state}" "${cache}" \
+    "${runtime}" "${temporary}"
+  cat >"${app}" <<'EOF'
+#!/usr/bin/env bash
+printf 'HOME=%s\nXDG_CONFIG_HOME=%s\nXDG_DATA_HOME=%s\nXDG_STATE_HOME=%s\n' \
+  "${HOME-<unset>}" "${XDG_CONFIG_HOME-<unset>}" "${XDG_DATA_HOME-<unset>}" \
+  "${XDG_STATE_HOME-<unset>}" >>"${CALL_LOG}"
+printf 'XDG_CACHE_HOME=%s\nXDG_RUNTIME_DIR=%s\nTMPDIR=%s\nARGS=%s\n' \
+  "${XDG_CACHE_HOME-<unset>}" "${XDG_RUNTIME_DIR-<unset>}" "${TMPDIR-<unset>}" \
+  "$*" >>"${CALL_LOG}"
+EOF
+  chmod 0755 "${app}"
+
+  for target in run app-version; do
+    : >"${CALL_LOG}"
+    run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" APP="${app}" \
+      HOME="${home}" XDG_CONFIG_HOME="${config}" XDG_DATA_HOME="${data}" \
+      XDG_STATE_HOME="${state}" XDG_CACHE_HOME="${cache}" \
+      XDG_RUNTIME_DIR="${runtime}" TMPDIR="${temporary}" "${target}"
+    [ "${status}" -eq 0 ]
+    grep -Fxq "HOME=${home}" "${CALL_LOG}"
+    grep -Fxq "XDG_CONFIG_HOME=${config}" "${CALL_LOG}"
+    grep -Fxq "XDG_DATA_HOME=${data}" "${CALL_LOG}"
+    grep -Fxq "XDG_STATE_HOME=${state}" "${CALL_LOG}"
+    grep -Fxq "XDG_CACHE_HOME=${cache}" "${CALL_LOG}"
+    grep -Fxq "XDG_RUNTIME_DIR=${runtime}" "${CALL_LOG}"
+    grep -Fxq "TMPDIR=${temporary}" "${CALL_LOG}"
+  done
+  grep -Fxq 'ARGS=--version' "${CALL_LOG}"
+}
+
 @test "[PMC-U1-R05] APP failures are explicit and help labels every target" {
   local missing="${BATS_TEST_TMPDIR}/missing-app"
   local nonexec="${BATS_TEST_TMPDIR}/nonexec-app"
