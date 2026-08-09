@@ -465,6 +465,19 @@ seed_complete_initial_manager_layout() {
   downgrade_owned_installation_to_initial_manager_layout
 }
 
+seed_complete_initial_manager_layout_with_previous() {
+  local second="${BATS_TEST_TMPDIR}/legacy-previous.deb"
+  local second_build="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+  install_fixture
+  "${FIXTURE_BUILDER}" "${second}" safe "${second_build}" "3.4.28"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${second_build}/Devin-linux-x64-3.4.28.deb" \
+    "${second}" "3.4.28" "${second_build}" 1783378474000
+  manager_env update
+  downgrade_owned_installation_to_initial_manager_layout
+}
+
 downgrade_owned_installation_to_initial_manager_layout() {
   local data_home="${TEST_HOME}/.local/share"
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
@@ -599,24 +612,37 @@ assert_classification_refused() {
 }
 
 @test "[LIR-U1-R01] exact complete initial-manager layout is recoverable" {
-  seed_complete_initial_manager_layout
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+
+  seed_complete_initial_manager_layout_with_previous
 
   classify_test_layout
 
   [ "${status}" -eq 0 ]
   [ "${output}" = "initial-complete|||||" ]
+  [ -L "${install_root}/current" ]
+  [ -L "${install_root}/previous" ]
 }
 
 @test "[LIR-U1-R02] complete layout preserves a safe external default" {
+  local cache_root="${TEST_HOME}/.cache/devin-desktop-manager"
+  local state_root="${TEST_HOME}/.local/state/devin-desktop-manager"
+
   seed_complete_initial_manager_layout
   sed -i \
-    's#^x-scheme-handler/devin=devin-desktop-url-handler.desktop;#x-scheme-handler/devin=browser.desktop;#' \
+    '0,/^x-scheme-handler\/devin=devin-desktop-url-handler.desktop;$/s//x-scheme-handler\/devin=browser.desktop;/' \
     "${DEFAULTS_FILE}"
+  sed -i \
+    '0,/^x-scheme-handler\/windsurf=devin-desktop-url-handler.desktop;$/{/^x-scheme-handler\/windsurf=devin-desktop-url-handler.desktop;$/d;}' \
+    "${DEFAULTS_FILE}"
+  rm -rf -- "${cache_root}" "${state_root}"
 
   classify_test_layout
 
   [ "${status}" -eq 0 ]
   [ "${output}" = "initial-complete|||browser.desktop||" ]
+  [ ! -e "${cache_root}" ]
+  [ ! -e "${state_root}" ]
 }
 
 @test "[LIR-U1-R03] state-less modern manager default remains refused" {
@@ -629,6 +655,22 @@ assert_classification_refused() {
 
   [ "${status}" -eq 1 ]
   [[ "${output}" == "refused|default-shape:x-scheme-handler/devin|"* ]]
+}
+
+@test "[LIR-U1-R03] effective-default near-miss matrix remains refused" {
+  seed_complete_initial_manager_layout
+  export MOCK_XDG_QUERY_DEVIN="../../unsafe"
+  assert_classification_refused default-shape:x-scheme-handler/devin
+
+  unset MOCK_XDG_QUERY_DEVIN
+  export MOCK_XDG_QUERY_FAIL=1
+  assert_classification_refused default-query:x-scheme-handler/devin
+
+  unset MOCK_XDG_QUERY_FAIL
+  sed -i \
+    '0,/devin-desktop-url-handler.desktop/s//devin-desktop.desktop/' \
+    "${DEFAULTS_FILE}"
+  assert_classification_refused default-shape:x-scheme-handler/devin
 }
 
 @test "[LIR-U1-R04] modified legacy desktop semantics remain refused" {
@@ -732,9 +774,34 @@ EOF
   printf 'malformed association record\n' >>"${DEFAULTS_FILE}"
   assert_classification_refused default-shape:unknown
 
+  cp -- "${baseline}" "${DEFAULTS_FILE}"
+  printf '%s\n' 'text/plain=../../unsafe;' >>"${DEFAULTS_FILE}"
+  classify_test_layout
+  [ "${status}" -eq 1 ]
+  [ "${output}" = "refused|default-shape:text/plain|../../unsafe" ]
+
+  cp -- "${baseline}" "${DEFAULTS_FILE}"
+  printf '%s\n' \
+    'unsafe key=devin-desktop-url-handler.desktop;' \
+    >>"${DEFAULTS_FILE}"
+  classify_test_layout
+  [ "${status}" -eq 1 ]
+  [ "${output}" = \
+    "refused|default-provenance:unknown|${DEFAULTS_FILE}" ]
+
+  cp -- "${baseline}" "${DEFAULTS_FILE}"
+  printf 'text/plain=other.desktop;\r\n' >>"${DEFAULTS_FILE}"
+  classify_test_layout
+  [ "${status}" -eq 1 ]
+  [ "${output}" = "refused|default-shape:unknown|${DEFAULTS_FILE}" ]
+
+  cp -- "${baseline}" "${DEFAULTS_FILE}"
   mv -- "${DEFAULTS_FILE}" "${parked}"
   ln -s "${parked}" "${DEFAULTS_FILE}"
-  assert_classification_refused default-provenance:unknown
+  classify_test_layout
+  [ "${status}" -eq 1 ]
+  [ "${output}" = \
+    "refused|default-provenance:unknown|${DEFAULTS_FILE}" ]
 }
 
 @test "[LIR-U1-R05] desktop-specific manager records cannot grant ownership" {
@@ -986,6 +1053,31 @@ EOF
   [ "${status}" -eq 1 ]
   run grep -F 'devin-desktop.desktop' "${DEFAULTS_FILE}"
   [ "${status}" -eq 1 ]
+}
+
+@test "[LIR-U2-R07] recovered lifecycle operations remain idempotent" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local state_file="${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
+  local state_before
+
+  seed_complete_initial_manager_layout
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+  manager_env update
+  state_before="$(sha256sum "${state_file}" | awk '{print $1}')"
+
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  [ "$(sha256sum "${state_file}" | awk '{print $1}')" = "${state_before}" ]
+  [ "$(find "${install_root}/releases" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ]
+  [ "$(grep -c '^x-scheme-handler/devin=devin-desktop-manager-url-handler.desktop;$' "${DEFAULTS_FILE}")" -eq 1 ]
+
+  run manager_env uninstall --yes
+  [ "${status}" -eq 0 ]
+  run manager_env uninstall --yes
+  [ "${status}" -eq 0 ]
+  [ ! -e "${install_root}" ]
 }
 
 @test "[LIR-U2-R09] retry revalidates restored legacy evidence before cleanup" {

@@ -1727,7 +1727,6 @@ legacy_desktop_semantics_are_valid() {
     -v role="${role}" \
     -v command="${APP_COMMAND}" \
     -v quoted_command="\"${escaped_command}\"" \
-    -v marker="${MANAGER_DESKTOP_MARKER}" \
     -v mime_devin="${MIME_DEVIN}" \
     -v mime_windsurf="${MIME_WINDSURF}" \
     -v mime_workspace="${MIME_WORKSPACE}" '
@@ -1841,15 +1840,33 @@ legacy_mime_record_is_manager_id() {
   esac
 }
 
+legacy_reason_mime_key() {
+  local mime_type="$1"
+
+  if [[ "${mime_type}" =~ ^[A-Za-z0-9][A-Za-z0-9._+!-]*/[A-Za-z0-9][A-Za-z0-9._+!-]*$ ]]; then
+    printf '%s\n' "${mime_type}"
+  else
+    printf 'unknown\n'
+  fi
+}
+
 legacy_mimeapps_file_is_safe() {
   local file="$1"
-  local section="" line mime_type value desktop_id expected
+  local section="" line mime_type value desktop_id expected reason_mime
   local -a desktop_ids=()
   local -A seen_records=()
 
-  [[ -f "${file}" && ! -L "${file}" ]] || return 1
+  [[ -f "${file}" && ! -L "${file}" ]] || {
+    LEGACY_REASON="default-provenance:unknown"
+    LEGACY_OBSERVED="${file}"
+    return 1
+  }
   while IFS= read -r line || [[ -n "${line}" ]]; do
-    [[ "${line}" != *$'\r' ]] || return 1
+    [[ "${line}" != *$'\r' ]] || {
+      LEGACY_REASON="default-shape:unknown"
+      LEGACY_OBSERVED="${file}"
+      return 1
+    }
     case "${line}" in
       ""|'#'*|';'*) continue ;;
       '['*']') section="${line}"; continue ;;
@@ -1869,10 +1886,17 @@ legacy_mimeapps_file_is_safe() {
     case "${mime_type}" in
       "${MIME_DEVIN}"|"${MIME_WINDSURF}"|"${MIME_WORKSPACE}") ;;
       *)
+        reason_mime="$(legacy_reason_mime_key "${mime_type}")"
         IFS=';' read -r -a desktop_ids <<<"${value}"
         for desktop_id in "${desktop_ids[@]}"; do
+          [[ -n "${desktop_id}" ]] || continue
+          is_safe_desktop_id "${desktop_id}" || {
+            LEGACY_REASON="default-shape:${reason_mime}"
+            LEGACY_OBSERVED="${desktop_id}"
+            return 1
+          }
           legacy_mime_record_is_manager_id "${desktop_id}" || continue
-          LEGACY_REASON="default-provenance:${mime_type}"
+          LEGACY_REASON="default-provenance:${reason_mime}"
           LEGACY_OBSERVED="${file}"
           return 1
         done
@@ -1917,7 +1941,7 @@ legacy_mimeapps_file_is_safe() {
 }
 
 legacy_desktop_specific_defaults_are_absent() {
-  local file line mime_type value desktop_id
+  local file line mime_type value desktop_id reason_mime
   local -a candidates=() desktop_ids=()
 
   candidates=(
@@ -1939,7 +1963,8 @@ legacy_desktop_specific_defaults_are_absent() {
       IFS=';' read -r -a desktop_ids <<<"${value}"
       for desktop_id in "${desktop_ids[@]}"; do
         legacy_mime_record_is_manager_id "${desktop_id}" || continue
-        LEGACY_REASON="desktop-specific-default:${mime_type}"
+        reason_mime="$(legacy_reason_mime_key "${mime_type}")"
+        LEGACY_REASON="desktop-specific-default:${reason_mime}"
         LEGACY_OBSERVED="${file}"
         return 1
       done
