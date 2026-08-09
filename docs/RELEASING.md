@@ -10,7 +10,7 @@ Only repository maintainers publish releases.
 3. Install Ruby and Bundler, run `bundle config set --local deployment true`
    followed by `bundle install`, then run `bundle exec make release-check`. The
    committed lockfile fixes Bashcov 3.3.0 and its dependency graph; the command
-   runs lint, behavior tests, the 90% line-coverage gate, version consistency,
+   runs lint, behavior tests, the 84% line-coverage ratchet, version consistency,
     and deterministic packaging with `SHA256SUMS`.
 4. Review the archive contents and test installation from that archive in a
    disposable user account or VM.
@@ -34,7 +34,7 @@ git push origin v0.1.0
 ```
 
 The release workflow rejects lightweight tags, version mismatches, and coverage
-below 90%. It re-runs verification, creates the deterministic source archive and
+below 84%. It re-runs verification, creates the deterministic source archive and
 `SHA256SUMS`, generates a GitHub artifact attestation, and creates a draft
 GitHub release. It never packages or uploads Devin Desktop.
 

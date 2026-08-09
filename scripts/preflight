@@ -351,17 +351,23 @@ collect_manager_protocol() {
   ensure_probe_workspace || return
   output_file="${WORK_DIRECTORY}/manager-output"
   error_file="${WORK_DIRECTORY}/manager-error"
+  if [[ "${command_name}" == uninstall ]]; then
+    exec 4<&0
+  else
+    exec 4</dev/null
+  fi
   if "${RESOLVED_TOOLS[env]}" -i PATH="${PATH}" HOME="${HOME:-}" XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-}" \
     XDG_DATA_HOME="${XDG_DATA_HOME:-}" XDG_STATE_HOME="${XDG_STATE_HOME:-}" \
     XDG_CACHE_HOME="${XDG_CACHE_HOME:-}" XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
     TMPDIR="${TMPDIR:-}" LC_ALL=C TZ=UTC BASH_ENV= ENV= \
     "${RESOLVED_TOOLS[timeout]}" --signal=TERM --kill-after=1s \
     "${PREFLIGHT_PROBE_SECONDS}s" "${manager}" internal-preflight 1 \
-    "${command_name}" </dev/null >"${output_file}" 2>"${error_file}"; then
+    "${command_name}" <&4 >"${output_file}" 2>"${error_file}"; then
     status=0
   else
     status=$?
   fi
+  exec 4<&-
   if ((status != 0 && status != 1)) ||
     (($("${RESOLVED_TOOLS[stat]}" -c %s -- "${output_file}" 2>/dev/null || printf 0) > PREFLIGHT_MAX_OUTPUT_BYTES)) ||
     (($("${RESOLVED_TOOLS[stat]}" -c %s -- "${error_file}" 2>/dev/null || printf 0) != 0)); then
@@ -596,6 +602,14 @@ render_findings() {
   printf '%s\n' "${lines[@]}" >&2
 }
 
+findings_include_blocker() {
+  local severity
+  for severity in "${FINDING_SEVERITY[@]}"; do
+    [[ "${severity}" != blocker ]] || return 0
+  done
+  return 1
+}
+
 main() {
   local profile="${1:-}" root=""
   [[ "${BASH_VERSINFO[0]}" -gt 4 ||
@@ -623,7 +637,7 @@ main() {
   collect_profile "${profile}"
   if ((${#FINDING_KEY[@]} > 0)); then
     render_findings "${profile}"
-    exit 1
+    if findings_include_blocker; then exit 1; fi
   fi
 }
 

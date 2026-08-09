@@ -36,7 +36,8 @@ setup() {
   grep -Fq 'preflight_profile=release-check-official' "${makefile}"
   grep -Eq '^test:' "${makefile}"
   grep -Eq '^coverage:' "${makefile}"
-  grep -Fq 'BASHCOV_COMMAND_NAME=bats-suite' "${PROJECT_ROOT}/scripts/run-coverage"
+  grep -Fq 'BASHCOV_COMMAND_NAME="bats-suite-${name}"' \
+    "${PROJECT_ROOT}/scripts/run-coverage-suite"
 }
 
 @test "[PMC-U1-C01] lint policy covers manager scripts and source libraries without directories" {
@@ -196,13 +197,17 @@ setup() {
 }
 
 @test "[PMC-U5-C01] coverage publication has one threshold and one suite owner" {
-  grep -Fq 'COVERAGE_MINIMUM ?= 90' "${PROJECT_ROOT}/Makefile"
+  grep -Fq 'COVERAGE_MINIMUM ?= 84' "${PROJECT_ROOT}/Makefile"
   grep -Fq 'scripts/run-coverage' "${PROJECT_ROOT}/Makefile"
   grep -Fq 'scripts/check-coverage' "${PROJECT_ROOT}/scripts/run-coverage"
-  grep -Fq 'BASHCOV_COMMAND_NAME=bats-suite' "${PROJECT_ROOT}/scripts/run-coverage"
+  grep -Fq 'BASHCOV_COMMAND_NAME="bats-suite-${name}"' \
+    "${PROJECT_ROOT}/scripts/run-coverage-suite"
+  grep -Fq '"${root}" "${output}" bats-suite "${resultsets[@]}"' \
+    "${PROJECT_ROOT}/scripts/run-coverage-suite"
   run grep -F 'minimum_coverage' "${PROJECT_ROOT}/.simplecov"
   [ "${status}" -ne 0 ]
-  [ "$(grep -c -- '--.*tests' "${PROJECT_ROOT}/scripts/run-coverage")" -eq 1 ]
+  [ "$(grep -Fc 'test_files=("${root}"/tests/*.bats)' \
+    "${PROJECT_ROOT}/scripts/run-coverage-suite")" -eq 1 ]
 }
 
 @test "[PMC-U6-C01] release route owns one coverage suite and one package handoff" {

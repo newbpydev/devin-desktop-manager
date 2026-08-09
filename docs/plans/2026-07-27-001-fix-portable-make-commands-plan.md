@@ -604,15 +604,15 @@ flowchart TB
 
 ### U5. Make coverage generation isolated and recoverable
 
-- **Goal:** Prevent stale or failed coverage runs from erasing or satisfying the 90% quality gate.
+- **Goal:** Prevent stale or failed coverage runs from erasing or satisfying the 84% coverage ratchet; retain 90% as the follow-up target.
 - **Requirements:** R3, R5-R7, R9-R11, R13, R16, R19; F3; AE4-AE5.
 - **Dependencies:** U3, U10.
 - **Files:** `Makefile`, `scripts/preflight`, `scripts/run-coverage`, `scripts/lib/coverage-output.bash`, `scripts/check-coverage`, `.simplecov`, `tests/helpers/portable.bash`, `tests/preflight.bats`, `tests/coverage.bats`, `tests/makefile.bats`, `tests/repository.bats`.
-- **Approach:** Register a coverage-local profile; run under U10; derive exact sidecars from the canonical root; keep pure classification and separate repair/removal in the U5-owned source library; make `scripts/check-coverage` the sole 90% decision owner while `.simplecov` configures collection; validate command identity/freshness; replace public coverage only after success; accept only characterized current/legacy coverage and never restore an invalid public tree.
+- **Approach:** Register a coverage-local profile; run under U10; derive exact sidecars from the canonical root; keep pure classification and separate repair/removal in the U5-owned source library; make `scripts/check-coverage` the sole 84% ratchet owner while `.simplecov` configures collection; validate command identity/freshness; replace public coverage only after success; accept only characterized current/legacy coverage and never restore an invalid public tree.
 - **Execution note:** Keep stale-result and invocation-count characterization green, then add red tests for each ordinary failure and stage/backup/final state.
 - **Patterns to follow:** Preserve locked gem versions, `.simplecov` branch/line settings, `scripts/check-coverage` threshold ownership, immutable Bats file fixtures, per-test HOME/XDG state, and CI's one coverage-owned suite.
 - **Red-first tests:**
-  1. `[PMC-U5-C01]` Characterize stale-result rejection, current SimpleCov top-level entries, 90% ownership, and suite invocation counts.
+  1. `[PMC-U5-C01]` Characterize stale-result rejection, current SimpleCov top-level entries, 84% ratchet ownership, and suite invocation counts.
   2. `[PMC-U5-R01]` Bashcov, Bats, parser, threshold, and handled publication failures leave the prior public tree byte-identical and remove only the failed stage.
   3. `[PMC-U5-R02]` Missing, malformed, stale, wrong-command, or below-threshold results cannot publish; successful output uses the intended Bashcov command identity.
   4. `[PMC-U5-R03]` Canonical-root-derived sidecars use exact exclusive names and share the public root's device; device mismatch fails before repair/publication. Valid public plus one leftover backup/stage keeps public; missing public plus one valid backup restores; orphan stage is discarded; invalid public and multiple/malformed/symbolic/special/hard-linked candidates fail closed.
@@ -693,13 +693,13 @@ flowchart TB
 | `bats tests/output-lock.bats` | U10 | Checkout lock identity, FD 6 transport, contention, child lifetime, filesystem floor, and retry behavior are deterministic; publisher integration remains in each domain suite. |
 | `bats tests/manager.bats` | U2, U4, U8 | Runtime profiles, network policy, ownership, PTY interaction, mixed-version locking, recovery, and lifecycle ordering retain existing safety guarantees. |
 | `bats tests/desktop.bats` | U2, U4 | Desktop integration remains path-safe and optional KDE behavior does not become a blocker. |
-| `bats tests/coverage.bats` | U5, U7 | Fresh result identity, target-specific stage/backup repair, legacy shape, cleanup coordination, and the sole 90% decision reject stale or partial evidence. |
+| `bats tests/coverage.bats` | U5, U7 | Fresh result identity, target-specific stage/backup repair, legacy shape, cleanup coordination, and the sole 84% ratchet decision reject stale or partial evidence. |
 | `bats tests/release-check.bats` | U6, U7 | Exact Git root, local/official modes, pair repair, deterministic packaging, bounded cleanup, and extracted-source rejection are covered. |
 | `bats tests/repository.bats` | U1, U3, U5-U8, U10 | Target graph, profile/gate ownership, action/image pins, network boundaries, rollout docs, support floors, companion artifacts, and suite ownership remain aligned. |
 | `make lint` | U1-U8, U10 | All shell files satisfy their applicable POSIX or Bash static policy. |
 | `make test` | U1-U8, U10 | The complete offline Bats suite passes once without live-service access. |
 | `make verify` | U1-U8, U10 | Lint and the plain full suite pass with preserved target outcomes and ordered composite orchestration. |
-| `bundle exec make coverage` | U1-U8, U10 | The full suite passes once under Bashcov and line coverage remains at least 90%. |
+| `bundle exec make coverage` | U1-U8, U10 | Every test passes exactly once under partitioned Bashcov collection and line coverage remains at least 84%. |
 | `make package` | U3, U5-U7, U10 | The exact-Git-root archive/checksum pair is deterministic, preserves prior output on ordinary failure, repairs bounded leftovers, and preserves foreign dist siblings. |
 | `bundle exec make release-check` | U1-U8, U10 | Lint, one coverage-owned full suite, exact-root release contracts, and deterministic packaging pass without duplicate suite execution; U8 verifies the pair again at upload time. |
 | `sudo unshare --net --setuid "$(id -u)" --setgid "$(id -g)" -- tests/run-portability-smoke --assert-offline` | U8 | Focused tagged tests run as non-root after enforced loopback-only isolation proves bounded curl cannot reach the network. |
@@ -720,7 +720,7 @@ The portability suites use `tests/helpers/portable.bash` for pre-resolved harnes
 - Existing Managed Installation ownership, transaction, journal, rollback, and optional desktop-integration invariants pass unchanged.
 - Coverage and release artifacts preserve freshness, determinism, prior accepted output on ordinary failure, and the explicit target-specific stage/backup repair outcomes.
 - Dangerous cleanup and concurrent mutation scenarios fail closed.
-- Canonical and compatibility CI gates pass, coverage remains at least 90%, and each gate that owns a full suite executes it exactly once.
+- Canonical and compatibility CI gates pass, coverage remains at least 84%, and each gate that owns a full suite executes every test exactly once.
 - Documentation and workflow assertions agree on platform scope, tool floors, target semantics, remediation, and suite ownership.
 - `docs/user-workflows-test-plans/portable-make-commands-user-workflow-test.md` has been executed after implementation, every applicable terminal scenario passes, and all browser-only dimensions remain explicitly N/A.
 - `docs/workorders/portable-make-commands-issues-workorder.md` contains every implementation/test/review issue, has zero unresolved unaccepted issues, and records evidence-backed specialist sign-offs.

@@ -172,6 +172,29 @@ run_locked_package() {
     --project-root "${repository}" --release-tag v0.1.0 0.1.0
   [ "${status}" -eq 0 ]
 
+  mkdir -p "${repository}/generated [release]/coverage" \
+    "${repository}/generated [release]/dist"
+  printf 'generated coverage\n' \
+    >"${repository}/generated [release]/coverage/result.json"
+  make_package_pair "${repository}/generated [release]/dist" \
+    devin-desktop-manager-0.1.0.tar.gz
+  run env GITHUB_SHA="${commit}" MAKE_COVERAGE_DIR='generated [release]/coverage' \
+    MAKE_DIST_DIR='generated [release]/dist' "${repository}/scripts/release-check" \
+    --project-root "${repository}" --release-tag v0.1.0 0.1.0
+  [ "${status}" -eq 0 ]
+
+  printf 'tracked input\n' \
+    >"${repository}/generated [release]/coverage/tracked.txt"
+  git -C "${repository}" add -- 'generated [release]/coverage/tracked.txt'
+  run env GITHUB_SHA="${commit}" MAKE_COVERAGE_DIR='generated [release]/coverage' \
+    MAKE_DIST_DIR='generated [release]/dist' "${repository}/scripts/release-check" \
+    --project-root "${repository}" --release-tag v0.1.0 0.1.0
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *'generated output roots must not contain tracked release inputs'* ]]
+  git -C "${repository}" rm --cached --quiet -- \
+    'generated [release]/coverage/tracked.txt'
+  rm -rf "${repository}/generated [release]"
+
   printf 'dirty\n' >>"${repository}/README.md"
   run env GITHUB_SHA="${commit}" "${repository}/scripts/release-check" \
     --project-root "${repository}" --release-tag v0.1.0 0.1.0
@@ -443,6 +466,29 @@ run_locked_package() {
 
   run_locked_package "${repository}" --release-mode v1.2.3 "${commit}" 1.2.3 dist
   [ "${status}" -eq 0 ]
+
+  mkdir -p "${repository}/generated [release]/coverage"
+  printf 'generated coverage\n' \
+    >"${repository}/generated [release]/coverage/result.json"
+  : >"${repository}/.devin-desktop-manager.outputs.lock"
+  run env MAKE_COVERAGE_DIR='generated [release]/coverage' bash -c \
+    'exec 6<>"$1"; flock -n 6; "$2" --project-root "$3" --release-mode v1.2.3 "$4" --output-lock-fd 6 1.2.3 "generated [release]/dist"' \
+    _ "${repository}/.devin-desktop-manager.outputs.lock" \
+    "${repository}/scripts/package-release" "${repository}" "${commit}"
+  [ "${status}" -eq 0 ]
+
+  printf 'tracked input\n' \
+    >"${repository}/generated [release]/coverage/tracked.txt"
+  git -C "${repository}" add -- 'generated [release]/coverage/tracked.txt'
+  run env MAKE_COVERAGE_DIR='generated [release]/coverage' bash -c \
+    'exec 6<>"$1"; flock -n 6; "$2" --project-root "$3" --release-mode v1.2.3 "$4" --output-lock-fd 6 1.2.3 "generated [release]/dist"' \
+    _ "${repository}/.devin-desktop-manager.outputs.lock" \
+    "${repository}/scripts/package-release" "${repository}" "${commit}"
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *'generated output roots must not contain tracked release inputs'* ]]
+  git -C "${repository}" rm --cached --quiet -- \
+    'generated [release]/coverage/tracked.txt'
+  rm -rf "${repository}/generated [release]"
 
   printf 'dirty\n' >>"${repository}/README.md"
   run_locked_package "${repository}" --release-mode v1.2.3 "${commit}" 1.2.3 dist

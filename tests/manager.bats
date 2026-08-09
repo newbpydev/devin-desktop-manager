@@ -12,6 +12,7 @@ setup_file() {
 }
 
 setup() {
+  [[ "${PS4:-}" != +BASHCOV\>* ]] || set -Tx
   PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
   MANAGER="${PROJECT_ROOT}/bin/devin-desktop-manager"
   FIXTURE_BUILDER="${PROJECT_ROOT}/tests/fixtures/build-mini-deb"
@@ -261,8 +262,17 @@ while ((\$# > 0)); do
     *) shift ;;
   esac
 done
+if [[ "\${url}" == "https://windsurf-stable.codeium.com/api/update/linux-x64-deb/stable/latest" &&
+  "\${MOCK_MANIFEST_REDIRECT:-0}" == 1 &&
+  ! -e "${CURL_LOG}.redirected" ]]; then
+  : >"${CURL_LOG}.redirected"
+  printf 'HTTP/1.1 302 Found\r\nlocation: https://windsurf-stable.codeiumdata.com/redirected-manifest\r\n\r\n' >"\${header}"
+  : >"\${output}"
+  exit 0
+fi
 printf 'HTTP/1.1 200 OK\r\n\r\n' >"\${header}"
-if [[ "\${url}" == "https://windsurf-stable.codeium.com/api/update/linux-x64-deb/stable/latest" ]]; then
+if [[ "\${url}" == "https://windsurf-stable.codeium.com/api/update/linux-x64-deb/stable/latest" ||
+  "\${url}" == "https://windsurf-stable.codeiumdata.com/redirected-manifest" ]]; then
   cat >"\${output}" <<'JSON'
 {
   "url": "${artifact_url}",
@@ -284,8 +294,8 @@ else
     exit 22
   fi
   if [[ -n "\${continue_at}" ]]; then
-    destination="\${output%%.response.*}"
-    offset="\$(stat -c '%s' -- "\${destination}")"
+    [[ "\${continue_at}" =~ ^[0-9]+$ ]]
+    offset="\${continue_at}"
     tail -c "+\$((offset + 1))" -- "${fixture}" >"\${output}"
   else
     cp -- "${fixture}" "\${output}"
@@ -678,6 +688,21 @@ EOF
   grep -Fq '\n' "${stderr_file}"
   ! grep -q $'\033' "${stderr_file}"
   [ "$(wc -l <"${stderr_file}")" -le 8 ]
+}
+
+@test "[PMC-U2-R05] redirect headers are case-insensitive with portable awk" {
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+
+  run env MOCK_MANIFEST_REDIRECT=1 HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" PATH="${MOCK_BIN}:${PATH}" \
+    "${MANAGER}" check
+
+  [ "${status}" -eq 0 ]
+  grep -Fq 'https://windsurf-stable.codeiumdata.com/redirected-manifest' \
+    "${CURL_LOG}"
 }
 
 @test "check accepts the exact official stable artifact shape" {
@@ -1723,7 +1748,44 @@ EOF
   run manager_env update
 
   [ "${status}" -eq 0 ]
-  grep -Fq -- '--continue-at -' "${CURL_LOG}"
+  grep -Fq -- '--continue-at 8' "${CURL_LOG}"
+}
+
+@test "[PMC-U4-R03] ambient BIN_DIR cannot redirect the publication lock" {
+  local hostile="${BATS_TEST_TMPDIR}/hostile-bin"
+
+  run env HOME="${TEST_HOME}" BIN_DIR="${hostile}" bash -c '
+    source "$1"
+    [[ "$BIN_DIR" == "$HOME/.local/bin" ]]
+    [[ "$PUBLICATION_LOCK" == "$HOME/.local/bin/.devin-desktop-manager.publication.lock" ]]
+  ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
+}
+
+@test "[PMC-U4-R03] lock identity uses locale-stable stat output" {
+  local lock="${BATS_TEST_TMPDIR}/manager.lock"
+  local shim_bin="${BATS_TEST_TMPDIR}/locale-bin"
+  local real_stat
+  real_stat="$(type -P stat)"
+  mkdir -p "${shim_bin}"
+  : >"${lock}"
+  cat >"${shim_bin}/stat" <<EOF
+#!${BASH}
+result="\$(${real_stat@Q} "\$@")" || exit
+if [[ "\${LC_ALL:-}" != C ]]; then
+  result="\${result/:regular empty file:/:localized regular file:}"
+  result="\${result/:regular file:/:localized regular file:}"
+fi
+printf '%s\n' "\${result}"
+EOF
+  chmod 0755 "${shim_bin}/stat"
+
+  run env HOME="${TEST_HOME}" LC_ALL=hostile_LOCALE PATH="${shim_bin}:${PATH}" \
+    bash -c 'source "$1"; exec 9<>"$2"; validate_lock_descriptor_identity 9 "$2" test' \
+    _ "${MANAGER}" "${lock}"
+
+  [ "${status}" -eq 0 ]
 }
 
 @test "[PMC-U2-R05] resumed download rejects a full-size partial before requesting" {

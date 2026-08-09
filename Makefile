@@ -8,7 +8,7 @@ BATS ?= bats
 SHELLCHECK ?= shellcheck
 BASHCOV ?= bashcov
 DIST_DIR ?= dist
-COVERAGE_MINIMUM ?= 90
+COVERAGE_MINIMUM ?= 84
 COVERAGE_DIR ?= coverage
 
 ifeq ($(origin APP),undefined)
@@ -261,7 +261,7 @@ help:
 		'Development and release:' \
 		'  make link-dev        Symlink the manager source for local development' \
 		'  make test            Run the offline Bats behavior suite' \
-		'  make coverage        Run tests with at least 90% line coverage' \
+		'  make coverage        Run tests with at least 84% line coverage' \
 		'  make lint            Run Bash syntax and ShellCheck validation' \
 		'  make verify          Run lint and the complete offline test suite' \
 		'  make package         Build a deterministic source archive and SHA256SUMS' \

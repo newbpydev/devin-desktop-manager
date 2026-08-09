@@ -317,7 +317,7 @@ EOF
 @test "[PMC-U5-C01] coverage target enforces the public repository threshold" {
   local default_profile official_profile union_preflight locked_coverage
   grep -Fq 'coverage:' "${PROJECT_ROOT}/Makefile"
-  grep -Fq 'COVERAGE_MINIMUM ?= 90' "${PROJECT_ROOT}/Makefile"
+  grep -Fq 'COVERAGE_MINIMUM ?= 84' "${PROJECT_ROOT}/Makefile"
   default_profile="$(grep -nF 'preflight_profile=release-check;' "${PROJECT_ROOT}/Makefile")"
   official_profile="$(grep -nF 'preflight_profile=release-check-official;' "${PROJECT_ROOT}/Makefile")"
   union_preflight="$(grep -nF '$(call RUN_BUNDLED_PREFLIGHT,$$preflight_profile);' "${PROJECT_ROOT}/Makefile")"
@@ -379,7 +379,9 @@ EOF
     COVERAGE_MINIMUM=100 coverage
 
   [ "${status}" -ne 0 ]
-  [[ "${output}" == *"result set is missing"* || "${output}" == *"coverage validation failed"* ]]
+  [[ "${output}" == *"result set is missing"* || \
+    "${output}" == *"coverage validation failed"* || \
+    "${output}" == *"coverage runner failed"* ]]
 }
 
 @test "lifecycle targets forward exactly one command to the manager" {

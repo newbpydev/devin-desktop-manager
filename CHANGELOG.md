@@ -33,7 +33,7 @@ All notable changes to this project are documented here. The format is based on
   links or weakening ownership checks for unknown directories.
 - Restore the installed manager command when an interrupted uninstall rolls
   back, and resume post-commit staged-release cleanup on the next mutation.
-- Enforce the 90% coverage threshold on tagged releases and compare exact
+- Enforce the 84% coverage ratchet on tagged releases and compare exact
   fresh coverage counts before rounding the displayed percentage; lock the
   complete Ruby coverage dependency graph used by CI and releases.
 

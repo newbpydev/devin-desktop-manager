@@ -8,7 +8,7 @@ setup() {
   PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
   PREFLIGHT="${PROJECT_ROOT}/scripts/preflight"
   FIXTURE_BUILDER="${PROJECT_ROOT}/tests/fixtures/build-mini-deb"
-  resolve_harness_tools bash chmod find make mkdir mv readlink rm sha256sum sleep stat true
+  resolve_harness_tools bash chmod find make mkdir mv readlink rm script sha256sum sleep stat true
   HARNESS_BASH="${HARNESS_TOOLS[bash]}"
   HARNESS_MAKE="${HARNESS_TOOLS[make]}"
 }
@@ -205,6 +205,47 @@ EOF
 
   [ "${status}" -eq 1 ]
   [ "${output}" = "${expected}" ]
+}
+
+@test "[PMC-U3-R06] warning-only manager findings do not block the target" {
+  local root="${BATS_TEST_TMPDIR}/warning-checkout"
+  mkdir -p "${root}/bin"
+  cat >"${root}/bin/devin-desktop-manager" <<EOF
+#!${HARNESS_BASH}
+printf 'DDM-PREFLIGHT\0%s\0%s\0' 1 1
+printf 'warning\0optional\0optional.kde-cache\0purpose\0missing\0no action\0'
+exit 1
+EOF
+  chmod 0755 "${root}/bin/devin-desktop-manager"
+
+  run "${HARNESS_BASH}" "${PREFLIGHT}" manager-doctor --project-root "${root}"
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *'manager-doctor: warning: manager.optional.kde-cache'* ]]
+}
+
+@test "[PMC-U4-R05] uninstall manager preflight preserves the caller terminal" {
+  local root="${BATS_TEST_TMPDIR}/tty-checkout" command
+  mkdir -p "${root}/bin"
+  cat >"${root}/bin/devin-desktop-manager" <<EOF
+#!${HARNESS_BASH}
+if [[ -t 0 ]]; then
+  printf 'DDM-PREFLIGHT\0%s\0%s\0' 1 0
+  exit 0
+fi
+printf 'DDM-PREFLIGHT\0%s\0%s\0' 1 1
+printf 'blocker\0interaction\0interaction.terminal\0purpose\0not a terminal\0retry\0'
+exit 1
+EOF
+  chmod 0755 "${root}/bin/devin-desktop-manager"
+  printf -v command '%q %q manager-uninstall --project-root %q' \
+    "${HARNESS_BASH}" "${PREFLIGHT}" "${root}"
+
+  run "${HARNESS_TOOLS[script]}" --quiet --return --command "${command}" \
+    /dev/null </dev/null
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" != *'interaction.terminal'* ]]
 }
 
 @test "[PMC-U3-R07] probes close stdin bound execution and isolate temporary state" {

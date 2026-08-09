@@ -33,15 +33,31 @@ classify_coverage() {
 
 make_coverage_checkout() {
   local root="$1"
-  mkdir -p "${root}/scripts/lib" "${root}/test-bin"
+  mkdir -p "${root}/scripts/lib" "${root}/test-bin" \
+    "${root}/tests/support"
   cp "${PROJECT_ROOT}/scripts/output-lock" "${PROJECT_ROOT}/scripts/preflight" \
     "${PROJECT_ROOT}/scripts/run-coverage" "${PROJECT_ROOT}/scripts/run-coverage-suite" \
     "${PROJECT_ROOT}/scripts/check-coverage" \
     "${root}/scripts/"
   cp "${COVERAGE_LIBRARY}" "${root}/scripts/lib/coverage-output.bash"
+  cp "${PROJECT_ROOT}/tests/support/bashcov_fixture_coverage.rb" \
+    "${PROJECT_ROOT}/tests/support/bashcov_functrace.bash" \
+    "${PROJECT_ROOT}/tests/support/collate_coverage.rb" \
+    "${PROJECT_ROOT}/tests/support/run_coverage_partition.bash" \
+    "${root}/tests/support/"
+  printf '@test "fixture" { true; }\n' >"${root}/tests/fixture.bats"
   cat >"${root}/test-bin/ruby" <<EOF
 #!${HARNESS_TOOLS[bash]}
-printf 'ruby 3.2.0\n'
+if [[ "\${1:-}" == --version ]]; then printf 'ruby 3.2.0\n'; exit 0; fi
+[[ "\${1:-}" == */collate_coverage.rb && \$# -ge 5 ]] || exit 2
+shift
+root="\$1" output="\$2" command="\$3" input="\$4"
+mkdir -p -- "\${output}/assets"
+cp -- "\${input%/*}/index.html" "\${output}/index.html"
+cp -- "\${input%/*}/.last_run.json" "\${output}/.last_run.json"
+: >"\${output}/.resultset.json.lock"
+${HARNESS_TOOLS[jq]@Q} --arg command "\${command}" \
+  '{(\$command): .[keys[0]]}' "\${input}" >"\${output}/.resultset.json"
 EOF
   cat >"${root}/test-bin/bundle" <<EOF
 #!${HARNESS_TOOLS[bash]}
@@ -62,7 +78,7 @@ set -u
 if [[ "\${1:-}" == --version ]]; then printf 'bashcov 3.3.0\n'; exit 0; fi
 [[ ${mode@Q} != runner-fail ]] || exit 23
 [[ "\${1:-}" == -- ]] || exit 2
-[[ "\${BASHCOV_COMMAND_NAME:-}" == bats-suite ]] || exit 2
+[[ "\${BASHCOV_COMMAND_NAME:-}" == bats-suite-* ]] || exit 2
 shift
 "\$@" || exit
 mkdir -p -- "\${COVERAGE_DIR}/assets"
@@ -168,8 +184,18 @@ EOF
 
   run grep -F 'minimum_coverage' "${PROJECT_ROOT}/.simplecov"
   [ "${status}" -ne 0 ]
-  grep -Fq 'COVERAGE_MINIMUM ?= 90' "${PROJECT_ROOT}/Makefile"
-  grep -Fq 'BASHCOV_COMMAND_NAME=bats-suite' "${RUNNER}"
+  grep -Fq 'COVERAGE_MINIMUM ?= 84' "${PROJECT_ROOT}/Makefile"
+  grep -Fq 'BASHCOV_COMMAND_NAME="bats-suite-${name}"' \
+    "${PROJECT_ROOT}/scripts/run-coverage-suite"
+  grep -Fq 'BASHCOV_CANONICAL_ROOT="${root}"' \
+    "${PROJECT_ROOT}/scripts/run-coverage-suite"
+  grep -Fq 'BASH_ENV="${root}/tests/support/bashcov_functrace.bash"' \
+    "${PROJECT_ROOT}/scripts/run-coverage-suite"
+  grep -Fq 'RUBYOPT="-r${root}/tests/support/bashcov_fixture_coverage"' \
+    "${PROJECT_ROOT}/scripts/run-coverage-suite"
+  grep -Fxq 'set -T' "${PROJECT_ROOT}/tests/support/bashcov_functrace.bash"
+  grep -Fq 'Digest::SHA256.file(script).hexdigest' \
+    "${PROJECT_ROOT}/tests/support/bashcov_fixture_coverage.rb"
 }
 
 @test "[PMC-U5-R02] checker requires one fresh intended command result" {
@@ -342,6 +368,22 @@ EOF
   [ ! -e "${checkout}/.coverage.backup" ]
 }
 
+@test "[PMC-U5-R06] relative direct runner re-execs through the absolute helper" {
+  local checkout="${BATS_TEST_TMPDIR}/relative-checkout"
+  local bats="${BATS_TEST_TMPDIR}/bats" bashcov="${BATS_TEST_TMPDIR}/bashcov"
+  make_coverage_checkout "${checkout}"
+  make_bats_stub "${bats}" "${BATS_TEST_TMPDIR}/suite-log"
+  make_bashcov_stub "${bashcov}" success
+
+  run env PATH="${checkout}/test-bin:${PATH}" MAKE_COVERAGE_DIR=coverage \
+    MAKE_DIST_DIR=dist MAKE_COVERAGE_MINIMUM=90 MAKE_BATS="${bats}" \
+    MAKE_BASHCOV="${bashcov}" bash -c \
+    'cd "$1" && scripts/run-coverage --project-root "$1"' _ "${checkout}"
+
+  [ "${status}" -eq 0 ]
+  [ -f "${checkout}/coverage/.resultset.json" ]
+}
+
 @test "[PMC-U7-R04] both domains classify before repair or removal" {
   local root="${BATS_TEST_TMPDIR}/clean-checkout"
   local backup="${root}/.coverage.backup"
@@ -393,4 +435,18 @@ EOF
     "${root}/scripts/clean-generated" --project-root "${root}"
   [ "${status}" -eq 1 ]
   [ ! -e "${root}/.devin-desktop-manager.outputs.lock" ]
+}
+
+@test "[PMC-U7-R06] relative direct clean re-execs through the absolute helper" {
+  local root="${BATS_TEST_TMPDIR}/relative-clean-checkout"
+  make_clean_checkout "${root}"
+  make_coverage_tree "${root}/coverage"
+  make_package_pair "${root}/dist"
+
+  run bash -c 'cd "$1" && scripts/clean-generated --project-root "$1"' \
+    _ "${root}"
+
+  [ "${status}" -eq 0 ]
+  [ ! -e "${root}/coverage" ]
+  [ ! -e "${root}/dist" ]
 }

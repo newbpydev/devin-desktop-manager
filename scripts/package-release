@@ -30,24 +30,24 @@ physical_root() {
 }
 
 canonical_output() {
-  local root="$1" value="$2" candidate current component
+  local root="$1" value="$2" label="$3" candidate current component
   [[ -n "${value}" && "${value}" != /* && "${value}" != *[!\ -~]* ]] ||
-    fail 'OUTPUT_DIRECTORY must be one printable project-relative path beneath the exact Git root'
+    fail "${label} must be one printable project-relative path beneath the exact Git root"
   case "/${value}/" in
-    */../*|*/./*|*//*) fail 'OUTPUT_DIRECTORY must canonicalize beneath the exact Git root' ;;
+    */../*|*/./*|*//*) fail "${label} must canonicalize beneath the exact Git root" ;;
   esac
   current="${root}"
   IFS=/ read -r -a components <<<"${value}"
   for component in "${components[@]}"; do
     current="${current}/${component}"
-    [[ ! -L "${current}" ]] || fail 'OUTPUT_DIRECTORY must not contain symbolic components'
+    [[ ! -L "${current}" ]] || fail "${label} must not contain symbolic components"
   done
   candidate="$(readlink -m -- "${root}/${value}" 2>/dev/null)" ||
-    fail 'OUTPUT_DIRECTORY cannot be canonicalized'
+    fail "${label} cannot be canonicalized"
   [[ "${candidate}" == "${root}/"* ]] ||
-    fail 'OUTPUT_DIRECTORY must canonicalize beneath the exact Git root'
+    fail "${label} must canonicalize beneath the exact Git root"
   [[ ! -e "${candidate}" || (-d "${candidate}" && ! -L "${candidate}") ]] ||
-    fail 'OUTPUT_DIRECTORY must be a directory'
+    fail "${label} must be a directory"
   printf '%s\n' "${candidate}"
 }
 
@@ -80,11 +80,23 @@ validate_lock() {
 
 validate_release_mode() {
   local root="$1" version="$2" head="$3" tag="$4" workflow_commit="$5"
-  local tag_type peeled status
+  local package_root="$6" coverage_root="$7"
+  local tag_type peeled status package_relative coverage_relative generated_root tracked
   [[ "${tag}" == "v${version}" ]] || fail "release tag must be v${version}"
   [[ "${workflow_commit}" =~ ^[0-9a-f]{40}$ && "${workflow_commit}" == "${head}" ]] ||
     fail 'supplied workflow commit must identify HEAD'
-  status="$(git -C "${root}" status --porcelain --untracked-files=normal)" ||
+  package_relative="${package_root#"${root}"/}"
+  coverage_relative="${coverage_root#"${root}"/}"
+  for generated_root in "${package_relative}" "${coverage_relative}"; do
+    tracked="$(git -C "${root}" ls-files -- \
+      ":(top,literal)${generated_root}")" ||
+      fail 'cannot inspect generated output ownership'
+    [[ -z "${tracked}" ]] ||
+      fail 'generated output roots must not contain tracked release inputs'
+  done
+  status="$(git -C "${root}" status --porcelain --untracked-files=normal -- . \
+    ":(top,exclude,literal)${package_relative}" \
+    ":(top,exclude,literal)${coverage_relative}")" ||
     fail 'cannot inspect the release working tree'
   [[ -z "${status}" ]] || fail 'official packaging requires a clean index and working tree'
   tag_type="$(git -C "${root}" cat-file -t "refs/tags/${tag}" 2>/dev/null || true)"
@@ -104,7 +116,7 @@ restore_backup_pair() {
 
 main() {
   local root_value="" release_tag="" workflow_commit="" lock_fd=""
-  local version output_value script_dir root head output archive_name output_device
+  local version output_value script_dir root head output coverage_output archive_name output_device
   local file_list="" token stage="" stage_archive stage_checksum backup archive_name_prior
   local state prior=0 parent_created=0 attempt
   local -a lock_arguments
@@ -153,10 +165,17 @@ main() {
       "${lock_arguments[@]}"
   fi
   head="$(validate_git_root "${root}")"
-  output="$(canonical_output "${root}" "${output_value}")"
+  output="$(canonical_output "${root}" "${output_value}" OUTPUT_DIRECTORY)"
+  coverage_output="$(canonical_output "${root}" \
+    "${MAKE_COVERAGE_DIR:-coverage}" COVERAGE_DIR)"
+  [[ "${output}" != "${coverage_output}" &&
+    "${output}" != "${coverage_output}/"* &&
+    "${coverage_output}" != "${output}/"* ]] ||
+    fail 'OUTPUT_DIRECTORY and COVERAGE_DIR must be separate non-nested paths'
   validate_lock "${root}"
   [[ -z "${release_tag}" ]] ||
-    validate_release_mode "${root}" "${version}" "${head}" "${release_tag}" "${workflow_commit}"
+    validate_release_mode "${root}" "${version}" "${head}" "${release_tag}" \
+      "${workflow_commit}" "${output}" "${coverage_output}"
 
   if [[ ! -d "${output}" ]]; then
     if ! mkdir -p -- "${output}" || ! chmod 0700 -- "${output}"; then

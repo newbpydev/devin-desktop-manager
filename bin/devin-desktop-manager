@@ -38,14 +38,14 @@ readonly CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME_DIR}/.config}"
 readonly STATE_DIR="${STATE_HOME}/devin-desktop-manager"
 readonly STATE_FILE="${STATE_DIR}/state.json"
 readonly LOCK_FILE="${STATE_HOME}/devin-desktop-manager.lock"
-readonly PUBLICATION_LOCK="${BIN_DIR:-${HOME_DIR}/.local/bin}/.devin-desktop-manager.publication.lock"
+readonly BIN_DIR="${HOME_DIR}/.local/bin"
+readonly PUBLICATION_LOCK="${BIN_DIR}/.devin-desktop-manager.publication.lock"
 readonly TRANSACTION_JOURNAL="${STATE_HOME}/devin-desktop-manager.transaction"
 readonly TRANSACTION_DISCARD="${TRANSACTION_JOURNAL}.discard"
 readonly UNINSTALL_CLEANUP_RECORD="${STATE_HOME}/devin-desktop-manager.cleanup"
 readonly UNINSTALL_CLEANUP_PROOF="${UNINSTALL_CLEANUP_RECORD}.proof"
 readonly RELEASE_PRUNE_CLEANUP_RECORD="${STATE_HOME}/devin-desktop-manager.prune"
 readonly RELEASE_PRUNE_CLEANUP_PROOF="${RELEASE_PRUNE_CLEANUP_RECORD}.proof"
-readonly BIN_DIR="${HOME_DIR}/.local/bin"
 readonly APP_COMMAND="${BIN_DIR}/devin-desktop"
 readonly MANAGER_COMMAND="${BIN_DIR}/devin-desktop-manager"
 
@@ -615,7 +615,7 @@ curl_fetch_file() {
   if [[ "${resume}" == true && -f "${destination}" ]]; then
     offset="$(stat -c '%s' -- "${destination}")" || return 1
     ((offset < maximum_bytes)) || return 1
-    ((offset == 0)) || resume_options=(--continue-at -)
+    ((offset == 0)) || resume_options=(--continue-at "${offset}")
   fi
   remaining=$((maximum_bytes - offset))
   for ((hop = 0; hop <= 5; hop++)); do
@@ -705,11 +705,14 @@ curl_fetch_file() {
         ;;
       3??)
         location="$(awk '
-          BEGIN { IGNORECASE=1 }
-          /^Location:/ {
-            sub(/^[^:]*:[[:space:]]*/, "")
-            sub(/\r$/, "")
-            value=$0
+          {
+            separator=index($0, ":")
+            if (separator > 0 &&
+              tolower(substr($0, 1, separator - 1)) == "location") {
+              value=substr($0, separator + 1)
+              sub(/^[[:space:]]*/, "", value)
+              sub(/\r$/, "", value)
+            }
           }
           END { print value }
         ' "${header}")"
@@ -1003,9 +1006,9 @@ validate_lock_descriptor_identity() {
     die "${label} lock descriptor ${fd} is not open"
   [[ -f "${expected}" && ! -L "${expected}" ]] ||
     die "${label} lock must be a non-symbolic regular file: ${expected}"
-  path_identity="$(stat -Lc '%d:%i:%u:%F:%h' -- "${expected}")" ||
+  path_identity="$(LC_ALL=C stat -Lc '%d:%i:%u:%F:%h' -- "${expected}")" ||
     die "could not inspect ${label} lock: ${expected}"
-  descriptor_identity="$(stat -Lc '%d:%i:%u:%F:%h' -- "/proc/self/fd/${fd}")" ||
+  descriptor_identity="$(LC_ALL=C stat -Lc '%d:%i:%u:%F:%h' -- "/proc/self/fd/${fd}")" ||
     die "could not inspect ${label} lock descriptor ${fd}"
   IFS=: read -r device inode owner file_type links <<<"${path_identity}"
   [[ "${path_identity}" == "${descriptor_identity}" && "${owner}" == "${EUID}" &&

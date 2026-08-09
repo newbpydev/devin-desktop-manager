@@ -150,7 +150,8 @@ main() {
 
   if [[ -z "${lock_fd}" ]]; then
     "${script_dir}/preflight" clean --project-root "${root}" || exit $?
-    exec "${script_dir}/output-lock" "${root}" -- "$0" --project-root "${root}"
+    exec "${script_dir}/output-lock" "${root}" -- \
+      "${script_dir}/clean-generated" --project-root "${root}"
   fi
   validate_lock "${root}"
   # shellcheck source=scripts/lib/coverage-output.bash

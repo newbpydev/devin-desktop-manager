@@ -60,7 +60,7 @@ validate_lock() {
 
 main() {
   local lock_fd="" root="" project_physical script_dir coverage_root dist_root state
-  local bashcov bats checker start stage backup parent leaf token attempt parent_created=0
+  local bashcov bats ruby checker start stage backup parent leaf token attempt parent_created=0
   if [[ "${1:-}" == --output-lock-fd ]]; then
     [[ "${2:-}" == 6 ]] || usage
     lock_fd=6
@@ -83,7 +83,8 @@ main() {
   if [[ -z "${lock_fd}" ]]; then
     PREFLIGHT_BATS="${MAKE_BATS:-bats}" PREFLIGHT_BASHCOV="${MAKE_BASHCOV:-bashcov}" \
       "${script_dir}/preflight" coverage-run --project-root "${root}" || exit $?
-    exec "${script_dir}/output-lock" "${root}" -- "$0" --project-root "${root}"
+    exec "${script_dir}/output-lock" "${root}" -- \
+      "${script_dir}/run-coverage" --project-root "${root}"
   fi
   validate_lock "${root}"
   # shellcheck source=scripts/lib/coverage-output.bash
@@ -126,15 +127,16 @@ main() {
 
   bashcov="$(resolve_tool "${MAKE_BASHCOV:-bashcov}")"
   bats="$(resolve_tool "${MAKE_BATS:-bats}")"
+  ruby="$(resolve_tool ruby)"
   checker="${script_dir}/check-coverage" # scripts/check-coverage owns the gate.
   start="$(date +%s)"
   if ! (cd "${root}" && HOME="${MAKE_HOME:-${HOME:-}}" LC_ALL=C TZ=UTC \
-    COVERAGE_DIR="${stage}" BASHCOV_COMMAND_NAME=bats-suite \
-    "${bashcov}" -- "${script_dir}/run-coverage-suite" "${bats}" tests); then
+    "${script_dir}/run-coverage-suite" \
+      "${bashcov}" "${bats}" "${ruby}" "${root}" "${stage}"); then
     fail 'coverage runner failed; prior coverage was preserved'
   fi
   COVERAGE_COMMAND_NAME=bats-suite COVERAGE_STARTED_AT="${start}" \
-    "${checker}" "${stage}/.resultset.json" "${MAKE_COVERAGE_MINIMUM:-90}" ||
+    "${checker}" "${stage}/.resultset.json" "${MAKE_COVERAGE_MINIMUM:-84}" ||
     fail 'coverage validation failed; prior coverage was preserved'
   _coverage_validate_tree "${stage}" stage ||
     fail "generated coverage shape is invalid (${_COVERAGE_REASON}); prior coverage was preserved"

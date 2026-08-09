@@ -47,6 +47,45 @@ canonical_dist() {
   printf '%s\n' "${candidate}"
 }
 
+canonical_generated_root() {
+  local root="$1" value="$2" label="$3" candidate current component
+  [[ -n "${value}" && "${value}" != /* && "${value}" != *[!\ -~]* ]] ||
+    fail "${label} must be one printable project-relative path"
+  case "/${value}/" in
+    */../*|*/./*|*//*) fail "${label} must stay beneath the exact Git root" ;;
+  esac
+  current="${root}"
+  IFS=/ read -r -a components <<<"${value}"
+  for component in "${components[@]}"; do
+    current="${current}/${component}"
+    [[ ! -L "${current}" ]] || fail "${label} must not contain symbolic components"
+  done
+  candidate="$(readlink -m -- "${root}/${value}" 2>/dev/null)" ||
+    fail "${label} cannot be canonicalized"
+  [[ "${candidate}" == "${root}/"* ]] ||
+    fail "${label} must stay beneath the exact Git root"
+  [[ ! -e "${candidate}" || (-d "${candidate}" && ! -L "${candidate}") ]] ||
+    fail "${label} must be a directory"
+  printf '%s\n' "${candidate}"
+}
+
+release_status_excluding_generated() {
+  local root="$1" package_root="$2" coverage_root="$3"
+  local package_relative coverage_relative generated_root tracked
+  package_relative="${package_root#"${root}"/}"
+  coverage_relative="${coverage_root#"${root}"/}"
+  for generated_root in "${package_relative}" "${coverage_relative}"; do
+    tracked="$(git -C "${root}" ls-files -- \
+      ":(top,literal)${generated_root}")" ||
+      fail 'cannot inspect generated output ownership'
+    [[ -z "${tracked}" ]] ||
+      fail 'generated output roots must not contain tracked release inputs'
+  done
+  git -C "${root}" status --porcelain --untracked-files=normal -- . \
+    ":(top,exclude,literal)${package_relative}" \
+    ":(top,exclude,literal)${coverage_relative}"
+}
+
 validate_exact_git_root() {
   local root="$1" top head
   head="$(git -C "${root}" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" ||
@@ -83,6 +122,7 @@ validate_handoff() {
 main() {
   local root_value="" release_tag="" version script_dir root head profile
   local manager_version make_version tag_type peeled workflow_commit status
+  local package_root coverage_root
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
       --project-root)
@@ -129,7 +169,16 @@ main() {
   [[ -z "${release_tag}" || "${release_tag}" == "v${version}" ]] ||
     fail "tag ${release_tag} must match v${version}"
   if [[ -n "${release_tag}" ]]; then
-    status="$(git -C "${root}" status --porcelain --untracked-files=normal)" ||
+    package_root="$(canonical_generated_root "${root}" \
+      "${MAKE_DIST_DIR:-dist}" DIST_DIR)"
+    coverage_root="$(canonical_generated_root "${root}" \
+      "${MAKE_COVERAGE_DIR:-coverage}" COVERAGE_DIR)"
+    [[ "${package_root}" != "${coverage_root}" &&
+      "${package_root}" != "${coverage_root}/"* &&
+      "${coverage_root}" != "${package_root}/"* ]] ||
+      fail 'DIST_DIR and COVERAGE_DIR must be separate non-nested paths'
+    status="$(release_status_excluding_generated \
+      "${root}" "${package_root}" "${coverage_root}")" ||
       fail 'cannot inspect the release working tree'
     [[ -z "${status}" ]] || fail 'official release requires a clean index and working tree'
     tag_type="$(git -C "${root}" cat-file -t "refs/tags/${release_tag}" 2>/dev/null || true)"

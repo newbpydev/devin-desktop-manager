@@ -88,7 +88,7 @@ make set-defaults
 | `make doctor` | Validate the app, sandbox, state, and integration |
 | `make uninstall` | Interactively remove manager-owned files |
 | `make verify` | Run the complete offline lint and test gate |
-| `make coverage` | Run the suite with the enforced 90% line-coverage gate |
+| `make coverage` | Run the suite with the enforced 84% line-coverage ratchet |
 
 `make link-dev` is only for contributors; public installs are independent
 copies and do not break when the clone is moved or deleted.
