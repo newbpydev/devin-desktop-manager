@@ -73,7 +73,6 @@ declare -ar CURL_SECURITY_OPTIONS=(
   --proto '=https'
   --proto-redir '=https'
   --max-redirs 5
-  --no-progress-meter
   --retry 4
   --retry-delay 2
   --retry-all-errors
@@ -514,13 +513,11 @@ preflight_escape() {
   LC_ALL=C
   for ((index = 0; index < ${#value} && index < 512; index++)); do
     byte="${value:index:1}"
-    # SC1003 misreads the literal backslash pattern and replacement below as single-quote escaping.
-    # shellcheck disable=SC1003
     case "${byte}" in
       $'\t') output+='\t' ;;
       $'\n') output+='\n' ;;
       $'\r') output+='\r' ;;
-      '\\') output+='\\\\' ;;
+      $'\\') output+=$'\\\\' ;;
       [\ -~]) output+="${byte}" ;;
       *)
         printf -v hex '%02x' "'${byte}"

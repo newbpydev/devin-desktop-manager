@@ -628,7 +628,10 @@ EOF
 
   [ "${status}" -eq 0 ]
   grep -Eq '^--disable( |$)' "${CURL_LOG}"
-  ! grep -Eq -- '--insecure|credentials.invalid|bad-ca' "${CURL_LOG}"
+  run grep -E -- '--insecure|credentials.invalid|bad-ca' "${CURL_LOG}"
+  [ "${status}" -ne 0 ]
+  run grep -F -- '--no-progress-meter' "${CURL_LOG}"
+  [ "${status}" -ne 0 ]
   grep -Fq -- '--max-time 60' "${CURL_LOG}"
   grep -Fq -- '--max-filesize 1048576' "${CURL_LOG}"
 
@@ -678,15 +681,17 @@ EOF
   local stderr_file="${BATS_TEST_TMPDIR}/stderr"
   local hostile_home
 
-  hostile_home="${BATS_TEST_TMPDIR}/bad"$'\n'"home"
+  hostile_home="${BATS_TEST_TMPDIR}/bad\\path"$'\n'"home"
   run bash -c 'HOME="$1" "$2" status >"$3" 2>"$4"' \
     _ "${hostile_home}" "${MANAGER}" "${stdout_file}" "${stderr_file}"
 
   [ "${status}" -eq 1 ]
   [ ! -s "${stdout_file}" ]
   grep -Fq 'status: error:' "${stderr_file}"
+  grep -Fq 'bad\\path\nhome' "${stderr_file}"
   grep -Fq '\n' "${stderr_file}"
-  ! grep -q $'\033' "${stderr_file}"
+  run grep -q $'\033' "${stderr_file}"
+  [ "${status}" -ne 0 ]
   [ "$(wc -l <"${stderr_file}")" -le 8 ]
 }
 

@@ -76,13 +76,11 @@ escape_field() {
 
   for ((index = 0; index < ${#value} && index < PREFLIGHT_MAX_FIELD_BYTES; index++)); do
     byte="${value:index:1}"
-    # SC1003 misreads the literal backslash pattern and replacement below as single-quote escaping.
-    # shellcheck disable=SC1003
     case "${byte}" in
       $'\t') output+='\t' ;;
       $'\n') output+='\n' ;;
       $'\r') output+='\r' ;;
-      '\\') output+='\\\\' ;;
+      $'\\') output+=$'\\\\' ;;
       [\ -~]) output+="${byte}" ;;
       *)
         printf -v hex '%02x' "'${byte}"
@@ -142,7 +140,7 @@ resolve_executable() {
       return 1
       ;;
     *[!\ -~]*)
-      add_incompatible_command "${key}" "$(escape_field "${value}")" \
+      add_incompatible_command "${key}" "${value}" \
         'executable identity must not contain control bytes'
       return 1
       ;;
@@ -160,18 +158,18 @@ resolve_executable() {
     candidate="$(type -P -- "${value}" 2>/dev/null || true)"
   fi
   if [[ "${candidate}" != /* || ! -f "${candidate}" || ! -x "${candidate}" ]]; then
-    add_missing_command "${key}" "$(escape_field "${value}")" "${purpose}"
+    add_missing_command "${key}" "${value}" "${purpose}"
     return 1
   fi
   directory="${candidate%/*}"
   physical="$(CDPATH='' cd -P -- "${directory}" 2>/dev/null && pwd -P)" || {
-    add_incompatible_command "${key}" "$(escape_field "${candidate}")" \
+    add_incompatible_command "${key}" "${candidate}" \
       'executable directory must resolve physically'
     return 1
   }
   candidate="${physical}/${candidate##*/}"
   [[ -f "${candidate}" && -x "${candidate}" ]] || {
-    add_missing_command "${key}" "$(escape_field "${candidate}")" "${purpose}"
+    add_missing_command "${key}" "${candidate}" "${purpose}"
     return 1
   }
   RESOLVED_TOOLS["${key}"]="${candidate}"

@@ -49,7 +49,7 @@ jobs:
           bundle exec make coverage
 
       - name: Run isolated focused portability smoke
-        run: sudo unshare --net --setuid "$(id -u)" --setgid "$(id -g)" -- tests/run-portability-smoke --assert-offline
+        run: sudo env HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" unshare --net --setuid "$(id -u)" --setgid "$(id -g)" -- tests/run-portability-smoke --assert-offline
 
   portable-debian:
     name: Focused Debian-family userspace

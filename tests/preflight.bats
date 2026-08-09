@@ -222,13 +222,13 @@ EOF
   local sparse
   sparse="$(make_sparse_bin sh)"
 
-  run env PATH="${sparse}" PREFLIGHT_BATS=$'missing\ttool' \
+  run env PATH="${sparse}" PREFLIGHT_BATS=$'missing\\tool\tname' \
     PREFLIGHT_SHELLCHECK=also-missing NO_COLOR=1 TERM=dumb \
     "${HARNESS_BASH}" "${PREFLIGHT}" verify --project-root "${PROJECT_ROOT}"
 
   [ "${status}" -eq 1 ]
   [[ "${output}" == verify:* ]]
-  [[ "${output}" == *'missing\ttool'* ]]
+  [[ "${output}" == *'missing\\tool\tname'* ]]
   [[ "${output}" != *$'\e'* ]]
   [ "${#output}" -le 32768 ]
 }

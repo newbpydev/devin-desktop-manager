@@ -254,7 +254,7 @@ setup() {
   grep -Fq 'runs-on: ubuntu-24.04' "${ci}"
   grep -Fq 'bundle exec make coverage' "${ci}"
   [ "$(grep -c 'bundle exec make coverage' "${ci}")" -eq 1 ]
-  grep -Fq 'sudo unshare --net --setuid "$(id -u)" --setgid "$(id -g)" -- tests/run-portability-smoke --assert-offline' "${ci}"
+  grep -Fq 'sudo env HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" unshare --net --setuid "$(id -u)" --setgid "$(id -g)" -- tests/run-portability-smoke --assert-offline' "${ci}"
   [ "$(grep -c 'BASE_IMAGE: .*@sha256:[0-9a-f]\{64\}' "${ci}")" -eq 3 ]
   [ "$(grep -c 'docker image inspect --format' "${ci}")" -eq 3 ]
   [ "$(grep -c -- '--network none --user 10001:10001 --read-only' "${ci}")" -eq 3 ]
