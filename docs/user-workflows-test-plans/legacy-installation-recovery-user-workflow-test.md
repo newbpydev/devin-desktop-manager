@@ -1,8 +1,8 @@
 # Legacy Installation Recovery - User Workflow Test Plan
 
 **Feature ID:** `legacy-installation-recovery`  
-**Status:** Draft - not executed  
-**Evidence scope:** Planning only  
+**Status:** Local automation complete - hosted and manual acceptance pending
+**Evidence scope:** Local focused, aggregate, coverage, and isolated portability evidence; no hosted or native desktop claim
 **Owner:** Implementation agent and repository maintainer  
 **Linked plan:** `docs/plans/2026-08-09-001-fix-legacy-installation-recovery-plan.md`  
 **Issue workorder:** `docs/workorders/legacy-installation-recovery-issues-workorder.md`
@@ -61,21 +61,21 @@ No browser UI is in scope. Terminal status/streams, filesystem state, XDG associ
 
 ### Recognition and terminal diagnosis
 
-- [ ] **LIR-WF-001 - Affected profile diagnosis:** Seed the exact active markerless layout, run direct and Make doctor, and verify exit `1`, one recoverable Legacy Installation diagnosis, direct update/uninstall choices, no seven-symptom list, and byte-identical state.
-- [ ] **LIR-WF-006 - Default provenance matrix:** Exercise correct legacy, empty, safe external, mixed shadowed legacy, Default/Added records, absent provenance, Removed/wrong-MIME records, modern IDs, wrong roles, desktop-specific files, malformed input, query failure, and special path types. Only decided rows classify as recoverable.
-- [ ] **LIR-WF-007 - Adversarial ownership near-misses:** Change one release, link, root entry, desktop semantic, asset, default, state, cache, temporary, path type, or identity invariant at a time. Each mutation command exits before ownership changes with its stable reason code and preserved snapshot.
-- [ ] **LIR-WF-010 - Doctor-to-mutation revalidation:** Let doctor report a recoverable profile, then change one ownership invariant before a lifecycle command. Verify the lifecycle command independently reclassifies under lock and refuses before mutation; no doctor result is persisted or consumed.
-- [ ] **LIR-WF-011 - Read-only commands:** Run `status`, `check`, and doctor against recoverable/refused layouts with filesystem/network fakes as applicable; assert no marker, lock, state, cache content, desktop, MIME, link, or release mutation.
-- [ ] **LIR-WF-012 - Compatibility baseline:** Re-run fresh, public pre-activation, public post-link-unclaimed, public stateful `0.1.0`, owned, interrupted, and existing near-miss fixtures; their characterized outcomes do not change except for the named complete-profile extension.
+- [x] **LIR-WF-001 - Affected profile diagnosis:** Seed the exact active markerless layout, run direct and Make doctor, and verify exit `1`, one recoverable Legacy Installation diagnosis, direct update/uninstall choices, no seven-symptom list, and byte-identical state.
+- [x] **LIR-WF-006 - Default provenance matrix:** Exercise correct legacy, empty, safe external, mixed shadowed legacy, Default/Added records, absent provenance, Removed/wrong-MIME records, modern IDs, wrong roles, desktop-specific files, malformed input, query failure, and special path types. Only decided rows classify as recoverable.
+- [x] **LIR-WF-007 - Adversarial ownership near-misses:** Change one release, link, root entry, desktop semantic, asset, default, state, cache, temporary, path type, or identity invariant at a time. Each mutation command exits before ownership changes with its stable reason code and preserved snapshot.
+- [x] **LIR-WF-010 - Doctor-to-mutation revalidation:** Let doctor report a recoverable profile, then change one ownership invariant before a lifecycle command. Verify the lifecycle command independently reclassifies under lock and refuses before mutation; no doctor result is persisted or consumed.
+- [x] **LIR-WF-011 - Read-only commands:** Run `status`, `check`, and doctor against recoverable/refused layouts with filesystem/network fakes as applicable; assert no marker, lock, state, cache content, desktop, MIME, link, or release mutation.
+- [x] **LIR-WF-012 - Compatibility baseline:** Re-run fresh, public pre-activation, public post-link-unclaimed, public stateful `0.1.0`, owned, interrupted, and existing near-miss fixtures; their characterized outcomes do not change except for the named complete-profile extension.
 
 ### Lifecycle mutation and recovery
 
-- [ ] **LIR-WF-002 - Recover and update:** From the affected fixture, update to a newer offline release. Verify app-stop precedes mutation, schema-`1` markers/metadata, mode-`0600` state, modern integration, normalized/preserved originals, one rollback release, and healthy doctor/status.
-- [ ] **LIR-WF-003 - Composite install and retry:** Run `make install` from fixed source, inject application-stage failure after manager publication, verify the partial-install message and recoverable state, then rerun the same command to completion.
-- [ ] **LIR-WF-004 - Recover and rollback:** Seed current/previous legacy releases, run rollback once to swap them and publish modern state/integration, then run rollback again and prove the original current release is restored without duplicate state/default records.
-- [ ] **LIR-WF-005 - Recover and uninstall:** In separate disposable fixtures, cover interactive yes/no/blank/invalid/EOF/SIGINT/non-TTY and prompt-free uninstall. Only affirmative/prompt-free paths remove proven manager files/defaults; all retain the separate Devin CLI, user config, external defaults, and unrelated associations.
-- [ ] **LIR-WF-008 - Running application:** Start a synchronized process whose executable resolves to the active legacy release, invoke every relevant lifecycle entry point, and verify refusal before marker, metadata, journal, default, state, or integration mutation. Stop it and retry successfully.
-- [ ] **LIR-WF-009 - Interruption and same-command retry:** Kill at each named migration/transaction boundary. Verify only recognized temporaries, markers, metadata, journal, prune, or cleanup records remain; same-command retry completes exactly once or preserves an actionable validated recovery record.
+- [x] **LIR-WF-002 - Recover and update:** From the affected fixture, update to a newer offline release. Verify app-stop precedes mutation, schema-`1` markers/metadata, mode-`0600` state, modern integration, normalized/preserved originals, one rollback release, and healthy doctor/status.
+- [x] **LIR-WF-003 - Composite install and retry:** Run `make install` from fixed source, inject application-stage failure after manager publication, verify the partial-install message and recoverable state, then rerun the same command to completion.
+- [x] **LIR-WF-004 - Recover and rollback:** Seed current/previous legacy releases, run rollback once to swap them and publish modern state/integration, then run rollback again and prove the original current release is restored without duplicate state/default records.
+- [x] **LIR-WF-005 - Recover and uninstall:** In separate disposable fixtures, cover interactive yes/no/blank/invalid/EOF/SIGINT/non-TTY and prompt-free uninstall. Only affirmative/prompt-free paths remove proven manager files/defaults; all retain the separate Devin CLI, user config, external defaults, and unrelated associations.
+- [x] **LIR-WF-008 - Running application:** Start a synchronized process whose executable resolves to the active legacy release, invoke every relevant lifecycle entry point, and verify refusal before marker, metadata, journal, default, state, or integration mutation. Stop it and retry successfully.
+- [x] **LIR-WF-009 - Interruption and same-command retry:** Kill at each named migration/transaction boundary. Verify only recognized temporaries, markers, metadata, journal, prune, or cleanup records remain; same-command retry completes exactly once or preserves an actionable validated recovery record.
 
 ### Portability, release, and live acceptance
 
@@ -138,17 +138,18 @@ Before LIR-WF-015 mutates the reported installation:
 
 ## Execution Record
 
-Planning does not populate pass/fail results.
-
 | Date | Commit SHA | Scenario/tier | Environment | Command/method | Result | Evidence | Issues |
 |---|---|---|---|---|---|---|---|
-| Pending | Pending | Pending | Pending | Pending | Not executed | Pending | Pending |
+| 2026-08-09 | This implementation commit | LIR-WF-001 through LIR-WF-012 | Synthetic HOME/XDG on local Linux | Focused Bats plus `make verify` | Pass; aggregate 325/325 | Current implementation session and stable scenario IDs | None open locally |
+| 2026-08-09 | This implementation commit | Coverage | Unprivileged Ruby 3.2.11 container | Pinned Bundler 2.4.20/Bashcov 3.3.0 `make coverage` | Pass; 85.82% (5,545/6,461), required 84.00% | Generated report validated before cleanup | None |
+| 2026-08-09 | This implementation commit | Local portion of LIR-WF-013 | Pinned Debian, pinned Fedora, and checksummed Bash 4.4/GNU Make 4.3 containers | Existing offline non-root portability runner | Pass; 52/52 in each container | Read-only checkout and disabled network | Hosted jobs pending |
+| Pending | Pending | LIR-WF-013 hosted, LIR-WF-015, LIR-WF-016 | GitHub Actions and native desktop environments | Hosted and manual procedures above | Not executed | Requires published head and explicit live-host approval | LIR-ISS-008/010 |
 
 ## Completion Gate
 
 - [ ] Every LIR-WF-001 through LIR-WF-016 scenario has exact evidence or an explicit accepted blocker.
-- [ ] Every `[LIR-U*-*]` focused selection passes and selects at least one test.
-- [ ] Aggregate, coverage, portability, package, and release-check gates pass on the same implementation head.
+- [x] Every `[LIR-U*-*]` focused selection passes and selects at least one test.
+- [ ] Aggregate, coverage, portability, package, and release-check gates pass on the same implementation head. Aggregate, coverage, and local portability are green; package/release-check are the remaining local steps.
 - [ ] All four hosted compatibility jobs pass on that head.
 - [ ] Affected-host and disposable-environment evidence are complete and separately attributed.
 - [ ] The linked workorder has zero Open, Blocked-unaccepted, or implementation-regressed P0/P1 issues.

@@ -39,6 +39,19 @@ A Managed Installation candidate created before ownership evidence was
 recorded, eligible to be claimed only after its recognized roots, release
 inventory, integration, and state pass legacy verification.
 
+The complete initial-manager profile additionally proves exact legacy desktop
+semantics, release-matching icon and MIME assets, and reversible provenance for
+every manager-looking user MIME association. `doctor` may describe that exact
+profile as a recoverable Legacy Installation, but mutating commands always
+classify it again under their lifecycle locks.
+
+### Legacy Conflict
+
+A markerless candidate that misses any recognized profile invariant. The
+manager reports one bounded reason and does not claim ownership. A Legacy
+Conflict cannot be converted by manually adding markers, editing release
+metadata, or deleting locks.
+
 ### Manager Temporary
 
 A transient regular file with an explicitly recognized name and numeric suffix

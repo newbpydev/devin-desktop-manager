@@ -1,7 +1,7 @@
 SHELL := /bin/sh
 .SHELLFLAGS := -eu -c
 
-VERSION := 0.1.0
+VERSION := 0.1.1
 override PROJECT_ROOT := $(realpath $(dir $(firstword $(MAKEFILE_LIST))))
 BASH ?= bash
 BATS ?= bats
@@ -312,7 +312,7 @@ install:
 		"$$PROJECT_ROOT/bin/devin-desktop-manager" "$$destination"; \
 	if ! run_script "$$PROJECT_ROOT/bin/devin-desktop-manager" \
 		--publication-lock-fd 9 --lifecycle-lock-fd 8 $$legacy_option install; then \
-		printf '%s\n' 'install: error: manager installation succeeded, but application installation did not; recoverable state remains; rerun make install to resume' >&2; \
+		printf '%s\n' 'install: error: manager installation succeeded, but application installation did not; follow the manager diagnostic above: retry a recoverable interruption, or inspect/move aside a reported conflict before rerunning make install' >&2; \
 		exit 1; \
 	fi
 

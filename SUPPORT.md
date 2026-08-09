@@ -21,6 +21,13 @@ the reported state, wait for any holder to exit, and retry the same command.
 Never delete a lock or ownership marker. Status 2 from a direct helper means its
 invocation is invalid and should be corrected before retrying.
 
+If `doctor` reports a recoverable Legacy Installation, obtain verified 0.1.1
+source and run `make install-manager` before the lifecycle command it names.
+The old 0.1.0 manager cannot update itself. A diagnostic that instead names a
+failed invariant is a conflict: ownership was not claimed, so preserve the
+layout and inspect or move aside only the reported path or association. Do not
+create ownership markers, edit metadata, or remove persistent lock files.
+
 Report whether the failing target class is bootstrap, checkout-manager,
 installed-application, installer-local, development, release engineering, or
 generated-output cleanup. Also report whether the physical checkout is an

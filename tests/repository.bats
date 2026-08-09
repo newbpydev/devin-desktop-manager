@@ -6,6 +6,75 @@ setup() {
   PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
 }
 
+@test "[LIR-U4-R01] portability smoke selects recovery success refusal doctor and retry" {
+  local runner="${PROJECT_ROOT}/tests/run-portability-smoke"
+
+  grep -Fq 'LIR-(U1-R0[14]|U2-R06|U3-R01' "${runner}"
+  grep -Fq "tests/manager.bats" "${runner}"
+  grep -Fq "tests/repository.bats" "${runner}"
+  grep -Fq "No tests were selected" "${runner}"
+}
+
+@test "preflight associative keys satisfy canonical ShellCheck" {
+  local preflight="${PROJECT_ROOT}/scripts/preflight"
+
+  grep -Fq '["install-manager"]=' "${preflight}"
+  grep -Fq '["release-check-official"]=' "${preflight}"
+  run shellcheck -x -P "${PROJECT_ROOT}" "${preflight}"
+  [ "${status}" -eq 0 ]
+}
+
+@test "[LIR-U4-R02] compatibility lanes run recovery smoke offline as non-root" {
+  local ci="${PROJECT_ROOT}/.github/workflows/ci.yml"
+  local job
+
+  for job in portable-canonical portable-debian portable-fedora portable-minimum-toolchain; do
+    grep -Fq "${job}:" "${ci}"
+  done
+  [ "$(grep -c 'tests/run-portability-smoke --assert-offline' "${ci}")" -eq 4 ]
+  [ "$(grep -c -- '--network none --user 10001:10001 --read-only' "${ci}")" -eq 3 ]
+  grep -Fq 'unshare --net --setuid "$(id -u)" --setgid "$(id -g)"' "${ci}"
+}
+
+@test "[LIR-U4-R03] patch release policy aligns version schema docs and companions" {
+  local manager="${PROJECT_ROOT}/bin/devin-desktop-manager"
+  local plan="${PROJECT_ROOT}/docs/plans/2026-08-09-001-fix-legacy-installation-recovery-plan.md"
+  local workflow="${PROJECT_ROOT}/docs/user-workflows-test-plans/legacy-installation-recovery-user-workflow-test.md"
+  local workorder="${PROJECT_ROOT}/docs/workorders/legacy-installation-recovery-issues-workorder.md"
+  local docs
+
+  grep -Fq 'VERSION := 0.1.1' "${PROJECT_ROOT}/Makefile"
+  grep -Fq 'MANAGER_VERSION="0.1.1"' "${manager}"
+  grep -Fq 'LEGACY_MANAGER_VERSION="0.1.0"' "${manager}"
+  [ "$(grep -c 'SCHEMA_VERSION=1' "${manager}")" -eq 3 ]
+  grep -Fq '## [0.1.1] - 2026-08-09' "${PROJECT_ROOT}/CHANGELOG.md"
+  grep -Fq 'verification_plan: docs/user-workflows-test-plans/legacy-installation-recovery-user-workflow-test.md' "${plan}"
+  grep -Fq 'issue_workorder: docs/workorders/legacy-installation-recovery-issues-workorder.md' "${plan}"
+  [ -s "${workflow}" ]
+  [ -s "${workorder}" ]
+
+  docs="$(cat "${PROJECT_ROOT}/README.md" "${PROJECT_ROOT}/docs/INSTALL.md" \
+    "${PROJECT_ROOT}/SUPPORT.md" "${PROJECT_ROOT}/CONCEPTS.md" \
+    "${PROJECT_ROOT}/docs/RELEASING.md")"
+  [[ "${docs}" == *"complete initial-manager"* ]]
+  [[ "${docs}" == *"recoverable Legacy Installation"* ]]
+  [[ "${docs}" == *"Do not add a marker by hand"* ]]
+  [[ "${docs}" == *"do not remove persistent lock files"* ]]
+  [[ "${docs}" != *"--force-repair"* ]]
+}
+
+@test "[LIR-U4-R06] affected 0.1.0 users bootstrap the fixed manager first" {
+  local install="${PROJECT_ROOT}/docs/INSTALL.md"
+  local readme="${PROJECT_ROOT}/README.md"
+
+  grep -Fq 'verified 0.1.1 source' "${install}"
+  grep -Fq 'make install-manager' "${install}"
+  grep -Fq 'devin-desktop-manager 0.1.1' "${install}"
+  grep -Fq 'old 0.1.0 manager cannot update itself' "${install}"
+  grep -Fq 'make install-manager' "${readme}"
+  grep -Fq 'make update' "${readme}"
+}
+
 @test "[PMC-U1-C01] all Make targets retain routes and quality-suite ownership" {
   local makefile="${PROJECT_ROOT}/Makefile"
   local expected target
@@ -69,10 +138,10 @@ setup() {
     grep -Fq 'preflight"' "${PROJECT_ROOT}/${helper}"
   done
   grep -Fq 'readonly -A PROFILE_MEMBERS' "${preflight}"
-  grep -Fq '[verify]=' "${preflight}"
-  grep -Fq '[release-check]=' "${preflight}"
-  grep -Fq '[package-run]=' "${preflight}"
-  grep -Fq '[release-contract]=' "${preflight}"
+  grep -Fq '["verify"]=' "${preflight}"
+  grep -Fq '["release-check"]=' "${preflight}"
+  grep -Fq '["package-run"]=' "${preflight}"
+  grep -Fq '["release-contract"]=' "${preflight}"
 }
 
 @test "[PMC-U3-R05] repository policy treats hostile MAKEFILES as caller ingress" {

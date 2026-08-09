@@ -1,8 +1,8 @@
 # Legacy Installation Recovery - Issues Workorder
 
 **Feature ID:** `legacy-installation-recovery`  
-**Status:** Planning complete - implementation evidence pending  
-**Evidence scope:** Planning findings only; no implementation test is recorded as run  
+**Status:** Implementation locally verified - hosted and manual evidence pending
+**Evidence scope:** Local focused, aggregate, coverage, and isolated portability evidence; hosted and native desktop acceptance remain pending
 **Owner:** Implementation agent and repository maintainer  
 **Linked plan:** `docs/plans/2026-08-09-001-fix-legacy-installation-recovery-plan.md`  
 **Workflow test:** `docs/user-workflows-test-plans/legacy-installation-recovery-user-workflow-test.md`
@@ -26,17 +26,17 @@ This is the canonical ledger for plan-review findings and later implementation, 
 
 | ID | Source | Owner / lens | Severity | Status | Impact | Next action | Retest / evidence |
 |---|---|---|---|---|---|---|---|
-| LIR-ISS-001 | Reported host / U1-U2 | Plan architecture, correctness | P0 | Planned | Valid initial-manager users cannot update, reinstall, or uninstall. | Implement the exact `initial-complete` classifier and lifecycle branch. | LIR-U1-R01; LIR-U2-R01 through LIR-U2-R04; LIR-WF-002 through LIR-WF-005 |
-| LIR-ISS-002 | Document review / U1 | Ownership security | P1 | Planned | A marker-only desktop proof could authorize deletion of a modified executable entry. | Implement the role-specific non-executing semantic parser and near-miss corpus. | LIR-U1-R04; LIR-WF-007 |
-| LIR-ISS-003 | Document review / U1-U2 | Security, data integrity | P1 | Planned | Effective legacy IDs alone do not prove which user MIME file can be reversed; Added Associations could remain stale. | Implement the three-file provenance matrix, exact-ID cleanup, re-query, and transaction restore. | LIR-U1-R06; LIR-U2-R08; LIR-WF-006 |
-| LIR-ISS-004 | Document review / U1-U3 | Plan architecture, maintainability | P1 | Planned | Separate predicates and prose diagnostics can accept one profile while explaining another. | Centralize fixed classifier globals/reason codes and one renderer. | LIR-U1-C01 and LIR-U1-R01 through LIR-U1-R06; LIR-U3-R01/R03 |
-| LIR-ISS-005 | Code trace / U2 | Reliability, desktop lifecycle | P0 | Planned | Current post-link migration marks active releases before the app-stopped gate. | Gate every active recognized profile before marker/metadata mutation. | LIR-U2-R05; LIR-WF-008 |
-| LIR-ISS-006 | Reported doctor output / U3 | CLI interaction, reliability | P1 | Planned | Doctor emits seven derivative failures, while its unlocked diagnosis must never become mutation authority. | Classify first, render one recovery result, and make lifecycle commands reclassify under lock without consuming doctor state. | LIR-U3-R01/R04/R06; LIR-WF-001/010/011 |
-| LIR-ISS-007 | Ultrathink recovery audit / U2 | Reliability, data migration | P1 | Planned | Marker/metadata and transaction interruption windows need executable retry oracles. | Add exact-call failure hooks and same-command recovery tests at every named boundary. | LIR-U2-R06/R07; LIR-WF-009 |
-| LIR-ISS-008 | Scope/test review / U4 | Portability, test strategy | P1 | Planned | A focused compatibility filter can false-green or a new workflow could duplicate suite ownership. | Extend the existing non-empty runner selection only; retain the four existing job owners. | LIR-U4-R01/R02; LIR-WF-013 |
-| LIR-ISS-009 | Release audit / U4 | Documentation, release | P1 | Planned | Users with the broken `0.1.0` manager need fixed source before recovery; old `update` cannot update the manager itself. | Document verified `0.1.1` source/manager bootstrap and preserve manual publish authority. | LIR-U4-R03/R04/R06; LIR-WF-014 |
-| LIR-ISS-010 | Review correction / U4 | Manual acceptance | P1 | Planned | A live rollback check could leave the affected machine on the old release and conflate local/hosted/manual evidence. | Run rollback twice, leave the new release current, and record evidence tiers separately. | LIR-U4-R05; LIR-WF-015/016 |
-| LIR-ISS-011 | Coherence/scope review / U3-U4 | Scope guardian, maintainability | P2 | Planned | Shared documentation/workflow ownership could cause duplicate edits and unnecessary CI churn. | Keep all prose/version work in U4 and treat `.github/workflows/ci.yml` as inspection-only unless a red test proves otherwise. | File ownership review; LIR-U4-R03/R06 |
+| LIR-ISS-001 | Reported host / U1-U2 | Plan architecture, correctness | P0 | Fixed | Valid initial-manager users cannot update, reinstall, or uninstall. | Retain focused lifecycle and aggregate regressions. | LIR-U1-R01; LIR-U2-R01 through LIR-U2-R04; LIR-WF-002 through LIR-WF-005 |
+| LIR-ISS-002 | Document review / U1 | Ownership security | P1 | Fixed | A marker-only desktop proof could authorize deletion of a modified executable entry. | Retain the semantic near-miss and foreign-owner corpus. | LIR-U1-R04; LIR-WF-007 |
+| LIR-ISS-003 | Document review / U1-U2 | Security, data integrity | P1 | Fixed | Effective legacy IDs alone do not prove which user MIME file can be reversed; Added Associations could remain stale. | Retain provenance, cleanup-order, re-query, and restore regressions. | LIR-U1-R06; LIR-U2-R08; LIR-WF-006 |
+| LIR-ISS-004 | Document review / U1-U3 | Plan architecture, maintainability | P1 | Fixed | Separate predicates and prose diagnostics can accept one profile while explaining another. | Keep classifier and diagnostic rendering shared. | LIR-U1-C01 and LIR-U1-R01 through LIR-U1-R06; LIR-U3-R01/R03 |
+| LIR-ISS-005 | Code trace / U2 | Reliability, desktop lifecycle | P0 | Fixed | Current post-link migration marks active releases before the app-stopped gate. | Retain both initial and interrupted running-app snapshots. | LIR-U2-R05; LIR-WF-008 |
+| LIR-ISS-006 | Reported doctor output / U3 | CLI interaction, reliability | P1 | Fixed | Doctor emits seven derivative failures, while its unlocked diagnosis must never become mutation authority. | Retain root-cause, read-only, and locked revalidation regressions. | LIR-U3-R01/R04/R06; LIR-WF-001/010/011 |
+| LIR-ISS-007 | Ultrathink recovery audit / U2 | Reliability, data migration | P1 | Fixed | Marker/metadata and transaction interruption windows need executable retry oracles. | Retain deterministic restore/retry and tamper-revalidation tests. | LIR-U2-R06/R09; LIR-WF-009 |
+| LIR-ISS-008 | Scope/test review / U4 | Portability, test strategy | P1 | In progress | A focused compatibility filter can false-green or a new workflow could duplicate suite ownership. | Run the unchanged four hosted job owners at the implementation head; all three local container userlands are green. | LIR-U4-R01/R02; LIR-WF-013 |
+| LIR-ISS-009 | Release audit / U4 | Documentation, release | P1 | In progress | Users with the broken `0.1.0` manager need fixed source before recovery; old `update` cannot update the manager itself. | Run the clean `0.1.1` release-check, then preserve separate publish authority. | LIR-U4-R03/R04/R06; LIR-WF-014 |
+| LIR-ISS-010 | Review correction / U4 | Manual acceptance | P1 | Blocked | A live rollback check could leave the affected machine on the old release and conflate local/hosted/manual evidence. | After current-head hosted success and explicit approval, run rollback twice on the preserved host and uninstall only in a disposable environment. | LIR-U4-R05; LIR-WF-015/016 |
+| LIR-ISS-011 | Coherence/scope review / U3-U4 | Scope guardian, maintainability | P2 | Fixed | Shared documentation/workflow ownership could cause duplicate edits and unnecessary CI churn. | Keep prose ownership in U4 and the existing CI workflow unchanged. | File ownership review; LIR-U4-R03/R06 |
 
 ## Issue Details
 
@@ -163,17 +163,19 @@ These sign-offs mean the planning pack was reviewed for decision completeness. T
 | 2026-08-09 | Planning investigation | Read-only affected-host fingerprint and live code/test trace | Root cause identified; no product mutation | LIR-ISS-001/003/005/006 | Current planning session and linked plan sources |
 | 2026-08-09 | Headless document review | Coherence, feasibility, design, security, scope, adversarial lenses run sequentially | Three certain plan corrections applied; deep findings recorded | LIR-ISS-002-004/010/011 | Canonical plan diff and issue details |
 | 2026-08-09 | Plan Ultrathink | CLI, migration, operations, desktop, docs, and mixed-system deepening | Planning decisions and companion artifacts complete; implementation pending | LIR-ISS-001-011 | Linked plan and workflow test plan |
+| 2026-08-09 | Red/green implementation | LIR U1-U4 focused Bats scenarios | Classifier, lifecycle, doctor, version, documentation, and portability-selection scenarios pass | LIR-ISS-001-009/011 | Current implementation session; stable scenario IDs in the linked workflow plan |
+| 2026-08-09 | Aggregate verification | `make verify` | Pass: 325/325 Bats tests plus Bash syntax and ShellCheck | LIR-ISS-001-009/011 | Current implementation session |
+| 2026-08-09 | Locked coverage | `make coverage` with pinned Bundler 2.4.20 and Bashcov 3.3.0 in an unprivileged Ruby 3.2 container | Pass: 85.82% (5,545/6,461), required 84.00% | LIR-ISS-001-009/011 | Generated report validated before generated-output cleanup |
+| 2026-08-09 | Local cross-userland portability | Existing offline smoke in pinned Debian, pinned Fedora, and checksummed Bash 4.4/GNU Make 4.3 containers | Pass: 52/52 in each lane, non-root, read-only checkout, network disabled | LIR-ISS-008 | Current implementation session; hosted counterparts remain pending |
 
 ## Implementation And Release Gate
 
-Leave every item unchecked during planning.
-
-- [ ] Planned units implemented red-first in dependency order.
-- [ ] Every named focused test passes for the intended reason.
-- [ ] Aggregate `make verify` and locked coverage pass.
+- [x] Planned units implemented red-first in dependency order.
+- [x] Every named focused test passes for the intended reason.
+- [x] Aggregate `make verify` and locked coverage pass.
 - [ ] Portability selection is non-empty and all existing hosted lanes pass at one head.
 - [ ] `0.1.1` release-check and deterministic package pass with unchanged schema constants.
 - [ ] Affected-host and disposable-environment workflows are manually accepted and separately evidenced.
 - [ ] Every Planned issue is Fixed by its named evidence, or an explicit user-accepted blocker is recorded.
 - [ ] Remaining unaccepted Open/Blocked P0/P1 issues: 0.
-- [ ] No tag, push, merge, draft release, or publish occurs without separate authorization.
+- [x] No tag, push, merge, draft release, or publish occurs without separate authorization.
