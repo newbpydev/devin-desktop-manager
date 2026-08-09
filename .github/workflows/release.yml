@@ -52,19 +52,29 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           bundle exec make release-check VERSION="${version}"
 
+      - name: Revalidate immutable release handoff
+        id: handoff
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          scripts/release-check --project-root "$PWD" --release-tag "$RELEASE_TAG" "$version"
+          printf 'archive=dist/devin-desktop-manager-%s.tar.gz\n' "$version" >>"$GITHUB_OUTPUT"
+
       - name: Attest source archive provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
         with:
-          subject-path: dist/devin-desktop-manager-*.tar.gz
+          subject-path: ${{ steps.handoff.outputs.archive }}
 
       - name: Create draft GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_ARCHIVE: ${{ steps.handoff.outputs.archive }}
         run: |
           gh release create "${GITHUB_REF_NAME}" \
             --draft \
             --verify-tag \
             --generate-notes \
             --title "Devin Desktop Manager ${GITHUB_REF_NAME}" \
-            dist/devin-desktop-manager-*.tar.gz \
+            "${RELEASE_ARCHIVE}" \
             dist/SHA256SUMS

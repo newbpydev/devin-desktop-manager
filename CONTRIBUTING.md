@@ -19,6 +19,13 @@ clone the repository, then run:
 make verify
 ```
 
+Development requires Bash 4.4 or newer, GNU Make 4.3 behavior or newer, and the
+target-specific tools reported by preflight on a supported local same-device
+filesystem. Install them using your system documentation; repository scripts
+must not assume or invoke a distro package manager. Run from the physical
+project root. Extracted source can run applicable development targets, but
+`package` and `release-check` require the exact Git root with a valid HEAD.
+
 Use test-driven development for behavior changes:
 
 1. Add a focused Bats test and observe it fail for the intended reason.
@@ -30,9 +37,10 @@ Tests must remain offline and deterministic. Never add an upstream Devin
 Desktop package or captured user data to a fixture. The miniature package
 fixture under `tests/fixtures` is generated locally from harmless test files.
 
-The public coverage gate requires at least 90% line coverage across `bin/` and
-`scripts/`. Install Ruby and Bundler, then install the exact locked dependency
-set and run:
+The public coverage gate ratchets at 84% line coverage across `bin/` and
+`scripts/`. Do not lower the ratchet; 90% remains the follow-up target as
+failure-path coverage grows. Install Ruby and Bundler, then install the exact
+locked dependency set and run:
 
 ```bash
 bundle install
@@ -41,6 +49,18 @@ bundle exec make coverage
 
 Coverage is a backstop, not a substitute for behavior assertions. New failure
 paths should be exercised through the public command whenever practical.
+
+The canonical `portable-canonical` Ubuntu job owns lint and exactly one
+coverage-owned full suite. `portable-debian`, `portable-fedora`, and
+`portable-minimum-toolchain` own only the focused offline smoke set; do not add
+a duplicate full-suite gate to those jobs. The manifest canary is the sole live
+request path.
+
+Do not use the removed `MANAGER` override: Make targets deliberately execute
+checkout source. Keep `COVERAGE_DIR` and `DIST_DIR` project-relative rather than
+redirecting generated output outside-root. On a busy or recoverable status 1,
+preserve state and retry the same command after applying its remediation. A
+direct helper status 2 is usage failure; Make assertions use zero/nonzero.
 
 ## Pull requests
 

@@ -14,10 +14,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
-    name: Offline verification
+  portable-canonical:
+    name: Canonical Ubuntu lint and coverage
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -41,5 +41,63 @@ jobs:
 
       - name: Run offline quality gate
         run: |
+          test "$(id -u)" -ne 0
+          printf 'Observed moving Ubuntu tool versions (evidence, not pins):\n'
+          bash --version | sed -n '1p'
+          make --version | sed -n '1p'
           make lint
           bundle exec make coverage
+
+      - name: Run isolated focused portability smoke
+        run: sudo env HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" unshare --net --setuid "$(id -u)" --setgid "$(id -g)" -- tests/run-portability-smoke --assert-offline
+
+  portable-debian:
+    name: Focused Debian-family userspace
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      BASE_IMAGE: debian@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
+      TAG: portability-debian
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build reviewed userspace and run focused smoke
+        run: |
+          docker build --build-arg BASE_IMAGE="$BASE_IMAGE" -f tests/fixtures/portability-userland.Dockerfile -t "$TAG" .
+          IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$TAG")"
+          [[ "$IMAGE_ID" == sha256:* ]]
+          docker run --rm --network none --user 10001:10001 --read-only --tmpfs /tmp:rw,exec,uid=10001,gid=10001,mode=1777 -v "$PWD:/workspace:ro" -w /workspace -e HOME=/tmp/home -e TMPDIR=/tmp "$IMAGE_ID" tests/run-portability-smoke --assert-offline
+
+  portable-fedora:
+    name: Focused Fedora userspace
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      BASE_IMAGE: fedora@sha256:52cfb35e60823b691af7541b576c0fa49195628044b2c1a15b0ae775ec01048e
+      TAG: portability-fedora
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build reviewed userspace and run focused smoke
+        run: |
+          docker build --build-arg BASE_IMAGE="$BASE_IMAGE" -f tests/fixtures/portability-userland.Dockerfile -t "$TAG" .
+          IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$TAG")"
+          [[ "$IMAGE_ID" == sha256:* ]]
+          docker run --rm --network none --user 10001:10001 --read-only --tmpfs /tmp:rw,exec,uid=10001,gid=10001,mode=1777 -v "$PWD:/workspace:ro" -w /workspace -e HOME=/tmp/home -e TMPDIR=/tmp "$IMAGE_ID" tests/run-portability-smoke --assert-offline
+
+  portable-minimum-toolchain:
+    name: Focused Bash 4.4 and GNU Make 4.3
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      BASE_IMAGE: debian@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
+      TAG: portability-minimum-toolchain
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build checksummed toolchain and run focused smoke
+        run: |
+          docker build --build-arg BASE_IMAGE="$BASE_IMAGE" -f tests/fixtures/minimum-toolchain.Dockerfile -t "$TAG" .
+          IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$TAG")"
+          [[ "$IMAGE_ID" == sha256:* ]]
+          docker run --rm --network none --user 10001:10001 --read-only --tmpfs /tmp:rw,exec,uid=10001,gid=10001,mode=1777 -v "$PWD:/workspace:ro" -w /workspace -e HOME=/tmp/home -e TMPDIR=/tmp "$IMAGE_ID" tests/run-portability-smoke --assert-offline

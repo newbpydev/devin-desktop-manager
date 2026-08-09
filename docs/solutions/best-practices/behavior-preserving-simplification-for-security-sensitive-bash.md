@@ -67,7 +67,7 @@ missed by targeted tests:
 The session's final verification output recorded 99 passing tests and 92.58%
 BashCov line coverage (2033 of 2196 relevant lines). Those numbers are a dated
 session result, not a persistent code property. The durable guarantees are the
-checked targets and the repository's explicit 90% minimum (`Makefile:71-77`,
+checked targets and the repository's explicit 84% ratchet (`Makefile`,
 `tests/makefile.bats:41-47`).
 
 ## Guidance

@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+export LC_ALL=C TZ=UTC
+
+usage() {
+  printf 'Usage: tests/run-portability-smoke --assert-offline\n' >&2
+  exit 2
+}
+
+fail() {
+  printf 'portability-smoke: %s\n' "$1" >&2
+  exit 1
+}
+
+[[ "$#" -eq 1 && "$1" == --assert-offline ]] || usage
+[[ "$(id -u)" -ne 0 ]] || fail 'must run as a non-root user'
+[[ -r /proc/net/dev ]] || fail 'cannot inspect network isolation'
+
+interfaces=()
+while IFS= read -r interface; do
+  [[ "${interface}" != *'|'* ]] || continue
+  interface="${interface%%:*}"
+  interface="${interface//[[:space:]]/}"
+  [[ -z "${interface}" ]] || interfaces+=("${interface}")
+done </proc/net/dev
+[[ "${#interfaces[@]}" -eq 1 && "${interfaces[0]}" == lo ]] ||
+  fail 'external isolation is required; only the loopback interface may exist'
+
+if curl --disable --silent --show-error --max-time 2 --connect-timeout 2 \
+  https://example.com/ >/dev/null 2>&1; then
+  fail 'network isolation sentinel unexpectedly reached the public network'
+fi
+
+printf 'Portability smoke toolchain:\n'
+bash --version | sed -n '1p'
+make --version | sed -n '1p'
+
+mkdir -p -- "${HOME:?}" "${TMPDIR:?}"
+
+filter='^\[PMC-(U1-R0[134]|U2-R0[2345]|U3-R0[2357]|U10-R0[14]|U5-R0[25]|U6-R0[12]|U7-R02|U8-R0[1-4])\]'
+files=(
+  tests/makefile.bats
+  tests/preflight.bats
+  tests/output-lock.bats
+  tests/manager.bats
+  tests/coverage.bats
+  tests/release-check.bats
+  tests/repository.bats
+)
+
+if [[ "${PORTABILITY_SMOKE_SKIP_TESTS:-0}" == 1 ]]; then
+  fail 'No tests were selected'
+fi
+
+output="$(mktemp "${TMPDIR}/portability-smoke.XXXXXX")"
+trap 'rm -f -- "${output}"' EXIT
+status=0
+bats --filter "${filter}" "${files[@]}" >"${output}" 2>&1 || status=$?
+cat "${output}"
+grep -Eq '^1\.\.0([[:space:]]|$)' "${output}" && fail 'No tests were selected'
+[[ "${status}" -eq 0 ]] || fail 'focused portability tests failed'

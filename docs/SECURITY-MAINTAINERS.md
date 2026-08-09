@@ -7,6 +7,8 @@
 - Restrict tag creation for `v*` to maintainers.
 - Enable immutable releases when available.
 - Keep Dependabot updates enabled for GitHub Actions.
+- Require `portable-canonical`, `portable-debian`, `portable-fedora`, and
+  `portable-minimum-toolchain`; canonical owns the only full coverage suite.
 
 These hosted settings cannot be enforced by repository files and must be
 checked after the repository is created.
@@ -30,6 +32,15 @@ checked after the repository is created.
    implications.
 4. Request a CVE through the GitHub security advisory when appropriate.
 5. Agree on disclosure timing with the reporter.
+
+All ordinary tests and portability lanes must remain offline and non-root; only
+the isolated scheduled manifest canary may perform a live request. Keep action
+SHAs, base-image digests, and minimum Bash 4.4/GNU Make 4.3 source checksums
+reviewed and literal. Do not add package manager assumptions to user
+remediation. Treat the exact Git root, local same-device filesystem, checkout
+manager identity, project-relative output, and one-pair release handoff as
+security boundaries. For a recoverable status 1, preserve evidence and retry
+the same command; status 2 identifies invalid direct-helper use.
 
 ## Release and disclosure
 

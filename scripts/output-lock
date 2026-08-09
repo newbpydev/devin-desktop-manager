@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+umask 077
+
+while read -r _ _ function_name; do
+  unset -f "${function_name}" 2>/dev/null || true
+done < <(declare -F)
+
+usage() {
+  printf 'Usage: output-lock PROJECT_ROOT -- HELPER [ARGS]\n' >&2
+  exit 2
+}
+
+fail() {
+  printf '%s: error: output lock %s: %s\n' "$1" "$2" "$3" >&2
+  exit 1
+}
+
+validate_root() {
+  local root="$1" physical
+  [[ "${root}" == /* && "${root}" != *[!\ -~]* && -d "${root}" && ! -L "${root}" ]] ||
+    usage
+  physical="$(CDPATH='' cd -P -- "${root}" 2>/dev/null && pwd -P)" || usage
+  [[ "${root%/}" == "${physical}" ]] || usage
+  printf '%s\n' "${physical}"
+}
+
+target_for_helper() {
+  case "$1" in
+    scripts/run-coverage) printf 'coverage\n' ;;
+    scripts/package-release) printf 'package\n' ;;
+    scripts/clean-generated) printf 'clean\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+main() {
+  (($# >= 3)) || usage
+  local root helper relative target lock script_dir preflight_output
+  local flock_command stat_command parent_metadata parent_uid parent_mode parent_type
+  local filesystem_type descriptor_metadata path_metadata
+
+  root="$(validate_root "$1")"
+  [[ "$2" == -- ]] || usage
+  helper="$3"
+  shift 3
+
+  [[ "${helper}" == "${root}/"* ]] || usage
+  relative="${helper#"${root}/"}"
+  target="$(target_for_helper "${relative}")" || usage
+  [[ "${helper}" == "${root}/${relative}" && -f "${helper}" && ! -L "${helper}" && -x "${helper}" ]] ||
+    usage
+
+  script_dir="${BASH_SOURCE[0]%/*}"
+  [[ "${script_dir}" != "${BASH_SOURCE[0]}" ]] || script_dir=.
+  script_dir="$(CDPATH='' cd -P -- "${script_dir}" && pwd -P)"
+  [[ "${script_dir}" == "${root}/scripts" ]] || usage
+  if ! preflight_output="$("${script_dir}/preflight" output-lock --project-root "${root}" 2>&1)"; then
+    fail "${target}" capability \
+      "${root}/.devin-desktop-manager.outputs.lock is unavailable; ${preflight_output:-required flock/stat capability failed}"
+  fi
+
+  flock_command="$(type -P -- flock 2>/dev/null || true)"
+  stat_command="$(type -P -- stat 2>/dev/null || true)"
+  [[ "${flock_command}" == /* && "${stat_command}" == /* ]] ||
+    fail "${target}" capability 'required flock/stat commands are unavailable'
+
+  parent_metadata="$("${stat_command}" -Lc '%u:%a:%F' -- "${root}" 2>/dev/null)" ||
+    fail "${target}" parent "cannot validate ${root}"
+  IFS=: read -r parent_uid parent_mode parent_type <<<"${parent_metadata}"
+  [[ "${parent_uid}" == "${UID}" && "${parent_type}" == directory &&
+    "${parent_mode}" =~ ^[0-7]{3,4}$ &&
+    $((8#${parent_mode} & 8#022)) -eq 0 ]] ||
+    fail "${target}" parent \
+      "${root} must be a current-UID directory that is not group/world writable"
+
+  filesystem_type="$("${stat_command}" -f -c '%T' -- "${root}" 2>/dev/null)" ||
+    fail "${target}" capability "cannot identify the local filesystem for ${root}"
+  case "${filesystem_type}" in
+    nfs*|cifs|smb*|fuse*|9p|ceph|afs|autofs)
+      fail "${target}" capability \
+        "${root} uses unsupported lock filesystem ${filesystem_type}"
+      ;;
+  esac
+
+  lock="${root}/.devin-desktop-manager.outputs.lock"
+  if [[ ! -e "${lock}" && ! -L "${lock}" ]]; then
+    (set -o noclobber; : >"${lock}") 2>/dev/null || true
+  fi
+  [[ -e "${lock}" && ! -L "${lock}" ]] ||
+    fail "${target}" resource "${lock} must be a persistent regular file; do not delete it; correct the path and retry"
+
+  path_metadata="$("${stat_command}" -Lc '%d:%i:%u:%F:%h' -- "${lock}" 2>/dev/null)" ||
+    fail "${target}" resource "cannot validate ${lock}; do not delete it; retry"
+  [[ "${path_metadata}" == *":${UID}:regular"*":1" ]] ||
+    fail "${target}" resource \
+      "${lock} must be a current-UID regular single-link file; do not delete it; correct the path and retry"
+
+  exec 6<>"${lock}" ||
+    fail "${target}" resource "cannot open ${lock}; do not delete it; correct permissions and retry"
+  descriptor_metadata="$("${stat_command}" -Lc '%d:%i:%u:%F:%h' -- /proc/$$/fd/6 2>/dev/null)" ||
+    fail "${target}" capability "cannot validate the opened inode for ${lock}"
+  path_metadata="$("${stat_command}" -Lc '%d:%i:%u:%F:%h' -- "${lock}" 2>/dev/null)" ||
+    fail "${target}" resource "cannot validate ${lock}; do not delete it; retry"
+  [[ "${descriptor_metadata}" == "${path_metadata}" &&
+    "${descriptor_metadata}" == *":${UID}:regular"*":1" ]] ||
+    fail "${target}" resource \
+      "${lock} must be the current-UID regular single-link opened inode; do not delete it; correct the path and retry"
+
+  if ! "${flock_command}" -n 6; then
+    fail "${target}" busy \
+      "${lock} is held by another output operation; do not delete the lock file; retry after that operation exits"
+  fi
+
+  descriptor_metadata="$("${stat_command}" -Lc '%d:%i:%u:%F:%h' -- /proc/$$/fd/6 2>/dev/null)" ||
+    fail "${target}" capability "cannot revalidate the opened inode for ${lock}"
+  path_metadata="$("${stat_command}" -Lc '%d:%i:%u:%F:%h' -- "${lock}" 2>/dev/null)" ||
+    fail "${target}" resource "cannot revalidate ${lock}; do not delete it; retry"
+  [[ "${descriptor_metadata}" == "${path_metadata}" &&
+    "${descriptor_metadata}" == *":${UID}:regular"*":1" ]] ||
+    fail "${target}" resource \
+      "${lock} changed during acquisition; do not delete the lock file; retry"
+
+  exec "${helper}" --output-lock-fd 6 "$@"
+}
+
+main "$@"

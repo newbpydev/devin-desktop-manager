@@ -3,11 +3,92 @@
 set -Eeuo pipefail
 umask 077
 
+while read -r _ _ function_name; do
+  unset -f "${function_name}" 2>/dev/null || true
+done < <(declare -F)
+
+((BASH_VERSINFO[0] > 4 ||
+  (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4))) || {
+  printf 'install-manager: Bash 4.4 or newer is required\n' >&2
+  exit 1
+}
+
 readonly PROJECT_ID="io.github.newbpydev.devin-desktop-manager"
 
 usage() {
-  printf 'Usage: install-manager [--link] SOURCE DESTINATION\n' >&2
+  printf '%s\n' 'Usage: install-manager [--link] [--canonical [--publication-lock-fd 9 --lifecycle-lock-fd 8 [--legacy-lock-fd 7]]] SOURCE DESTINATION' >&2
   exit 2
+}
+
+die() {
+  printf 'install-manager: error: %s\n' "$*" >&2
+  exit 1
+}
+
+validate_lock_parent() {
+  local path="$1" label="$2" owner permissions
+
+  [[ -d "${path}" && ! -L "${path}" ]] ||
+    die "${label} parent must be a non-symbolic directory: ${path}"
+  owner="$(stat -c '%u' -- "${path}")" || die "could not inspect ${label} parent: ${path}"
+  permissions="$(stat -c '%a' -- "${path}")" || die "could not inspect ${label} parent: ${path}"
+  [[ "${owner}" == "${EUID}" ]] || die "${label} parent must be owned by the current user: ${path}"
+  permissions="${permissions: -3}"
+  ((((8#${permissions:1:1}) & 2) == 0 && ((8#${permissions:2:1}) & 2) == 0)) ||
+    die "${label} parent must not be writable by other users: ${path}"
+}
+
+validate_descriptor_identity() {
+  local fd="$1" expected="$2" label="$3" path_identity descriptor_identity
+  local owner file_type links
+
+  [[ "${fd}" =~ ^[0-9]+$ && -e "/proc/self/fd/${fd}" ]] ||
+    die "${label} lock descriptor ${fd} is not open"
+  [[ -f "${expected}" && ! -L "${expected}" ]] ||
+    die "${label} lock must be a non-symbolic regular file: ${expected}"
+  path_identity="$(stat -Lc '%d:%i:%u:%F:%h' -- "${expected}")" ||
+    die "could not inspect ${label} lock: ${expected}"
+  descriptor_identity="$(stat -Lc '%d:%i:%u:%F:%h' -- "/proc/self/fd/${fd}")" ||
+    die "could not inspect ${label} lock descriptor ${fd}"
+  IFS=: read -r _ _ owner file_type links <<<"${path_identity}"
+  [[ "${path_identity}" == "${descriptor_identity}" && "${owner}" == "${EUID}" &&
+    ( "${file_type}" == "regular file" || "${file_type}" == "regular empty file" ) &&
+    ( "${links}" == 1 || ( "${label}" == "legacy manager lifecycle" && "${links}" == 2 ) ) ]] ||
+    die "${label} lock descriptor ${fd} does not match its safe lock path: ${expected}"
+}
+
+validate_locked_descriptor() {
+  local fd="$1" expected="$2" label="$3"
+
+  [[ "${fd}" =~ ^[0-9]+$ && -e "/proc/self/fd/${fd}" ]] ||
+    die "${label} lock descriptor ${fd} is not open"
+  flock -n "${fd}" ||
+    die "another ${label} operation is active; do not delete the lock file; rerun the same command after it exits"
+  validate_descriptor_identity "${fd}" "${expected}" "${label}"
+}
+
+create_and_lock() {
+  local fd="$1" path="$2" label="$3" owner links
+
+  if [[ ! -e "${path}" && ! -L "${path}" ]]; then
+    (set -o noclobber; : >"${path}") 2>/dev/null ||
+      [[ -e "${path}" || -L "${path}" ]] || die "could not create ${label} lock: ${path}"
+  fi
+  [[ -f "${path}" && ! -L "${path}" ]] ||
+    die "${label} lock must be a non-symbolic regular file: ${path}"
+  owner="$(stat -c '%u' -- "${path}")" || die "could not inspect ${label} lock: ${path}"
+  links="$(stat -c '%h' -- "${path}")" || die "could not inspect ${label} lock: ${path}"
+  [[ "${owner}" == "${EUID}" &&
+    ( "${links}" == 1 || ( "${label}" == "legacy manager lifecycle" && "${links}" == 2 ) ) ]] ||
+    die "${label} lock must be current-user owned and have one link: ${path}"
+  case "${fd}" in
+    9) exec 9<>"${path}" || die "could not open ${label} lock: ${path}" ;;
+    8) exec 8<>"${path}" || die "could not open ${label} lock: ${path}" ;;
+    7) exec 7<>"${path}" || die "could not open ${label} lock: ${path}" ;;
+    *) usage ;;
+  esac
+  validate_descriptor_identity "${fd}" "${path}" "${label}"
+  validate_locked_descriptor "${fd}" "${path}" "${label}"
 }
 
 is_manager_source() {
@@ -42,15 +123,33 @@ ensure_destination_manageable() {
 
 main() {
   local mode="copy"
-  local source destination temporary
+  local canonical=false source destination temporary script_dir
+  local publication_fd="" lifecycle_fd="" legacy_fd=""
+  local publication_lock lifecycle_lock legacy_lock state_home
 
-  if [[ "${1:-}" == "--link" ]]; then
-    mode="link"
-    shift
-  fi
+  while (($# > 0)); do
+    case "$1" in
+      --link) mode="link"; shift ;;
+      --canonical) canonical=true; shift ;;
+      --publication-lock-fd) (($# >= 2)) || usage; publication_fd="$2"; shift 2 ;;
+      --lifecycle-lock-fd) (($# >= 2)) || usage; lifecycle_fd="$2"; shift 2 ;;
+      --legacy-lock-fd) (($# >= 2)) || usage; legacy_fd="$2"; shift 2 ;;
+      --*) usage ;;
+      *) break ;;
+    esac
+  done
   (($# == 2)) || usage
   source="$1"
   destination="$2"
+
+  script_dir="${BASH_SOURCE[0]%/*}"
+  [[ "${script_dir}" != "${BASH_SOURCE[0]}" ]] || script_dir=.
+  script_dir="$(CDPATH='' cd -P -- "${script_dir}" && pwd -P)"
+  if [[ "${canonical}" == true ]]; then
+    "${script_dir}/preflight" install-manager
+  else
+    "${script_dir}/preflight" install-manager-custom
+  fi
 
   [[ -f "${source}" && -x "${source}" ]] ||
     {
@@ -66,6 +165,49 @@ main() {
     }
 
   ensure_destination_manageable "${source}" "${destination}"
+
+  if [[ "${canonical}" == true ]]; then
+    [[ -n "${HOME:-}" && "${HOME}" == /* && "${HOME}" != *[!\ -~]* ]] ||
+      die "HOME must be an absolute printable path for canonical publication"
+    [[ "${destination}" == "${HOME}/.local/bin/devin-desktop-manager" ]] ||
+      die "canonical destination must be ${HOME}/.local/bin/devin-desktop-manager"
+    [[ -z "${publication_fd}" || "${publication_fd}" == 9 ]] || usage
+    [[ -z "${lifecycle_fd}" || "${lifecycle_fd}" == 8 ]] || usage
+    [[ -z "${legacy_fd}" || "${legacy_fd}" == 7 ]] || usage
+    if [[ -n "${publication_fd}${lifecycle_fd}${legacy_fd}" &&
+      ( -z "${publication_fd}" || -z "${lifecycle_fd}" ) ]]; then
+      usage
+    fi
+
+    state_home="${XDG_STATE_HOME:-${HOME}/.local/state}"
+    [[ "${state_home}" == /* && "${state_home}" != *[!\ -~]* ]] ||
+      die "XDG_STATE_HOME must be an absolute printable path"
+
+    mkdir -p -- "${HOME}/.local/bin"
+    validate_lock_parent "${HOME}/.local/bin" "manager publication"
+    publication_lock="${HOME}/.local/bin/.devin-desktop-manager.publication.lock"
+    mkdir -p -- "${state_home}"
+    validate_lock_parent "${state_home}" "manager lifecycle"
+    lifecycle_lock="${state_home}/devin-desktop-manager.lock"
+    legacy_lock="${HOME}/.local/opt/devin-desktop/.manager.lock"
+
+    if [[ -n "${publication_fd}" ]]; then
+      validate_locked_descriptor 9 "${publication_lock}" "manager publication"
+      validate_locked_descriptor 8 "${lifecycle_lock}" "manager lifecycle"
+      if [[ -n "${legacy_fd}" ]]; then
+        validate_locked_descriptor 7 "${legacy_lock}" "legacy manager lifecycle"
+      fi
+    else
+      create_and_lock 9 "${publication_lock}" "manager publication"
+      create_and_lock 8 "${lifecycle_lock}" "manager lifecycle"
+      if [[ -e "${legacy_lock}" || -L "${legacy_lock}" ]]; then
+        create_and_lock 7 "${legacy_lock}" "legacy manager lifecycle"
+      fi
+    fi
+  elif [[ -n "${publication_fd}${lifecycle_fd}${legacy_fd}" ]]; then
+    usage
+  fi
+
   mkdir -p -- "$(dirname "${destination}")"
 
   temporary="$(mktemp "${destination}.tmp.XXXXXX")"

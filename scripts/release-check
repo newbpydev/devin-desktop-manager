@@ -1,65 +1,193 @@
 #!/usr/bin/env bash
 
 set -Eeuo pipefail
+export LC_ALL=C TZ=UTC
+
+while read -r _ _ function_name; do
+  unset -f "${function_name}" 2>/dev/null || true
+done < <(declare -F)
 
 usage() {
-  printf 'Usage: release-check VERSION\n' >&2
+  printf 'Usage: release-check [--project-root ROOT] [--release-tag TAG] VERSION\n' >&2
   exit 2
 }
 
+fail() {
+  printf 'release-check: %s\n' "$1" >&2
+  exit 1
+}
+
+physical_root() {
+  local value="$1" physical
+  [[ "${value}" == /* && "${value}" != *[!\ -~]* && -d "${value}" && ! -L "${value}" ]] ||
+    fail 'project root must be an absolute directory with a physical path'
+  physical="$(CDPATH='' cd -P -- "${value}" 2>/dev/null && pwd -P)" ||
+    fail 'project root cannot be resolved physically'
+  [[ "${value%/}" == "${physical}" ]] || fail 'project root must not contain symbolic components'
+  printf '%s\n' "${physical}"
+}
+
+canonical_dist() {
+  local root="$1" value="$2" candidate current component
+  [[ -n "${value}" && "${value}" != /* && "${value}" != *[!\ -~]* ]] ||
+    fail 'package handoff directory must be one printable project-relative path'
+  case "/${value}/" in
+    */../*|*/./*|*//*) fail 'package handoff directory must stay beneath the exact Git root' ;;
+  esac
+  current="${root}"
+  IFS=/ read -r -a components <<<"${value}"
+  for component in "${components[@]}"; do
+    current="${current}/${component}"
+    [[ ! -L "${current}" ]] || fail 'package handoff directory must not contain symbolic components'
+  done
+  candidate="$(readlink -m -- "${root}/${value}" 2>/dev/null)" ||
+    fail 'package handoff directory cannot be canonicalized'
+  [[ "${candidate}" == "${root}/"* && -d "${candidate}" && ! -L "${candidate}" ]] ||
+    fail 'package handoff directory must exist beneath the exact Git root'
+  printf '%s\n' "${candidate}"
+}
+
+canonical_generated_root() {
+  local root="$1" value="$2" label="$3" candidate current component
+  [[ -n "${value}" && "${value}" != /* && "${value}" != *[!\ -~]* ]] ||
+    fail "${label} must be one printable project-relative path"
+  case "/${value}/" in
+    */../*|*/./*|*//*) fail "${label} must stay beneath the exact Git root" ;;
+  esac
+  current="${root}"
+  IFS=/ read -r -a components <<<"${value}"
+  for component in "${components[@]}"; do
+    current="${current}/${component}"
+    [[ ! -L "${current}" ]] || fail "${label} must not contain symbolic components"
+  done
+  candidate="$(readlink -m -- "${root}/${value}" 2>/dev/null)" ||
+    fail "${label} cannot be canonicalized"
+  [[ "${candidate}" == "${root}/"* ]] ||
+    fail "${label} must stay beneath the exact Git root"
+  [[ ! -e "${candidate}" || (-d "${candidate}" && ! -L "${candidate}") ]] ||
+    fail "${label} must be a directory"
+  printf '%s\n' "${candidate}"
+}
+
+release_status_excluding_generated() {
+  local root="$1" package_root="$2" coverage_root="$3"
+  local package_relative coverage_relative generated_root tracked
+  package_relative="${package_root#"${root}"/}"
+  coverage_relative="${coverage_root#"${root}"/}"
+  for generated_root in "${package_relative}" "${coverage_relative}"; do
+    tracked="$(git -C "${root}" ls-files -- \
+      ":(top,literal)${generated_root}")" ||
+      fail 'cannot inspect generated output ownership'
+    [[ -z "${tracked}" ]] ||
+      fail 'generated output roots must not contain tracked release inputs'
+  done
+  git -C "${root}" status --porcelain --untracked-files=normal -- . \
+    ":(top,exclude,literal)${package_relative}" \
+    ":(top,exclude,literal)${coverage_relative}"
+}
+
+validate_exact_git_root() {
+  local root="$1" top head
+  head="$(git -C "${root}" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" ||
+    fail 'selected project root must be the exact Git root with a valid HEAD'
+  top="$(git -C "${root}" rev-parse --show-toplevel 2>/dev/null)" ||
+    fail 'selected project root must be the exact Git root with a valid HEAD'
+  top="$(CDPATH='' cd -P -- "${top}" 2>/dev/null && pwd -P)" ||
+    fail 'Git top-level cannot be resolved physically'
+  [[ "${top}" == "${root}" ]] ||
+    fail 'selected project root must be the exact Git root with a valid HEAD'
+  printf '%s\n' "${head}"
+}
+
+validate_handoff() {
+  local root="$1" version="$2" dist expected candidate name
+  dist="$(canonical_dist "${root}" "${MAKE_DIST_DIR:-dist}")"
+  expected="devin-desktop-manager-${version}.tar.gz"
+  # shellcheck source=scripts/lib/package-output.bash
+  source "${root}/scripts/lib/package-output.bash"
+  _package_classify "${dist}" ||
+    fail "package handoff is unsafe (${_PACKAGE_REASON})"
+  [[ "${_PACKAGE_STATE}" == public-valid &&
+    "${_PACKAGE_PUBLIC_ARCHIVE}" == "${dist}/${expected}" ]] ||
+    fail 'package handoff must contain exactly the expected public archive/checksum pair'
+  shopt -s nullglob
+  for candidate in "${dist}"/*.tar.gz "${dist}"/SHA256SUMS*; do
+    name="${candidate##*/}"
+    [[ "${name}" == "${expected}" || "${name}" == SHA256SUMS ]] ||
+      fail 'package handoff contains an extra archive or checksum file'
+  done
+  shopt -u nullglob
+}
+
 main() {
-  local version="${1:-}"
-  local project_root manager_version make_version release_tag
-
+  local root_value="" release_tag="" version script_dir root head profile
+  local manager_version make_version tag_type peeled workflow_commit status
+  local package_root coverage_root
+  while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+      --project-root)
+        [[ -z "${root_value}" && -n "${2:-}" ]] || usage
+        root_value="$2"
+        shift 2
+        ;;
+      --release-tag)
+        [[ -z "${release_tag}" && -n "${2:-}" ]] || usage
+        release_tag="$2"
+        shift 2
+        ;;
+      *) usage ;;
+    esac
+  done
   (($# == 1)) || usage
-  project_root="${RELEASE_CHECK_PROJECT_ROOT:-}"
-  if [[ -z "${project_root}" ]]; then
-    project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  version="$1"
+  [[ "${version}" =~ ^[0-9]+[.][0-9]+[.][0-9]+([.-][0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] ||
+    fail "invalid release version: ${version}"
+  script_dir="$(CDPATH='' cd -P -- "${BASH_SOURCE[0]%/*}" 2>/dev/null && pwd -P)" || usage
+  if [[ -n "${root_value}" ]]; then
+    root="$(physical_root "${root_value}")"
+  else
+    root="$(CDPATH='' cd -P -- "${script_dir}/.." 2>/dev/null && pwd -P)" || usage
   fi
-  [[ "${project_root}" == /* && -d "${project_root}" ]] ||
-    {
-      printf 'release-check: project root must be an absolute directory\n' >&2
-      exit 1
-    }
-  manager_version="$(
-    "${project_root}/bin/devin-desktop-manager" --version | awk '{print $2}'
-  )"
-  make_version="$(
-    awk '$1 == "VERSION" && $2 == ":=" {print $3; exit}' "${project_root}/Makefile"
-  )"
+  head="$(validate_exact_git_root "${root}")"
+  if [[ -n "${release_tag}" ]]; then
+    profile=release-contract-official
+  else
+    profile=release-contract
+  fi
+  "${root}/scripts/preflight" "${profile}" --project-root "${root}"
 
+  manager_version="$("${root}/bin/devin-desktop-manager" --version | awk '{print $2}')"
+  make_version="$(awk '$1 == "VERSION" && $2 == ":=" {print $3; exit}' "${root}/Makefile")"
   [[ "${manager_version}" == "${version}" ]] ||
-    {
-      printf 'release-check: manager version %s does not match %s\n' \
-        "${manager_version}" "${version}" >&2
-      exit 1
-    }
+    fail "manager version ${manager_version} does not match ${version}"
   [[ "${make_version}" == "${version}" ]] ||
-    {
-      printf 'release-check: Makefile version %s does not match %s\n' \
-        "${make_version}" "${version}" >&2
-      exit 1
-    }
-  grep -Fq "## [${version}]" "${project_root}/CHANGELOG.md" ||
-    {
-      printf 'release-check: CHANGELOG.md has no %s release entry\n' \
-        "${version}" >&2
-      exit 1
-    }
-  [[ -f "${project_root}/LICENSE" ]] ||
-    {
-      printf 'release-check: LICENSE is missing\n' >&2
-      exit 1
-    }
+    fail "Makefile version ${make_version} does not match ${version}"
+  grep -Fq "## [${version}]" "${root}/CHANGELOG.md" ||
+    fail "CHANGELOG.md has no ${version} release entry"
+  [[ -f "${root}/LICENSE" && ! -L "${root}/LICENSE" ]] || fail 'LICENSE is missing'
 
-  release_tag="${RELEASE_TAG:-}"
-  if [[ -z "${release_tag}" && "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
-    release_tag="${GITHUB_REF_NAME:-}"
-  fi
-  if [[ -n "${release_tag}" && "${release_tag}" != "v${version}" ]]; then
-    printf 'release-check: tag %s must match v%s\n' \
-      "${release_tag}" "${version}" >&2
-    exit 1
+  [[ -z "${release_tag}" || "${release_tag}" == "v${version}" ]] ||
+    fail "tag ${release_tag} must match v${version}"
+  if [[ -n "${release_tag}" ]]; then
+    package_root="$(canonical_generated_root "${root}" \
+      "${MAKE_DIST_DIR:-dist}" DIST_DIR)"
+    coverage_root="$(canonical_generated_root "${root}" \
+      "${MAKE_COVERAGE_DIR:-coverage}" COVERAGE_DIR)"
+    [[ "${package_root}" != "${coverage_root}" &&
+      "${package_root}" != "${coverage_root}/"* &&
+      "${coverage_root}" != "${package_root}/"* ]] ||
+      fail 'DIST_DIR and COVERAGE_DIR must be separate non-nested paths'
+    status="$(release_status_excluding_generated \
+      "${root}" "${package_root}" "${coverage_root}")" ||
+      fail 'cannot inspect the release working tree'
+    [[ -z "${status}" ]] || fail 'official release requires a clean index and working tree'
+    tag_type="$(git -C "${root}" cat-file -t "refs/tags/${release_tag}" 2>/dev/null || true)"
+    [[ "${tag_type}" == tag ]] || fail "official release requires annotated tag ${release_tag}"
+    peeled="$(git -C "${root}" rev-parse "refs/tags/${release_tag}^{commit}" 2>/dev/null || true)"
+    [[ "${peeled}" == "${head}" ]] || fail "annotated tag ${release_tag} does not identify HEAD"
+    workflow_commit="${GITHUB_SHA:-${head}}"
+    [[ "${workflow_commit}" == "${head}" ]] || fail 'workflow commit does not identify HEAD'
+    validate_handoff "${root}" "${version}"
   fi
 
   printf 'Release contract is consistent for v%s\n' "${version}"

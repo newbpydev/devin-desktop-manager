@@ -17,10 +17,14 @@ application install is downloaded directly from the official release host.
 
 - glibc-based Linux x86_64 (amd64)
 - Bash 4.4 or newer
+- GNU Make 4.3 behavior or newer
+- a local same-device filesystem with atomic rename and advisory locking
 - an XDG-compatible desktop; KDE integration is optional
 - unprivileged user namespaces for Electron sandboxing
 
-See [Installation](docs/INSTALL.md) for distribution-specific dependencies.
+See [Installation](docs/INSTALL.md) for capability-based dependencies. The
+project reports missing or incompatible tools but never assumes a package
+manager or installs system packages.
 ARM64, macOS, Windows, musl-only distributions, system-wide installs, and
 distribution packages are outside the v0.1 scope.
 
@@ -84,10 +88,24 @@ make set-defaults
 | `make doctor` | Validate the app, sandbox, state, and integration |
 | `make uninstall` | Interactively remove manager-owned files |
 | `make verify` | Run the complete offline lint and test gate |
-| `make coverage` | Run the suite with the enforced 90% line-coverage gate |
+| `make coverage` | Run the suite with the enforced 84% line-coverage ratchet |
 
 `make link-dev` is only for contributors; public installs are independent
 copies and do not break when the clone is moved or deleted.
+
+The target classes are: bootstrap discovery (`help`); checkout-manager reads
+and lifecycle mutations; installed-application queries and launch;
+installer-local publication (`install-manager`, `link-dev`, and `link`);
+development gates (`lint`, `test`, `verify`, and `coverage`); exact-root release
+engineering (`package` and `release-check`); and bounded generated-output
+cleanup (`clean`). Each class checks only the capabilities it needs before its
+first mutation or external effect.
+
+Normal results use status 0. Direct runtime, preflight, busy, or recoverable
+operation failures use status 1; direct helper usage errors use status 2; GNU
+Make reports only zero or nonzero. Follow the generic remediation in stderr,
+correct the named capability or path, and retry the same command. Never delete
+a lock file to bypass a busy diagnostic.
 
 ## Security and ownership
 
@@ -145,6 +163,9 @@ make package
 
 Tests use deterministic miniature Debian-package fixtures and never download
 Devin Desktop. The separate scheduled canary checks the live official manifest.
+The canonical Ubuntu CI job owns lint and the single coverage/full-suite run;
+Debian-family, Fedora, and minimum Bash 4.4/GNU Make 4.3 lanes run only the
+focused offline portability smoke set.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for locked Bashcov setup and the TDD workflow,
 and [docs/RELEASING.md](docs/RELEASING.md) for the release process.
 

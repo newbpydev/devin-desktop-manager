@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+[[ $# == 5 ]] || exit 2
+bashcov="$1"
+bats="$2"
+ruby="$3"
+root="$4"
+output="$5"
+for executable in "${bashcov}" "${bats}" "${ruby}"; do
+  [[ "${executable}" == /* && -f "${executable}" && -x "${executable}" ]] || exit 2
+done
+[[ "${root}" == /* && -d "${root}/tests" && "${output}" == "${root}/"* && \
+  -d "${output}" && ! -L "${output}" ]] || exit 2
+
+unset COVERAGE_DIR
+shopt -s nullglob
+test_files=("${root}"/tests/*.bats)
+((${#test_files[@]} > 0)) || exit 1
+
+manager_test="${root}/tests/manager.bats"
+other_tests=()
+for test_file in "${test_files[@]}"; do
+  [[ "${test_file}" == "${manager_test}" ]] || other_tests+=("${test_file}")
+done
+
+parts="${output}/.parts"
+mkdir -m 0700 -- "${parts}"
+cleanup_parts() {
+  rm -rf -- "${parts}"
+}
+trap cleanup_parts EXIT
+
+resultsets=()
+run_partition() {
+  local name="$1"
+  shift
+  local partition="${parts}/${name}"
+  mkdir -m 0700 -- "${partition}"
+  COVERAGE_DIR="${partition}" BASHCOV_COMMAND_NAME="bats-suite-${name}" \
+    BASHCOV_CANONICAL_ROOT="${root}" \
+    BASH_ENV="${root}/tests/support/bashcov_functrace.bash" \
+    RUBYOPT="-r${root}/tests/support/bashcov_fixture_coverage" \
+    "${bashcov}" -- "${root}/tests/support/run_coverage_partition.bash" \
+      "${bats}" "$@"
+  resultsets+=("${partition}/.resultset.json")
+}
+
+((${#other_tests[@]} == 0)) || run_partition other "${other_tests[@]}"
+[[ ! -f "${manager_test}" ]] || run_partition manager "${manager_test}"
+((${#resultsets[@]} > 0)) || exit 1
+
+"${ruby}" "${root}/tests/support/collate_coverage.rb" \
+  "${root}" "${output}" bats-suite "${resultsets[@]}"
+cleanup_parts
+trap - EXIT

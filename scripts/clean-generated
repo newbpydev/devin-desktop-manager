@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+umask 077
+
+while read -r _ _ function_name; do
+  unset -f "${function_name}" 2>/dev/null || true
+done < <(declare -F)
+
+usage() {
+  printf 'Usage: clean-generated [--output-lock-fd 6] --project-root ROOT\n' >&2
+  exit 2
+}
+
+fail() {
+  printf 'clean: error: %s\n' "$1" >&2
+  exit 1
+}
+
+canonical_output() {
+  local root="$1" value="$2" label="$3" candidate component current
+  [[ -n "${value}" && "${value}" != /* && "${value}" != *[!\ -~]* ]] ||
+    fail "${label} must be one printable project-relative path"
+  case "/${value}/" in
+    */../*|*/./*|*//*) fail "${label} must stay beneath the project root" ;;
+  esac
+  current="${root}"
+  IFS=/ read -r -a components <<<"${value}"
+  for component in "${components[@]}"; do
+    current="${current}/${component}"
+    [[ ! -L "${current}" ]] || fail "${label} must not contain symbolic components"
+  done
+  candidate="$(readlink -m -- "${root}/${value}" 2>/dev/null)" ||
+    fail "${label} cannot be canonicalized"
+  [[ "${candidate}" == "${root}/"* ]] || fail "${label} must stay beneath the project root"
+  printf '%s\n' "${candidate}"
+}
+
+validate_lock() {
+  local root="$1" owner="${BASHPID}" lock descriptor lock_metadata
+  lock="${root}/.devin-desktop-manager.outputs.lock"
+  [[ -e "/proc/${owner}/fd/6" && -f "${lock}" && ! -L "${lock}" ]] || usage
+  descriptor="$(stat -Lc '%d:%i:%u:%F:%h' -- "/proc/${owner}/fd/6" 2>/dev/null)" || usage
+  lock_metadata="$(stat -Lc '%d:%i:%u:%F:%h' -- "${lock}" 2>/dev/null)" || usage
+  [[ "${descriptor}" == "${lock_metadata}" &&
+    "${lock_metadata}" == *":${UID}:regular"*" file:1" ]] || usage
+  if (exec 6>&-; flock -n "/proc/${owner}/fd/6" true) >/dev/null 2>&1; then
+    usage
+  fi
+  flock -n 6 >/dev/null 2>&1 || usage
+}
+
+repair_output() {
+  local domain="$1" root="$2" state="$3"
+  case "${state}" in
+    repair-backup|repair-partial|discard-stage|public-valid-cleanup)
+      "${domain}_repair" "${root}" "${state}" ||
+        fail "${domain} output changed during repair; inspect the preserved state and retry make clean"
+      ;;
+  esac
+}
+
+validate_coverage_removal_set() {
+  local root="$1" list="$2" path kind root_device
+  local count=0 saw_root=0
+  mapfile -d '' -t COVERAGE_REMOVALS <"${list}"
+  if [[ ! -e "${root}" && ! -L "${root}" ]]; then
+    ((${#COVERAGE_REMOVALS[@]} == 0)) || return 1
+    return 0
+  fi
+  root_device="$(stat -Lc '%d' -- "${root}" 2>/dev/null)" || return 1
+  for path in "${COVERAGE_REMOVALS[@]}"; do
+    count=$((count + 1))
+    [[ "${path}" == "${root}" || "${path}" == "${root}/"* ]] || return 1
+    [[ "${path}" != "${root}" ]] || saw_root=1
+    kind="$(_coverage_path_kind "${path}")"
+    case "${kind}" in directory|file) ;; *) return 1 ;; esac
+    [[ "$(stat -Lc '%d' -- "${path}" 2>/dev/null)" == "${root_device}" ]] || return 1
+  done
+  ((count > 0 && saw_root == 1))
+}
+
+validate_package_removal_set() {
+  local root="$1" list="$2" path name root_device
+  local archives=0 checksums=0
+  mapfile -d '' -t PACKAGE_REMOVALS <"${list}"
+  if [[ ! -e "${root}" && ! -L "${root}" ]]; then
+    ((${#PACKAGE_REMOVALS[@]} == 0)) || return 1
+    return 0
+  fi
+  root_device="$(stat -Lc '%d' -- "${root}" 2>/dev/null)" || return 1
+  ((${#PACKAGE_REMOVALS[@]} == 0 || ${#PACKAGE_REMOVALS[@]} == 2)) || return 1
+  for path in "${PACKAGE_REMOVALS[@]}"; do
+    [[ "${path}" == "${root}/"* ]] || return 1
+    name="${path##*/}"
+    if [[ "${name}" == SHA256SUMS ]]; then
+      checksums=$((checksums + 1))
+    elif _package_archive_name_valid "${name}"; then
+      archives=$((archives + 1))
+    else
+      return 1
+    fi
+    [[ "$(_package_path_kind "${path}")" == file ]] || return 1
+    [[ "$(stat -Lc '%d' -- "${path}" 2>/dev/null)" == "${root_device}" ]] || return 1
+  done
+  ((${#PACKAGE_REMOVALS[@]} == 0 || (archives == 1 && checksums == 1)))
+}
+
+remove_validated_sets() {
+  local coverage_root="$1" dist_root="$2" index path
+  for ((index = ${#COVERAGE_REMOVALS[@]} - 1; index >= 0; index--)); do
+    path="${COVERAGE_REMOVALS[index]}"
+    if [[ -d "${path}" && ! -L "${path}" ]]; then
+      rmdir -- "${path}" || fail "could not remove validated coverage directory; retry make clean"
+    else
+      rm -f -- "${path}" || fail "could not remove validated coverage file; retry make clean"
+    fi
+  done
+  for path in "${PACKAGE_REMOVALS[@]}"; do
+    rm -f -- "${path}" || fail "could not remove validated package file; retry make clean"
+  done
+  [[ ! -d "${dist_root}" || -L "${dist_root}" ]] || rmdir -- "${dist_root}" 2>/dev/null || true
+}
+
+main() {
+  local lock_fd="" root project_physical script_dir coverage_root dist_root
+  local coverage_status=0 package_status=0 coverage_state coverage_reason
+  local package_state package_reason coverage_list package_list
+  declare -ga COVERAGE_REMOVALS=() PACKAGE_REMOVALS=()
+
+  if [[ "${1:-}" == --output-lock-fd ]]; then
+    [[ "${2:-}" == 6 ]] || usage
+    lock_fd=6
+    shift 2
+  fi
+  [[ "${1:-}" == --project-root && $# == 2 ]] || usage
+  root="$2"
+  [[ "${root}" == /* && "${root}" != *[!\ -~]* && -d "${root}" && ! -L "${root}" ]] || usage
+  project_physical="$(CDPATH='' cd -P -- "${root}" 2>/dev/null && pwd -P)" || usage
+  [[ "${root%/}" == "${project_physical}" ]] || usage
+  root="${project_physical}"
+  script_dir="$(CDPATH='' cd -P -- "${BASH_SOURCE[0]%/*}" 2>/dev/null && pwd -P)" || usage
+  [[ "${script_dir}" == "${root}/scripts" ]] || usage
+
+  coverage_root="$(canonical_output "${root}" "${MAKE_COVERAGE_DIR:-coverage}" COVERAGE_DIR)"
+  dist_root="$(canonical_output "${root}" "${MAKE_DIST_DIR:-dist}" DIST_DIR)"
+  [[ "${coverage_root}" != "${dist_root}" && "${coverage_root}" != "${dist_root}/"* &&
+    "${dist_root}" != "${coverage_root}/"* ]] ||
+    fail 'COVERAGE_DIR and DIST_DIR must be separate non-nested paths'
+
+  if [[ -z "${lock_fd}" ]]; then
+    "${script_dir}/preflight" clean --project-root "${root}" || exit $?
+    exec "${script_dir}/output-lock" "${root}" -- \
+      "${script_dir}/clean-generated" --project-root "${root}"
+  fi
+  validate_lock "${root}"
+  # shellcheck source=scripts/lib/coverage-output.bash
+  source "${script_dir}/lib/coverage-output.bash"
+  # shellcheck source=scripts/lib/package-output.bash
+  source "${script_dir}/lib/package-output.bash"
+
+  _coverage_classify "${coverage_root}" || coverage_status=$?
+  coverage_state="${_COVERAGE_STATE}"
+  coverage_reason="${_COVERAGE_REASON}"
+  _package_classify "${dist_root}" || package_status=$?
+  package_state="${_PACKAGE_STATE}"
+  package_reason="${_PACKAGE_REASON}"
+  if ((coverage_status != 0 || package_status != 0)); then
+    fail "unsafe generated output (coverage=${coverage_reason:-safe}, dist=${package_reason:-safe}); coverage and dist were unchanged; correct the named candidate and retry make clean"
+  fi
+
+  repair_output coverage "${coverage_root}" "${coverage_state}"
+  repair_output package "${dist_root}" "${package_state}"
+  _coverage_classify "${coverage_root}" ||
+    fail "coverage output became unsafe (${_COVERAGE_REASON}); inspect it and retry make clean"
+  [[ "${_COVERAGE_STATE}" == absent || "${_COVERAGE_STATE}" == public-valid ]] ||
+    fail 'coverage output did not reach a removable state'
+  _package_classify "${dist_root}" ||
+    fail "package output became unsafe (${_PACKAGE_REASON}); inspect it and retry make clean"
+  [[ "${_PACKAGE_STATE}" == absent || "${_PACKAGE_STATE}" == public-valid ]] ||
+    fail 'package output did not reach a removable state'
+
+  coverage_list="$(mktemp "${TMPDIR:-/tmp}/devin-desktop-manager.clean-coverage.$$.XXXXXX")" ||
+    fail 'cannot create coverage removal list'
+  package_list="$(mktemp "${TMPDIR:-/tmp}/devin-desktop-manager.clean-package.$$.XXXXXX")" || {
+    rm -f -- "${coverage_list}"
+    fail 'cannot create package removal list'
+  }
+  cleanup_lists() { rm -f -- "${coverage_list}" "${package_list}"; }
+  trap cleanup_lists EXIT
+  coverage_removal_set "${coverage_root}" >"${coverage_list}" ||
+    fail 'coverage removal set could not be classified safely'
+  package_removal_set "${dist_root}" >"${package_list}" ||
+    fail 'package removal set could not be classified safely'
+  validate_coverage_removal_set "${coverage_root}" "${coverage_list}" ||
+    fail 'coverage removal set failed complete validation; no files were removed'
+  validate_package_removal_set "${dist_root}" "${package_list}" ||
+    fail 'package removal set failed complete validation; no files were removed'
+
+  remove_validated_sets "${coverage_root}" "${dist_root}"
+  trap - EXIT
+  cleanup_lists
+}
+
+main "$@"
