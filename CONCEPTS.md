@@ -39,11 +39,18 @@ A Managed Installation candidate created before ownership evidence was
 recorded, eligible to be claimed only after its recognized roots, release
 inventory, integration, and state pass legacy verification.
 
-The complete initial-manager profile additionally proves exact legacy desktop
-semantics, release-matching icon and MIME assets, and reversible provenance for
-every manager-looking user MIME association. `doctor` may describe that exact
-profile as a recoverable Legacy Installation, but mutating commands always
-classify it again under their lifecycle locks.
+An Initial-Manager Profile may be described by `doctor` as a recoverable Legacy
+Installation, but mutating commands always classify it again under their
+lifecycle locks.
+
+### Initial-Manager Profile
+
+The exact markerless Legacy Installation shape produced before ownership state
+was recorded, distinguished by matching release, desktop integration, and
+reversible user-association evidence.
+
+It is recoverable only when every ownership signal agrees; a modified,
+untraceable, or foreign-owned signal makes it a Legacy Conflict.
 
 ### Legacy Conflict
 
