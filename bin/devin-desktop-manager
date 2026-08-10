@@ -1748,7 +1748,7 @@ legacy_symlink_is_user_owned() {
 
 legacy_tree_is_user_owned_and_unmounted() {
   local root="$1"
-  local mountpoints
+  local mountpoint mountpoints
 
   legacy_directory_is_user_owned "${root}" || return 1
   user_directory_ancestry_is_safe "${root}" || return 1
@@ -1771,11 +1771,15 @@ legacy_tree_is_user_owned_and_unmounted() {
       }
       END { exit invalid ? 1 : 0 }
     ' || return 1
-  mountpoints="$({
-    find "${root}" -xdev \
-      -exec findmnt -rn --mountpoint {} -o TARGET \; 2>/dev/null
-  })" || return 1
-  [[ -z "${mountpoints}" ]]
+  mountpoints="$(
+    findmnt -rnR --target "${root}" -o TARGET 2>/dev/null
+  )" || return 1
+  while IFS= read -r mountpoint; do
+    [[ -n "${mountpoint}" ]] || continue
+    case "${mountpoint}" in
+      "${root}"|"${root}"/*) return 1 ;;
+    esac
+  done <<<"${mountpoints}"
 }
 
 legacy_release_tree_is_user_owned() {
@@ -1930,7 +1934,7 @@ legacy_reason_mime_key() {
 
 legacy_desktop_id_is_available() {
   local desktop_id="$1"
-  local data_directory
+  local candidate data_directory
   local -a data_directories=() system_data_directories=()
 
   is_safe_desktop_id "${desktop_id}" || return 1
@@ -1942,7 +1946,18 @@ legacy_desktop_id_is_available() {
     data_directories+=("${data_directory}")
   done
   for data_directory in "${data_directories[@]}"; do
-    [[ -f "${data_directory}/applications/${desktop_id}" ]] && return 0
+    candidate="${desktop_id}"
+    while :; do
+      case "/${candidate}/" in
+        */./*|*/../*) ;;
+        *)
+          [[ -f "${data_directory}/applications/${candidate}" ]] &&
+            return 0
+          ;;
+      esac
+      [[ "${candidate}" == *-* ]] || break
+      candidate="${candidate/-//}"
+    done
   done
   return 1
 }

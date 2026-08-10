@@ -875,11 +875,7 @@ EOF
   mkdir -p -- "${integration}/partial"
   cat >"${MOCK_BIN}/findmnt" <<'EOF'
 #!/usr/bin/env bash
-if [[ "$*" == *"${MOCK_FINDMNT_MOUNTPOINT:-}"* ]]; then
-  printf '%s\n' "${MOCK_FINDMNT_MOUNTPOINT}"
-  exit 0
-fi
-exit 1
+printf '%s\n' "${MOCK_FINDMNT_MOUNTPOINT}"
 EOF
   chmod 0755 "${MOCK_BIN}/findmnt"
 
@@ -887,6 +883,36 @@ EOF
     export MOCK_FINDMNT_MOUNTPOINT="${mounted_path}"
     assert_classification_refused release-inventory
   done
+}
+
+@test "[LIR-U1-R04] adopted tree mount scan snapshots once" {
+  local root="${TEST_HOME}/tree"
+  local findmnt_log="${CURL_LOG}.findmnt"
+
+  mkdir -p -- "${root}"
+  touch "${root}"/payload-{1..100}
+  cat >"${MOCK_BIN}/findmnt" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"${findmnt_log}"
+printf '/\n'
+EOF
+  chmod 0755 "${MOCK_BIN}/findmnt"
+
+  run env \
+    HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" \
+    bash -c '
+      source "$1"
+      legacy_tree_is_user_owned_and_unmounted "$2"
+    ' _ "${MANAGER}" "${root}"
+
+  [ "${status}" -eq 0 ]
+  [ "$(wc -l <"${findmnt_log}")" -eq 1 ]
+  grep -q -- '--target' "${findmnt_log}"
 }
 
 @test "[LIR-U1-R04] unsafe adopted root ancestry remains refused" {
@@ -1239,6 +1265,35 @@ EOF
 
   [ "${status}" -eq 0 ]
   [ "$(query_default x-scheme-handler/devin)" = "browser.desktop" ]
+}
+
+@test "[LIR-U2-R08] update resolves nested desktop ID fallbacks" {
+  local applications="${TEST_HOME}/.local/share/applications"
+  local state_file="${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
+
+  seed_complete_initial_manager_layout
+  mkdir -p -- "${applications}/vendor"
+  printf '%s\n' \
+    '[Desktop Entry]' \
+    'Type=Application' \
+    'Name=Editor' \
+    >"${applications}/vendor/editor.desktop"
+  sed -i \
+    's#^x-scheme-handler/devin=devin-desktop-url-handler.desktop;$#x-scheme-handler/devin=devin-desktop-url-handler.desktop;vendor-editor.desktop;#' \
+    "${DEFAULTS_FILE}"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  [ "$(jq -r '.originalDefaults["x-scheme-handler/devin"]' "${state_file}")" = \
+    "vendor-editor.desktop" ]
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [ "$(query_default x-scheme-handler/devin)" = "vendor-editor.desktop" ]
 }
 
 @test "[LIR-U2-R02] make install publishes the fixed manager and recovers the app" {
