@@ -884,7 +884,7 @@ require_download_commands() {
 }
 
 require_release_commands() {
-  require_commands jq sha256sum ldd readlink find findmnt timeout dirname
+  require_commands jq sha256sum ldd readlink find findmnt timeout dirname stat awk
 }
 
 require_mutation_commands() {

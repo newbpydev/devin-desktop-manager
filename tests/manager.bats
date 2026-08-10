@@ -1763,6 +1763,22 @@ EOF
     "${output}" == *$'\ndirname' ]]
 }
 
+@test "[PMC-U2-R02] release runtime includes classification capabilities" {
+  run env HOME="${TEST_HOME}" bash -c '
+    source "$1"
+    require_commands() {
+      printf "%s\n" "$@"
+    }
+    require_release_commands
+  ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *$'\nstat\n'* || "${output}" == stat$'\n'* ||
+    "${output}" == *$'\nstat' ]]
+  [[ "${output}" == *$'\nawk\n'* || "${output}" == awk$'\n'* ||
+    "${output}" == *$'\nawk' ]]
+}
+
 @test "[PMC-U2-R03] private profiles reject unknown commands as usage" {
   local stdout_file="${BATS_TEST_TMPDIR}/stdout"
   local stderr_file="${BATS_TEST_TMPDIR}/stderr"
