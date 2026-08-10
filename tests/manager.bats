@@ -888,6 +888,47 @@ EOF
   assert_classification_refused release-inventory
 }
 
+@test "[LIR-U1-R04] non-regular legacy executables remain refused" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local release executable backup
+
+  seed_complete_initial_manager_layout
+  release="${install_root}/$(readlink "${install_root}/current")"
+  for executable in \
+    "${release}/app/devin-desktop" \
+    "${release}/app/bin/devin-desktop"; do
+    backup="${BATS_TEST_TMPDIR}/$(basename "$(dirname "${executable}")")-devin-desktop"
+    cp -a -- "${executable}" "${backup}"
+    rm -f -- "${executable}"
+    mkdir -- "${executable}"
+    chmod 0755 "${executable}"
+    assert_classification_refused release-inventory
+    rmdir -- "${executable}"
+    mv -- "${backup}" "${executable}"
+  done
+}
+
+@test "[LIR-U1-R04] foreign-owned application symlink remains refused" {
+  local app_command="${TEST_HOME}/.local/bin/devin-desktop"
+  local real_stat
+
+  seed_complete_initial_manager_layout
+  real_stat="$(command -v stat)"
+  cat >"${MOCK_BIN}/stat" <<EOF
+#!/usr/bin/env bash
+for candidate in "\$@"; do
+  if [[ "\${candidate}" == "${app_command}" ]]; then
+    printf '%s\n' "$((EUID + 1))"
+    exit 0
+  fi
+done
+exec "${real_stat}" "\$@"
+EOF
+  chmod 0755 "${MOCK_BIN}/stat"
+
+  assert_classification_refused app-link
+}
+
 @test "[LIR-U1-R04] unsafe legacy integration parents remain refused" {
   local data_home="${TEST_HOME}/.local/share"
   local path
@@ -1062,6 +1103,49 @@ EOF
   [ "${status}" -eq 1 ]
   run grep -F 'devin-desktop.desktop' "${DEFAULTS_FILE}"
   [ "${status}" -eq 1 ]
+}
+
+@test "[LIR-U2-R08] update preserves legacy default fallbacks for uninstall" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local state_file="${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
+
+  seed_complete_initial_manager_layout
+  sed -i \
+    's#^x-scheme-handler/devin=devin-desktop-url-handler.desktop;$#x-scheme-handler/devin=devin-desktop-url-handler.desktop;browser.desktop;#' \
+    "${DEFAULTS_FILE}"
+  sed -i \
+    's#^x-scheme-handler/windsurf=devin-desktop-url-handler.desktop;$#x-scheme-handler/windsurf=devin-desktop-url-handler.desktop;editor.desktop;#' \
+    "${DEFAULTS_FILE}"
+  sed -i \
+    's#^application/x-devin-desktop-workspace=devin-desktop.desktop;$#application/x-devin-desktop-workspace=devin-desktop.desktop;workspace.desktop;#' \
+    "${DEFAULTS_FILE}"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  [ "$(query_default x-scheme-handler/devin)" = \
+    "devin-desktop-manager-url-handler.desktop" ]
+  [ "$(query_default x-scheme-handler/windsurf)" = \
+    "devin-desktop-manager-url-handler.desktop" ]
+  [ "$(query_default application/x-devin-desktop-workspace)" = \
+    "devin-desktop-manager.desktop" ]
+  [ "$(jq -r '.originalDefaults["x-scheme-handler/devin"]' "${state_file}")" = \
+    "browser.desktop" ]
+  [ "$(jq -r '.originalDefaults["x-scheme-handler/windsurf"]' "${state_file}")" = \
+    "editor.desktop" ]
+  [ "$(jq -r '.originalDefaults["application/x-devin-desktop-workspace"]' "${state_file}")" = \
+    "workspace.desktop" ]
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [ ! -e "${install_root}" ]
+  [ "$(query_default x-scheme-handler/devin)" = "browser.desktop" ]
+  [ "$(query_default x-scheme-handler/windsurf)" = "editor.desktop" ]
+  [ "$(query_default application/x-devin-desktop-workspace)" = \
+    "workspace.desktop" ]
 }
 
 @test "[LIR-U2-R02] make install publishes the fixed manager and recovers the app" {

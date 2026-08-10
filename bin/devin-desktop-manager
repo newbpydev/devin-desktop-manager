@@ -114,6 +114,12 @@ LEGACY_REQUIRES_APP_STOP=false
 LEGACY_ORIGINAL_DEVIN=""
 LEGACY_ORIGINAL_WINDSURF=""
 LEGACY_ORIGINAL_WORKSPACE=""
+LEGACY_FALLBACK_DEVIN=""
+LEGACY_FALLBACK_WINDSURF=""
+LEGACY_FALLBACK_WORKSPACE=""
+LEGACY_CURRENT_DEVIN_OWNED=false
+LEGACY_CURRENT_WINDSURF_OWNED=false
+LEGACY_CURRENT_WORKSPACE_OWNED=false
 
 info() {
   printf 'devin-desktop-manager: %s\n' "$*" >&2
@@ -1376,9 +1382,11 @@ legacy_release_metadata_is_valid() {
   [[ -d "${release_dir}/app" && ! -L "${release_dir}/app" ]] || return 1
   [[ -d "${release_dir}/integration" &&
     ! -L "${release_dir}/integration" ]] || return 1
-  [[ -x "${release_dir}/app/devin-desktop" &&
+  [[ -f "${release_dir}/app/devin-desktop" &&
+    -x "${release_dir}/app/devin-desktop" &&
     ! -L "${release_dir}/app/devin-desktop" ]] || return 1
-  [[ -x "${release_dir}/app/bin/devin-desktop" &&
+  [[ -f "${release_dir}/app/bin/devin-desktop" &&
+    -x "${release_dir}/app/bin/devin-desktop" &&
     ! -L "${release_dir}/app/bin/devin-desktop" ]] || return 1
   [[ -f "${release_dir}/integration/devin-desktop.png" &&
     ! -L "${release_dir}/integration/devin-desktop.png" ]] || return 1
@@ -1696,6 +1704,12 @@ reset_legacy_classification() {
   LEGACY_ORIGINAL_DEVIN=""
   LEGACY_ORIGINAL_WINDSURF=""
   LEGACY_ORIGINAL_WORKSPACE=""
+  LEGACY_FALLBACK_DEVIN=""
+  LEGACY_FALLBACK_WINDSURF=""
+  LEGACY_FALLBACK_WORKSPACE=""
+  LEGACY_CURRENT_DEVIN_OWNED=false
+  LEGACY_CURRENT_WINDSURF_OWNED=false
+  LEGACY_CURRENT_WORKSPACE_OWNED=false
 }
 
 desktop_escape_command() {
@@ -1719,6 +1733,13 @@ legacy_directory_is_user_owned() {
   local path="$1"
 
   [[ -d "${path}" && ! -L "${path}" &&
+    "$(stat -c '%u' -- "${path}" 2>/dev/null)" == "${EUID}" ]]
+}
+
+legacy_symlink_is_user_owned() {
+  local path="$1"
+
+  [[ -L "${path}" &&
     "$(stat -c '%u' -- "${path}" 2>/dev/null)" == "${EUID}" ]]
 }
 
@@ -1906,6 +1927,7 @@ legacy_reason_mime_key() {
 legacy_mimeapps_file_is_safe() {
   local file="$1"
   local section="" line mime_type value desktop_id expected reason_mime
+  local record_has_expected record_fallback
   local -a desktop_ids=()
   local -A seen_records=()
 
@@ -1974,6 +1996,8 @@ legacy_mimeapps_file_is_safe() {
     }
     IFS=';' read -r -a desktop_ids <<<"${value}"
     expected="$(legacy_expected_desktop_id "${mime_type}")" || return 1
+    record_has_expected=false
+    record_fallback=""
     for desktop_id in "${desktop_ids[@]}"; do
       [[ -n "${desktop_id}" ]] || continue
       is_safe_desktop_id "${desktop_id}" || {
@@ -1981,22 +2005,44 @@ legacy_mimeapps_file_is_safe() {
         LEGACY_OBSERVED="${desktop_id}"
         return 1
       }
-      legacy_mime_record_is_manager_id "${desktop_id}" || continue
-      if [[ "${desktop_id}" != "${expected}" ||
-        ( "${section}" != "[Default Applications]" &&
-          "${section}" != "[Added Associations]" ) ]]; then
-        LEGACY_REASON="default-shape:${mime_type}"
-        LEGACY_OBSERVED="${desktop_id}"
-        return 1
-      fi
-      if [[ "${section}" == "[Default Applications]" ]]; then
-        case "${mime_type}" in
-          "${MIME_DEVIN}") LEGACY_PROVENANCE_DEVIN=true ;;
-          "${MIME_WINDSURF}") LEGACY_PROVENANCE_WINDSURF=true ;;
-          "${MIME_WORKSPACE}") LEGACY_PROVENANCE_WORKSPACE=true ;;
-        esac
+      if legacy_mime_record_is_manager_id "${desktop_id}"; then
+        if [[ "${desktop_id}" != "${expected}" ||
+          ( "${section}" != "[Default Applications]" &&
+            "${section}" != "[Added Associations]" ) ]]; then
+          LEGACY_REASON="default-shape:${mime_type}"
+          LEGACY_OBSERVED="${desktop_id}"
+          return 1
+        fi
+        if [[ "${section}" == "[Default Applications]" ]]; then
+          record_has_expected=true
+        fi
+      elif [[ "${section}" == "[Default Applications]" &&
+        "${record_has_expected}" == "true" && -z "${record_fallback}" ]]; then
+        record_fallback="${desktop_id}"
       fi
     done
+    if [[ "${record_has_expected}" == "true" ]]; then
+      case "${mime_type}" in
+        "${MIME_DEVIN}")
+          if [[ "${LEGACY_PROVENANCE_DEVIN}" != "true" ]]; then
+            LEGACY_FALLBACK_DEVIN="${record_fallback}"
+          fi
+          LEGACY_PROVENANCE_DEVIN=true
+          ;;
+        "${MIME_WINDSURF}")
+          if [[ "${LEGACY_PROVENANCE_WINDSURF}" != "true" ]]; then
+            LEGACY_FALLBACK_WINDSURF="${record_fallback}"
+          fi
+          LEGACY_PROVENANCE_WINDSURF=true
+          ;;
+        "${MIME_WORKSPACE}")
+          if [[ "${LEGACY_PROVENANCE_WORKSPACE}" != "true" ]]; then
+            LEGACY_FALLBACK_WORKSPACE="${record_fallback}"
+          fi
+          LEGACY_PROVENANCE_WORKSPACE=true
+          ;;
+      esac
+    fi
   done <"${file}"
 }
 
@@ -2041,6 +2087,12 @@ classify_initial_manager_defaults() {
   LEGACY_PROVENANCE_DEVIN=false
   LEGACY_PROVENANCE_WINDSURF=false
   LEGACY_PROVENANCE_WORKSPACE=false
+  LEGACY_FALLBACK_DEVIN=""
+  LEGACY_FALLBACK_WINDSURF=""
+  LEGACY_FALLBACK_WORKSPACE=""
+  LEGACY_CURRENT_DEVIN_OWNED=false
+  LEGACY_CURRENT_WINDSURF_OWNED=false
+  LEGACY_CURRENT_WORKSPACE_OWNED=false
   for file in \
     "${CONFIG_HOME}/mimeapps.list" \
     "${DATA_HOME}/applications/mimeapps.list" \
@@ -2077,7 +2129,20 @@ classify_initial_manager_defaults() {
         LEGACY_OBSERVED="${current}"
         return 1
       fi
-      current=""
+      case "${mime_type}" in
+        "${MIME_DEVIN}")
+          current="${LEGACY_FALLBACK_DEVIN}"
+          LEGACY_CURRENT_DEVIN_OWNED=true
+          ;;
+        "${MIME_WINDSURF}")
+          current="${LEGACY_FALLBACK_WINDSURF}"
+          LEGACY_CURRENT_WINDSURF_OWNED=true
+          ;;
+        "${MIME_WORKSPACE}")
+          current="${LEGACY_FALLBACK_WORKSPACE}"
+          LEGACY_CURRENT_WORKSPACE_OWNED=true
+          ;;
+      esac
     elif legacy_mime_record_is_manager_id "${current}"; then
       LEGACY_REASON="default-shape:${mime_type}"
       LEGACY_OBSERVED="${current}"
@@ -2106,8 +2171,8 @@ initial_manager_integration_is_valid() {
       return 1
     }
   done
-  [[ -L "${APP_COMMAND}" &&
-    "$(readlink "${APP_COMMAND}")" == "${CURRENT_LINK}/app/bin/devin-desktop" ]] || {
+  legacy_symlink_is_user_owned "${APP_COMMAND}" &&
+    [[ "$(readlink "${APP_COMMAND}")" == "${CURRENT_LINK}/app/bin/devin-desktop" ]] || {
     LEGACY_REASON="app-link"
     LEGACY_OBSERVED="${APP_COMMAND}"
     return 1
@@ -3532,12 +3597,15 @@ install_integration_from_stage() {
   register_associations false || return 1
   if [[ "${LEGACY_CLASSIFICATION}" == "initial-complete" ]]; then
     remove_initial_manager_associations || return 1
-    verify_association_result \
-      "${MIME_DEVIN}" "${URL_DESKTOP_ID}" "${original_devin}" || return 1
-    verify_association_result \
-      "${MIME_WINDSURF}" "${URL_DESKTOP_ID}" "${original_windsurf}" || return 1
-    verify_association_result \
-      "${MIME_WORKSPACE}" "${MAIN_DESKTOP_ID}" "${original_workspace}" || return 1
+    verify_initial_manager_association_result \
+      "${MIME_DEVIN}" "${URL_DESKTOP_ID}" "${original_devin}" \
+      "${LEGACY_CURRENT_DEVIN_OWNED}" || return 1
+    verify_initial_manager_association_result \
+      "${MIME_WINDSURF}" "${URL_DESKTOP_ID}" "${original_windsurf}" \
+      "${LEGACY_CURRENT_WINDSURF_OWNED}" || return 1
+    verify_initial_manager_association_result \
+      "${MIME_WORKSPACE}" "${MAIN_DESKTOP_ID}" "${original_workspace}" \
+      "${LEGACY_CURRENT_WORKSPACE_OWNED}" || return 1
   fi
   remove_legacy_integration || return 1
   refresh_desktop_caches || return 1
@@ -5186,6 +5254,20 @@ verify_association_result() {
   local original="$3"
 
   association_matches "${mime_type}" "${original:-${manager_desktop_id}}"
+}
+
+verify_initial_manager_association_result() {
+  local mime_type="$1"
+  local manager_desktop_id="$2"
+  local original="$3"
+  local current_was_owned="$4"
+
+  if [[ "${current_was_owned}" == "true" ]]; then
+    association_matches "${mime_type}" "${manager_desktop_id}"
+  else
+    verify_association_result \
+      "${mime_type}" "${manager_desktop_id}" "${original}"
+  fi
 }
 
 initial_manager_original_default_matches() {
