@@ -1383,6 +1383,8 @@ legacy_release_metadata_is_valid() {
   [[ "${expected_release_name}" == "${expected_id}" ]] || return 1
 
   [[ -d "${release_dir}/app" && ! -L "${release_dir}/app" ]] || return 1
+  [[ -d "${release_dir}/app/bin" && ! -L "${release_dir}/app/bin" ]] ||
+    return 1
   [[ -d "${release_dir}/integration" &&
     ! -L "${release_dir}/integration" ]] || return 1
   [[ -f "${release_dir}/app/devin-desktop" &&
@@ -1551,7 +1553,8 @@ legacy_cache_root_is_valid() {
   local entry name release_id
 
   if [[ ! -e "${CACHE_ROOT}" && ! -L "${CACHE_ROOT}" ]]; then
-    return 0
+    future_user_directory_ancestry_is_safe "${CACHE_ROOT}"
+    return
   fi
   legacy_tree_is_user_owned_and_unmounted "${CACHE_ROOT}" || return 1
   directory_can_be_listed "${CACHE_ROOT}" || return 1
@@ -1604,7 +1607,8 @@ legacy_pre_activation_state_root_is_valid() {
   local entry name
 
   if [[ ! -e "${STATE_DIR}" && ! -L "${STATE_DIR}" ]]; then
-    return 0
+    future_user_directory_ancestry_is_safe "${STATE_DIR}"
+    return
   fi
   legacy_tree_is_user_owned_and_unmounted "${STATE_DIR}" || return 1
   directory_can_be_listed "${STATE_DIR}" || return 1
@@ -2010,12 +2014,44 @@ legacy_desktop_relative_path_is_available() {
   return 1
 }
 
+legacy_desktop_try_exec_is_available() {
+  local encoded="$1"
+  local decoded="" character escape
+
+  while [[ -n "${encoded}" ]]; do
+    character="${encoded:0:1}"
+    encoded="${encoded:1}"
+    if [[ "${character}" != \\ ]]; then
+      decoded+="${character}"
+      continue
+    fi
+    [[ -n "${encoded}" ]] || return 1
+    escape="${encoded:0:1}"
+    encoded="${encoded:1}"
+    case "${escape}" in
+      s) decoded+=" " ;;
+      n) decoded+=$'\n' ;;
+      t) decoded+=$'\t' ;;
+      r) decoded+=$'\r' ;;
+      \\) decoded+="\\" ;;
+      *) return 1 ;;
+    esac
+  done
+  [[ -n "${decoded}" ]] || return 1
+  case "${decoded}" in
+    /*) [[ -f "${decoded}" && -x "${decoded}" ]] ;;
+    */*) return 1 ;;
+    *) type -P -- "${decoded}" >/dev/null ;;
+  esac
+}
+
 legacy_desktop_candidate_is_available() {
   local path="$1"
+  local validation has_try_exec try_exec
 
   [[ -f "${path}" ]] || return 1
   desktop-file-validate "${path}" >/dev/null 2>&1 || return 1
-  awk '
+  validation="$(awk '
     $0 == "[Desktop Entry]" { in_desktop = 1; next }
     /^\[/ { in_desktop = 0 }
     in_desktop && /^[[:space:]]*Type[[:space:]]*=/ {
@@ -2030,8 +2066,24 @@ legacy_desktop_candidate_is_available() {
       sub(/[[:space:]]*$/, "", value)
       if (value == "true" || value == "1") hidden = 1
     }
-    END { exit type == "Application" && !hidden ? 0 : 1 }
-  ' "${path}"
+    in_desktop && /^[[:space:]]*TryExec[[:space:]]*=/ {
+      value = $0
+      sub(/^[^=]*=[[:space:]]*/, "", value)
+      sub(/[[:space:]]*$/, "", value)
+      try_exec = value
+      has_try_exec = 1
+    }
+    END {
+      valid = type == "Application" && !hidden
+      if (valid) print (has_try_exec ? "1" : "0") "\t" try_exec
+      exit valid ? 0 : 1
+    }
+  ' "${path}")" || return 1
+  [[ "${validation}" == *$'\t'* ]] || return 1
+  has_try_exec="${validation%%$'\t'*}"
+  try_exec="${validation#*$'\t'}"
+  [[ "${has_try_exec}" == 0 ]] ||
+    legacy_desktop_try_exec_is_available "${try_exec}"
 }
 
 legacy_desktop_id_is_available() {
@@ -2662,16 +2714,12 @@ migrate_legacy_layout_if_needed() {
       die "could not upgrade legacy release metadata: ${release_dir}"
   done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -type d -print0)
   if [[ ! -e "${CACHE_ROOT}" && ! -L "${CACHE_ROOT}" ]]; then
-    mkdir -p -- "${CACHE_ROOT}" ||
-      die "could not recreate the legacy cache root"
-    chmod 0700 "${CACHE_ROOT}" ||
-      die "could not secure the legacy cache root"
+    create_secure_user_directory_path "${CACHE_ROOT}" ||
+      die "could not securely recreate the legacy cache root"
   fi
   if [[ ! -e "${STATE_DIR}" && ! -L "${STATE_DIR}" ]]; then
-    mkdir -p -- "${STATE_DIR}" ||
-      die "could not recreate the legacy state root"
-    chmod 0700 "${STATE_DIR}" ||
-      die "could not secure the legacy state root"
+    create_secure_user_directory_path "${STATE_DIR}" ||
+      die "could not securely recreate the legacy state root"
   fi
   write_ownership_sentinel "${CACHE_ROOT}" ||
     die "could not mark the legacy cache as manager-owned"
@@ -5386,6 +5434,39 @@ user_directory_ancestry_is_safe() {
     [[ "${directory}" != / ]] || break
     directory="$(dirname "${directory}")"
     direct_parent=false
+  done
+}
+
+future_user_directory_ancestry_is_safe() {
+  local directory="$1"
+  local parent
+
+  [[ "${directory}" == /* ]] || return 1
+  while [[ ! -e "${directory}" && ! -L "${directory}" ]]; do
+    parent="$(dirname "${directory}")"
+    [[ "${parent}" != "${directory}" ]] || return 1
+    directory="${parent}"
+  done
+  user_directory_ancestry_is_safe "${directory}"
+}
+
+create_secure_user_directory_path() {
+  local directory="$1"
+  local parent index
+  local -a missing=()
+
+  future_user_directory_ancestry_is_safe "${directory}" || return 1
+  while [[ ! -e "${directory}" && ! -L "${directory}" ]]; do
+    missing+=("${directory}")
+    parent="$(dirname "${directory}")"
+    [[ "${parent}" != "${directory}" ]] || return 1
+    directory="${parent}"
+  done
+  for ((index = ${#missing[@]} - 1; index >= 0; index--)); do
+    mkdir -m 0700 -- "${missing[index]}" || return 1
+    [[ -d "${missing[index]}" && ! -L "${missing[index]}" &&
+      "$(stat -c '%u' -- "${missing[index]}" 2>/dev/null)" == "${EUID}" ]] ||
+      return 1
   done
 }
 

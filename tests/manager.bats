@@ -1051,6 +1051,39 @@ EOF
   done
 }
 
+@test "[LIR-U1-R04] symlinked launcher ancestors remain refused" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local release external_bin
+
+  seed_complete_initial_manager_layout
+  release="${install_root}/$(readlink "${install_root}/current")"
+  external_bin="${BATS_TEST_TMPDIR}/external-bin"
+  mv -- "${release}/app/bin" "${external_bin}"
+  ln -s -- "${external_bin}" "${release}/app/bin"
+
+  assert_classification_refused release-inventory
+}
+
+@test "[LIR-U1-R04] absent legacy roots require safe parent ancestry" {
+  local cache_root="${TEST_HOME}/.cache/devin-desktop-manager"
+
+  seed_complete_initial_manager_layout
+  rm -rf -- "${cache_root}"
+  chmod 0777 -- "${TEST_HOME}/.cache"
+
+  assert_classification_refused cache-root
+}
+
+@test "[LIR-U1-R04] absent legacy state requires safe parent ancestry" {
+  local state_root="${TEST_HOME}/.local/state/devin-desktop-manager"
+
+  seed_complete_initial_manager_layout
+  rm -rf -- "${state_root}"
+  chmod 0777 -- "${TEST_HOME}/.local/state"
+
+  assert_classification_refused state-root
+}
+
 @test "[LIR-U1-R04] foreign-owned application symlink remains refused" {
   local app_command="${TEST_HOME}/.local/bin/devin-desktop"
   local real_stat
@@ -1346,6 +1379,29 @@ EOF
 
   [ "${status}" -eq 0 ]
   [ "$(query_default x-scheme-handler/devin)" = "browser.desktop" ]
+}
+
+@test "[LIR-U2-R08] update skips fallbacks with unavailable TryExec" {
+  local applications="${TEST_HOME}/.local/share/applications"
+  local state_file="${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
+
+  seed_complete_initial_manager_layout
+  write_fallback_desktop "${applications}/unavailable.desktop" Unavailable
+  printf 'TryExec=devin-desktop-missing-fallback-command\n' \
+    >>"${applications}/unavailable.desktop"
+  write_fallback_desktop "${applications}/browser.desktop" Browser
+  printf 'TryExec=/bin/true\n' >>"${applications}/browser.desktop"
+  sed -i \
+    's#^x-scheme-handler/devin=devin-desktop-url-handler.desktop;$#x-scheme-handler/devin=devin-desktop-url-handler.desktop;unavailable.desktop;browser.desktop;#' \
+    "${DEFAULTS_FILE}"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  [ "$(jq -r '.originalDefaults["x-scheme-handler/devin"]' "${state_file}")" = \
+    "browser.desktop" ]
 }
 
 @test "[LIR-U2-R08] hidden fallback masks lower-precedence desktop copies" {
