@@ -1812,6 +1812,8 @@ legacy_tree_is_user_owned_and_unmounted() {
 
   legacy_directory_is_user_owned "${root}" || return 1
   user_directory_ancestry_is_safe "${root}" || return 1
+  canonical_root="$(readlink -f -- "${root}")" || return 1
+  legacy_mount_table_has_no_targets_at_or_below "${canonical_root}" || return 1
   find "${root}" -xdev -exec stat -c '%u' -- {} + |
     awk -v expected_owner="${EUID}" '
       $0 != expected_owner { invalid = 1 }
@@ -1831,8 +1833,6 @@ legacy_tree_is_user_owned_and_unmounted() {
       }
       END { exit invalid ? 1 : 0 }
     ' || return 1
-  canonical_root="$(readlink -f -- "${root}")" || return 1
-  legacy_mount_table_has_no_targets_at_or_below "${canonical_root}"
 }
 
 legacy_release_tree_is_user_owned() {
@@ -2895,18 +2895,23 @@ release_label() {
 }
 
 app_is_running() {
-  local process_path executable
+  local process_path executable canonical_install_root canonical_releases_dir
+
+  canonical_install_root="$(readlink -m -- "${INSTALL_ROOT}")" || return 1
+  canonical_releases_dir="${canonical_install_root}/releases"
 
   for process_path in /proc/[0-9]*; do
     executable="$(readlink "${process_path}/exe" 2>/dev/null || true)"
     executable="${executable% (deleted)}"
     case "${executable}" in
-      "${RELEASES_DIR}"/*/app/devin-desktop|\
-        "${RELEASES_DIR}"/*/app/bin/devin-desktop|\
-        "${INSTALL_ROOT}"/.release-prune-*/app/devin-desktop|\
-        "${INSTALL_ROOT}"/.release-prune-*/app/bin/devin-desktop|\
-        "${INSTALL_ROOT}".uninstall-*/releases/*/app/devin-desktop|\
-        "${INSTALL_ROOT}".uninstall-*/releases/*/app/bin/devin-desktop) return 0 ;;
+      "${canonical_releases_dir}"/*/app/devin-desktop|\
+        "${canonical_releases_dir}"/*/app/bin/devin-desktop|\
+        "${canonical_install_root}"/.release-prune-*/app/devin-desktop|\
+        "${canonical_install_root}"/.release-prune-*/app/bin/devin-desktop|\
+        "${canonical_install_root}".uninstall-*/releases/*/app/devin-desktop|\
+        "${canonical_install_root}".uninstall-*/releases/*/app/bin/devin-desktop)
+        return 0
+        ;;
     esac
   done
 

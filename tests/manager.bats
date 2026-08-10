@@ -951,6 +951,26 @@ EOF
   [ "$(wc -c <"${mountinfo_log}")" -eq 1 ]
 }
 
+@test "[LIR-U1-R04] adopted mount refusal precedes tree traversal" {
+  local root="${TEST_HOME}/tree"
+  local mountinfo="${BATS_TEST_TMPDIR}/mountinfo"
+  local find_log="${CURL_LOG}.find"
+
+  mkdir -p -- "${root}"
+  write_mountinfo_fixture "${mountinfo}" "${root}"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    ": >${find_log@Q}" \
+    'exit 99' \
+    >"${MOCK_BIN}/find"
+  chmod 0755 "${MOCK_BIN}/find"
+
+  run_legacy_tree_with_mountinfo "${root}" "${mountinfo}"
+
+  [ "${status}" -ne 0 ]
+  [ ! -e "${find_log}" ]
+}
+
 @test "[LIR-U1-R04] adopted tree mount scan preserves spaced target identity" {
   local canonical_root="${TEST_HOME}/tree with space"
   local root="${TEST_HOME}/alias/../tree with space"
@@ -1608,6 +1628,38 @@ EOF
   [ -d "${integration}" ]
   [ "$(sha256sum "${DEFAULTS_FILE}" | awk '{print $1}')" = "${defaults_before}" ]
   [ ! -e "${TEST_HOME}/.local/state/devin-desktop-manager/state.json" ]
+}
+
+@test "[LIR-U2-R05] running app gate canonicalizes a noncanonical home" {
+  local canonical_home="${BATS_TEST_TMPDIR}/canonical-home"
+  local current_release metadata_before running_pid
+
+  mkdir -p -- "${BATS_TEST_TMPDIR}/alias" "${canonical_home}"
+  TEST_HOME="${BATS_TEST_TMPDIR}/alias/../canonical-home/"
+  DEFAULTS_FILE="${TEST_HOME}/.config/mimeapps.list"
+  export TEST_HOME DEFAULTS_FILE
+  seed_complete_initial_manager_layout
+  current_release="${TEST_HOME}/.local/opt/devin-desktop/$(
+    readlink "${TEST_HOME}/.local/opt/devin-desktop/current"
+  )"
+  metadata_before="$(sha256sum "${current_release}/release.json" | awk '{print $1}')"
+  cp -- /bin/sleep "${current_release}/app/bin/devin-desktop"
+  chmod 0755 "${current_release}/app/bin/devin-desktop"
+  "${current_release}/app/bin/devin-desktop" 30 &
+  running_pid=$!
+  wait_for_process_executable \
+    "${running_pid}" "${canonical_home}/.local/opt/devin-desktop/$(
+      readlink "${TEST_HOME}/.local/opt/devin-desktop/current"
+    )/app/bin/devin-desktop"
+
+  run manager_env update
+  kill "${running_pid}" 2>/dev/null || true
+  wait "${running_pid}" 2>/dev/null || true
+
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"Devin Desktop is running"* ]]
+  [ "$(sha256sum "${current_release}/release.json" | awk '{print $1}')" = \
+    "${metadata_before}" ]
 }
 
 @test "[LIR-U2-R03] rollback recovers the layout and remains reversible" {
