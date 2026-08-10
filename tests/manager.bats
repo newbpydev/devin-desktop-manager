@@ -146,7 +146,7 @@ case "${1:-}" in
       exit 0
     fi
     [[ -f "${database}" ]] || exit 0
-    awk -F= -v key="$3" '
+    current="$(awk -F= -v key="$3" '
       $0 == "[Default Applications]" { defaults = 1; next }
       /^\[/ { defaults = 0 }
       defaults && $1 == key {
@@ -154,7 +154,20 @@ case "${1:-}" in
         print $2
         exit
       }
-    ' "${database}"
+    ' "${database}")"
+    if [[ -n "${current}" ]]; then
+      printf '%s\n' "${current}"
+      exit 0
+    fi
+    case "$3" in
+      x-scheme-handler/devin) fallback="${MOCK_XDG_FALLBACK_DEVIN:-}" ;;
+      x-scheme-handler/windsurf) fallback="${MOCK_XDG_FALLBACK_WINDSURF:-}" ;;
+      application/x-devin-desktop-workspace)
+        fallback="${MOCK_XDG_FALLBACK_WORKSPACE:-}"
+        ;;
+      *) fallback="" ;;
+    esac
+    printf '%s\n' "${fallback}"
     ;;
   default)
     [[ $# -eq 3 ]] || exit 2
@@ -731,6 +744,32 @@ EOF
   assert_classification_refused main-desktop
 }
 
+@test "[LIR-U1-R04] foreign-owned legacy assets remain refused" {
+  local data_home="${TEST_HOME}/.local/share"
+  local icon="${data_home}/icons/hicolor/512x512/apps/devin-desktop.png"
+  local mime="${data_home}/mime/packages/devin-desktop-workspace.xml"
+  local real_stat
+
+  seed_complete_initial_manager_layout
+  real_stat="$(command -v stat)"
+  cat >"${MOCK_BIN}/stat" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "-c" && "\${2:-}" == "%u" &&
+  "\${4:-}" == "\${MOCK_FOREIGN_OWNER_PATH:-}" ]]; then
+  printf '%s\n' "$((EUID + 1))"
+  exit 0
+fi
+exec "${real_stat}" "\$@"
+EOF
+  chmod 0755 "${MOCK_BIN}/stat"
+
+  export MOCK_FOREIGN_OWNER_PATH="${icon}"
+  assert_classification_refused icon
+
+  export MOCK_FOREIGN_OWNER_PATH="${mime}"
+  assert_classification_refused mime
+}
+
 @test "[LIR-U1-R06] untraceable legacy effective defaults remain refused" {
   seed_complete_initial_manager_layout
   sed -i \
@@ -802,6 +841,25 @@ EOF
   [ "${status}" -eq 1 ]
   [ "${output}" = \
     "refused|default-provenance:unknown|${DEFAULTS_FILE}" ]
+}
+
+@test "[LIR-U1-R06] foreign-owned MIME provenance remains refused" {
+  local real_stat
+
+  seed_complete_initial_manager_layout
+  real_stat="$(command -v stat)"
+  cat >"${MOCK_BIN}/stat" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "-c" && "\${2:-}" == "%u" &&
+  "\${4:-}" == "${DEFAULTS_FILE}" ]]; then
+  printf '%s\n' "$((EUID + 1))"
+  exit 0
+fi
+exec "${real_stat}" "\$@"
+EOF
+  chmod 0755 "${MOCK_BIN}/stat"
+
+  assert_classification_refused default-provenance:unknown
 }
 
 @test "[LIR-U1-R05] desktop-specific manager records cannot grant ownership" {
@@ -900,6 +958,19 @@ EOF
   [ "${status}" -eq 1 ]
   run grep -F 'devin-desktop.desktop' "${DEFAULTS_FILE}"
   [ "${status}" -eq 1 ]
+}
+
+@test "[LIR-U2-R04] direct uninstall accepts a revealed safe system default" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+
+  seed_complete_initial_manager_layout
+  export MOCK_XDG_FALLBACK_DEVIN="browser.desktop"
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [ ! -e "${install_root}" ]
+  [ "$(query_default x-scheme-handler/devin)" = "browser.desktop" ]
 }
 
 @test "[LIR-U2-R05] running app blocks complete-profile ownership mutation" {

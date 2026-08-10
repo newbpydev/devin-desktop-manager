@@ -1708,11 +1708,15 @@ desktop_escape_command() {
   printf '%s' "${escaped_command}"
 }
 
-legacy_desktop_is_user_regular() {
+legacy_file_is_user_regular() {
   local path="$1"
 
   [[ -f "${path}" && ! -L "${path}" &&
     "$(stat -c '%u' -- "${path}" 2>/dev/null)" == "${EUID}" ]]
+}
+
+legacy_desktop_is_user_regular() {
+  legacy_file_is_user_regular "$1"
 }
 
 legacy_desktop_semantics_are_valid() {
@@ -1856,7 +1860,7 @@ legacy_mimeapps_file_is_safe() {
   local -a desktop_ids=()
   local -A seen_records=()
 
-  [[ -f "${file}" && ! -L "${file}" ]] || {
+  legacy_file_is_user_regular "${file}" || {
     LEGACY_REASON="default-provenance:unknown"
     LEGACY_OBSERVED="${file}"
     return 1
@@ -3315,7 +3319,7 @@ asset_matches_release() {
   local release_name="$2"
   local release_dir path_hash release_hash
 
-  [[ -f "${path}" && ! -L "${path}" ]] || return 1
+  legacy_file_is_user_regular "${path}" || return 1
   path_hash="$(sha256sum "${path}" | awk '{print $1}')"
   for release_dir in \
     "$(release_path "${CURRENT_LINK}" 2>/dev/null || true)" \
@@ -5064,10 +5068,30 @@ verify_association_result() {
   association_matches "${mime_type}" "${original:-${manager_desktop_id}}"
 }
 
+initial_manager_original_default_matches() {
+  local mime_type="$1"
+  local original="$2"
+  local current
+
+  current="$(query_default "${mime_type}")" || return 1
+  is_safe_desktop_id "${current}" || return 1
+  if [[ -n "${original}" ]]; then
+    [[ "${current}" == "${original}" ]]
+    return
+  fi
+  if legacy_mime_record_is_manager_id "${current}"; then
+    return 1
+  fi
+  return 0
+}
+
 verify_initial_manager_original_defaults() {
-  association_matches "${MIME_DEVIN}" "${LEGACY_ORIGINAL_DEVIN}" &&
-    association_matches "${MIME_WINDSURF}" "${LEGACY_ORIGINAL_WINDSURF}" &&
-    association_matches "${MIME_WORKSPACE}" "${LEGACY_ORIGINAL_WORKSPACE}"
+  initial_manager_original_default_matches \
+    "${MIME_DEVIN}" "${LEGACY_ORIGINAL_DEVIN}" &&
+    initial_manager_original_default_matches \
+      "${MIME_WINDSURF}" "${LEGACY_ORIGINAL_WINDSURF}" &&
+    initial_manager_original_default_matches \
+      "${MIME_WORKSPACE}" "${LEGACY_ORIGINAL_WORKSPACE}"
 }
 
 remove_handler_from_user_defaults() {
