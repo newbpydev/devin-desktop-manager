@@ -1748,7 +1748,6 @@ legacy_symlink_is_user_owned() {
 
 legacy_tree_is_user_owned_and_unmounted() {
   local root="$1"
-  local mountpoint mountpoints
 
   legacy_directory_is_user_owned "${root}" || return 1
   user_directory_ancestry_is_safe "${root}" || return 1
@@ -1771,15 +1770,12 @@ legacy_tree_is_user_owned_and_unmounted() {
       }
       END { exit invalid ? 1 : 0 }
     ' || return 1
-  mountpoints="$(
-    findmnt -rnR --target "${root}" -o TARGET 2>/dev/null
-  )" || return 1
-  while IFS= read -r mountpoint; do
-    [[ -n "${mountpoint}" ]] || continue
-    case "${mountpoint}" in
-      "${root}"|"${root}"/*) return 1 ;;
-    esac
-  done <<<"${mountpoints}"
+  findmnt -J -R --target "${root}" -o TARGET 2>/dev/null |
+    jq -e --arg root "${root}" '
+      [.. | objects | .target? // empty] as $targets |
+      ($targets | length) > 0 and
+      ($targets | all(. != $root and (startswith($root + "/") | not)))
+    ' >/dev/null
 }
 
 legacy_release_tree_is_user_owned() {
@@ -1932,9 +1928,34 @@ legacy_reason_mime_key() {
   fi
 }
 
+legacy_desktop_relative_path_is_available() {
+  local directory="$1"
+  local desktop_id="$2"
+  local prefix="" remainder="${desktop_id}" segment
+
+  [[ -f "${directory}/${desktop_id}" ]] && return 0
+  while [[ "${remainder}" == *-* ]]; do
+    segment="${remainder%%-*}"
+    remainder="${remainder#*-}"
+    if [[ -n "${prefix}" ]]; then
+      prefix+="-"
+    fi
+    prefix+="${segment}"
+    case "${prefix}" in
+      ""|.|..) continue ;;
+    esac
+    if [[ -d "${directory}/${prefix}" ]] &&
+      legacy_desktop_relative_path_is_available \
+        "${directory}/${prefix}" "${remainder}"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 legacy_desktop_id_is_available() {
   local desktop_id="$1"
-  local candidate data_directory
+  local data_directory
   local -a data_directories=() system_data_directories=()
 
   is_safe_desktop_id "${desktop_id}" || return 1
@@ -1946,18 +1967,8 @@ legacy_desktop_id_is_available() {
     data_directories+=("${data_directory}")
   done
   for data_directory in "${data_directories[@]}"; do
-    candidate="${desktop_id}"
-    while :; do
-      case "/${candidate}/" in
-        */./*|*/../*) ;;
-        *)
-          [[ -f "${data_directory}/applications/${candidate}" ]] &&
-            return 0
-          ;;
-      esac
-      [[ "${candidate}" == *-* ]] || break
-      candidate="${candidate/-//}"
-    done
+    legacy_desktop_relative_path_is_available \
+      "${data_directory}/applications" "${desktop_id}" && return 0
   done
   return 1
 }

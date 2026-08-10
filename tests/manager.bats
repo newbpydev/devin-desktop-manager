@@ -875,7 +875,8 @@ EOF
   mkdir -p -- "${integration}/partial"
   cat >"${MOCK_BIN}/findmnt" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "${MOCK_FINDMNT_MOUNTPOINT}"
+jq -n --arg target "${MOCK_FINDMNT_MOUNTPOINT}" \
+  '{filesystems: [{target: $target}]}'
 EOF
   chmod 0755 "${MOCK_BIN}/findmnt"
 
@@ -894,7 +895,7 @@ EOF
   cat >"${MOCK_BIN}/findmnt" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >>"${findmnt_log}"
-printf '/\n'
+printf '%s\n' '{"filesystems":[{"target":"/"}]}'
 EOF
   chmod 0755 "${MOCK_BIN}/findmnt"
 
@@ -913,6 +914,65 @@ EOF
   [ "${status}" -eq 0 ]
   [ "$(wc -l <"${findmnt_log}")" -eq 1 ]
   grep -q -- '--target' "${findmnt_log}"
+}
+
+@test "[LIR-U1-R04] adopted tree mount scan preserves spaced target identity" {
+  local root="${TEST_HOME}/tree with space"
+
+  mkdir -p -- "${root}/mounted file"
+  cat >"${MOCK_BIN}/findmnt" <<EOF
+#!/usr/bin/env bash
+jq -n --arg target "${root}/mounted file" \
+  '{filesystems: [{target: \$target}]}'
+EOF
+  chmod 0755 "${MOCK_BIN}/findmnt"
+
+  run env \
+    HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" \
+    bash -c '
+      source "$1"
+      legacy_tree_is_user_owned_and_unmounted "$2"
+    ' _ "${MANAGER}" "${root}"
+
+  [ "${status}" -eq 1 ]
+}
+
+@test "[LIR-U1-R04] adopted tree mount snapshots fail closed" {
+  local root="${TEST_HOME}/tree"
+  local mode
+
+  mkdir -p -- "${root}"
+  cat >"${MOCK_BIN}/findmnt" <<'EOF'
+#!/usr/bin/env bash
+case "${MOCK_FINDMNT_MODE}" in
+  failure) exit 1 ;;
+  empty) printf '%s\n' '{"filesystems":[]}' ;;
+  malformed) printf '{\n' ;;
+esac
+EOF
+  chmod 0755 "${MOCK_BIN}/findmnt"
+
+  for mode in failure empty malformed; do
+    run env \
+      MOCK_FINDMNT_MODE="${mode}" \
+      HOME="${TEST_HOME}" \
+      XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+      XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+      XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+      XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+      PATH="${MOCK_BIN}:${PATH}" \
+      bash -c '
+        source "$1"
+        legacy_tree_is_user_owned_and_unmounted "$2"
+      ' _ "${MANAGER}" "${root}"
+
+    [ "${status}" -ne 0 ]
+  done
 }
 
 @test "[LIR-U1-R04] unsafe adopted root ancestry remains refused" {
@@ -1272,14 +1332,14 @@ EOF
   local state_file="${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
 
   seed_complete_initial_manager_layout
-  mkdir -p -- "${applications}/vendor"
+  mkdir -p -- "${applications}/vendor-name"
   printf '%s\n' \
     '[Desktop Entry]' \
     'Type=Application' \
     'Name=Editor' \
-    >"${applications}/vendor/editor.desktop"
+    >"${applications}/vendor-name/editor.desktop"
   sed -i \
-    's#^x-scheme-handler/devin=devin-desktop-url-handler.desktop;$#x-scheme-handler/devin=devin-desktop-url-handler.desktop;vendor-editor.desktop;#' \
+    's#^x-scheme-handler/devin=devin-desktop-url-handler.desktop;$#x-scheme-handler/devin=devin-desktop-url-handler.desktop;vendor-name-editor.desktop;#' \
     "${DEFAULTS_FILE}"
   write_manifest_curl \
     "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
@@ -1288,12 +1348,12 @@ EOF
 
   [ "${status}" -eq 0 ]
   [ "$(jq -r '.originalDefaults["x-scheme-handler/devin"]' "${state_file}")" = \
-    "vendor-editor.desktop" ]
+    "vendor-name-editor.desktop" ]
 
   run manager_env uninstall --yes
 
   [ "${status}" -eq 0 ]
-  [ "$(query_default x-scheme-handler/devin)" = "vendor-editor.desktop" ]
+  [ "$(query_default x-scheme-handler/devin)" = "vendor-name-editor.desktop" ]
 }
 
 @test "[LIR-U2-R02] make install publishes the fixed manager and recovers the app" {
