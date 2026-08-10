@@ -2171,12 +2171,12 @@ initial_manager_integration_is_valid() {
       return 1
     }
   done
-  legacy_symlink_is_user_owned "${APP_COMMAND}" &&
-    [[ "$(readlink "${APP_COMMAND}")" == "${CURRENT_LINK}/app/bin/devin-desktop" ]] || {
+  if ! legacy_symlink_is_user_owned "${APP_COMMAND}" ||
+    [[ "$(readlink "${APP_COMMAND}")" != "${CURRENT_LINK}/app/bin/devin-desktop" ]]; then
     LEGACY_REASON="app-link"
     LEGACY_OBSERVED="${APP_COMMAND}"
     return 1
-  }
+  fi
   for path in "${MAIN_DESKTOP}" "${URL_DESKTOP}" "${ICON_FILE}" "${MIME_FILE}"; do
     [[ ! -e "${path}" && ! -L "${path}" ]] || {
       LEGACY_REASON="install-root"
