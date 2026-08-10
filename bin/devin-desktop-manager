@@ -1732,7 +1732,7 @@ legacy_tree_is_user_owned_and_unmounted() {
       $0 != expected_owner { invalid = 1 }
       END { exit invalid ? 1 : 0 }
     ' || return 1
-  find "${root}" -xdev -type d -exec stat -c '%u %a' -- {} + |
+  find "${root}" -xdev ! -type l -exec stat -c '%u %a' -- {} + |
     awk -v expected_owner="${EUID}" '
       {
         mode = $2
@@ -1910,6 +1910,11 @@ legacy_mimeapps_file_is_safe() {
   local -A seen_records=()
 
   legacy_file_is_user_regular "${file}" || {
+    LEGACY_REASON="default-provenance:unknown"
+    LEGACY_OBSERVED="${file}"
+    return 1
+  }
+  mimeapps_parent_is_safe "${file}" || {
     LEGACY_REASON="default-provenance:unknown"
     LEGACY_OBSERVED="${file}"
     return 1

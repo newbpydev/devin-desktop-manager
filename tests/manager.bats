@@ -876,6 +876,18 @@ EOF
   assert_classification_refused release-inventory
 }
 
+@test "[LIR-U1-R04] other-writable adopted payload files remain refused" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local release launcher
+
+  seed_complete_initial_manager_layout
+  release="${install_root}/$(readlink "${install_root}/current")"
+  launcher="${release}/app/bin/devin-desktop"
+  chmod 0777 "${launcher}"
+
+  assert_classification_refused release-inventory
+}
+
 @test "[LIR-U1-R06] untraceable legacy effective defaults remain refused" {
   seed_complete_initial_manager_layout
   sed -i \
@@ -974,6 +986,13 @@ fi
 exec "${real_stat}" "\$@"
 EOF
   chmod 0755 "${MOCK_BIN}/stat"
+
+  assert_classification_refused default-provenance:unknown
+}
+
+@test "[LIR-U1-R06] MIME provenance beneath an unsafe parent remains refused" {
+  seed_complete_initial_manager_layout
+  chmod 0777 "$(dirname "${DEFAULTS_FILE}")"
 
   assert_classification_refused default-provenance:unknown
 }
@@ -1309,6 +1328,25 @@ EOF
 
   [ "${status}" -ne 0 ]
   [ "$(sha256sum "${mimeapps}" | awk '{print $1}')" = "${before}" ]
+}
+
+@test "[LIR-U2-R08] MIME cleanup fails closed on a post-install symlink" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local parked="${BATS_TEST_TMPDIR}/mimeapps.real"
+  local before
+
+  install_fixture
+  mv -- "${DEFAULTS_FILE}" "${parked}"
+  ln -s -- "${parked}" "${DEFAULTS_FILE}"
+  before="$(sha256sum "${parked}" | awk '{print $1}')"
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -ne 0 ]
+  [ -d "${install_root}" ]
+  [ -f "${TEST_HOME}/.local/state/devin-desktop-manager/state.json" ]
+  [ -L "${DEFAULTS_FILE}" ]
+  [ "$(sha256sum "${parked}" | awk '{print $1}')" = "${before}" ]
 }
 
 @test "[LIR-U2-R06] post-write default mismatch restores and retries safely" {
