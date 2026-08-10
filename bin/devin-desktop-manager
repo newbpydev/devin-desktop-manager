@@ -117,6 +117,9 @@ LEGACY_ORIGINAL_WORKSPACE=""
 LEGACY_FALLBACK_DEVIN=""
 LEGACY_FALLBACK_WINDSURF=""
 LEGACY_FALLBACK_WORKSPACE=""
+LEGACY_PROVENANCE_FILE_DEVIN=""
+LEGACY_PROVENANCE_FILE_WINDSURF=""
+LEGACY_PROVENANCE_FILE_WORKSPACE=""
 LEGACY_CURRENT_DEVIN_OWNED=false
 LEGACY_CURRENT_WINDSURF_OWNED=false
 LEGACY_CURRENT_WORKSPACE_OWNED=false
@@ -1707,6 +1710,9 @@ reset_legacy_classification() {
   LEGACY_FALLBACK_DEVIN=""
   LEGACY_FALLBACK_WINDSURF=""
   LEGACY_FALLBACK_WORKSPACE=""
+  LEGACY_PROVENANCE_FILE_DEVIN=""
+  LEGACY_PROVENANCE_FILE_WINDSURF=""
+  LEGACY_PROVENANCE_FILE_WORKSPACE=""
   LEGACY_CURRENT_DEVIN_OWNED=false
   LEGACY_CURRENT_WINDSURF_OWNED=false
   LEGACY_CURRENT_WORKSPACE_OWNED=false
@@ -2156,24 +2162,77 @@ legacy_mimeapps_file_is_safe() {
         "${MIME_DEVIN}")
           if [[ "${LEGACY_PROVENANCE_DEVIN}" != "true" ]]; then
             LEGACY_FALLBACK_DEVIN="${record_fallback}"
+            LEGACY_PROVENANCE_FILE_DEVIN="${file}"
           fi
           LEGACY_PROVENANCE_DEVIN=true
           ;;
         "${MIME_WINDSURF}")
           if [[ "${LEGACY_PROVENANCE_WINDSURF}" != "true" ]]; then
             LEGACY_FALLBACK_WINDSURF="${record_fallback}"
+            LEGACY_PROVENANCE_FILE_WINDSURF="${file}"
           fi
           LEGACY_PROVENANCE_WINDSURF=true
           ;;
         "${MIME_WORKSPACE}")
           if [[ "${LEGACY_PROVENANCE_WORKSPACE}" != "true" ]]; then
             LEGACY_FALLBACK_WORKSPACE="${record_fallback}"
+            LEGACY_PROVENANCE_FILE_WORKSPACE="${file}"
           fi
           LEGACY_PROVENANCE_WORKSPACE=true
           ;;
       esac
     fi
   done <"${file}"
+}
+
+legacy_external_mimeapps_manager_defaults_are_absent() {
+  local directory file section="" line mime_type value desktop_id provenance_file
+  local -a config_directories=() candidates=() desktop_ids=()
+
+  IFS=':' read -r -a config_directories <<<"${XDG_CONFIG_DIRS:-/etc/xdg}"
+  for directory in "${config_directories[@]}"; do
+    [[ "${directory}" == /* ]] || continue
+    candidates+=(
+      "${directory}/mimeapps.list"
+      "${directory}"/*-mimeapps.list
+    )
+  done
+  for file in "${candidates[@]}"; do
+    [[ -f "${file}" ]] || continue
+    section=""
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      case "${line}" in
+        ""|'#'*|';'*) continue ;;
+        '['*']') section="${line}"; continue ;;
+      esac
+      [[ "${section}" == "[Default Applications]" && "${line}" == *=* ]] ||
+        continue
+      mime_type="${line%%=*}"
+      value="${line#*=}"
+      IFS=';' read -r -a desktop_ids <<<"${value}"
+      for desktop_id in "${desktop_ids[@]}"; do
+        legacy_mime_record_is_manager_id "${desktop_id}" || continue
+        case "${mime_type}" in
+          "${MIME_DEVIN}") provenance_file="${LEGACY_PROVENANCE_FILE_DEVIN}" ;;
+          "${MIME_WINDSURF}")
+            provenance_file="${LEGACY_PROVENANCE_FILE_WINDSURF}"
+            ;;
+          "${MIME_WORKSPACE}")
+            provenance_file="${LEGACY_PROVENANCE_FILE_WORKSPACE}"
+            ;;
+          *) continue ;;
+        esac
+        [[ "${provenance_file}" != "${CONFIG_HOME}/mimeapps.list" ]] || continue
+        LEGACY_REASON="default-provenance:${mime_type}"
+        LEGACY_OBSERVED="${file}"
+        return 1
+      done
+    done <"${file}" || {
+      LEGACY_REASON="default-provenance:unknown"
+      LEGACY_OBSERVED="${file}"
+      return 1
+    }
+  done
 }
 
 legacy_desktop_specific_defaults_are_absent() {
@@ -2220,6 +2279,9 @@ classify_initial_manager_defaults() {
   LEGACY_FALLBACK_DEVIN=""
   LEGACY_FALLBACK_WINDSURF=""
   LEGACY_FALLBACK_WORKSPACE=""
+  LEGACY_PROVENANCE_FILE_DEVIN=""
+  LEGACY_PROVENANCE_FILE_WINDSURF=""
+  LEGACY_PROVENANCE_FILE_WORKSPACE=""
   LEGACY_CURRENT_DEVIN_OWNED=false
   LEGACY_CURRENT_WINDSURF_OWNED=false
   LEGACY_CURRENT_WORKSPACE_OWNED=false
@@ -2232,6 +2294,7 @@ classify_initial_manager_defaults() {
     fi
   done
   legacy_desktop_specific_defaults_are_absent || return 1
+  legacy_external_mimeapps_manager_defaults_are_absent || return 1
 
   for mime_type in \
     "${MIME_DEVIN}" \
@@ -5396,6 +5459,28 @@ remove_initial_manager_associations() {
     "${MIME_WORKSPACE}" "${LEGACY_MAIN_DESKTOP_ID}"
 }
 
+reveal_initial_manager_original_default() {
+  local mime_type="$1"
+  local original="$2"
+  local current_was_owned="$3"
+
+  [[ "${current_was_owned}" == "true" && -n "${original}" ]] || return 0
+  xdg-mime default "${original}" "${mime_type}" || return 1
+  record_user_configuration_results
+}
+
+reveal_initial_manager_original_defaults() {
+  reveal_initial_manager_original_default \
+    "${MIME_DEVIN}" "${LEGACY_ORIGINAL_DEVIN}" \
+    "${LEGACY_CURRENT_DEVIN_OWNED}" || return 1
+  reveal_initial_manager_original_default \
+    "${MIME_WINDSURF}" "${LEGACY_ORIGINAL_WINDSURF}" \
+    "${LEGACY_CURRENT_WINDSURF_OWNED}" || return 1
+  reveal_initial_manager_original_default \
+    "${MIME_WORKSPACE}" "${LEGACY_ORIGINAL_WORKSPACE}" \
+    "${LEGACY_CURRENT_WORKSPACE_OWNED}"
+}
+
 association_matches() {
   local mime_type="$1"
   local expected="$2"
@@ -5756,6 +5841,7 @@ perform_uninstall() {
   restore_associations || return 1
   if [[ "${LEGACY_CLASSIFICATION}" == "initial-complete" ]]; then
     remove_initial_manager_associations || return 1
+    reveal_initial_manager_original_defaults || return 1
     verify_initial_manager_original_defaults || return 1
   fi
 

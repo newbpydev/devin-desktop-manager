@@ -1121,6 +1121,26 @@ EOF
   assert_classification_refused default-provenance:x-scheme-handler/devin
 }
 
+@test "[LIR-U1-R06] external config defaults cannot establish manager provenance" {
+  local external_config="${BATS_TEST_TMPDIR}/system-config"
+
+  seed_complete_initial_manager_layout
+  mkdir -p -- "${external_config}"
+  mv -- "${DEFAULTS_FILE}" "${TEST_HOME}/.local/share/mimeapps.list"
+  printf '%s\n' \
+    '[Default Applications]' \
+    'x-scheme-handler/devin=devin-desktop-url-handler.desktop;browser.desktop;' \
+    >"${external_config}/mimeapps.list"
+  export XDG_CONFIG_DIRS="${external_config}"
+  export MOCK_XDG_QUERY_DEVIN="devin-desktop-url-handler.desktop"
+
+  classify_test_layout
+
+  [ "${status}" -eq 1 ]
+  [ "${output}" = \
+    "refused|default-provenance:x-scheme-handler/devin|${external_config}/mimeapps.list" ]
+}
+
 @test "[LIR-U1-R06] MIME provenance near-miss matrix remains refused" {
   local baseline="${BATS_TEST_TMPDIR}/mimeapps.list"
   local parked="${BATS_TEST_TMPDIR}/mimeapps.regular"
@@ -1447,6 +1467,23 @@ EOF
 
   seed_complete_initial_manager_layout
   export MOCK_XDG_FALLBACK_DEVIN="browser.desktop"
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [ ! -e "${install_root}" ]
+  [ "$(query_default x-scheme-handler/devin)" = "browser.desktop" ]
+}
+
+@test "[LIR-U2-R04] direct uninstall reveals an available saved fallback" {
+  local applications="${TEST_HOME}/.local/share/applications"
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+
+  seed_complete_initial_manager_layout
+  write_fallback_desktop "${applications}/browser.desktop" Browser
+  sed -i \
+    's#^x-scheme-handler/devin=devin-desktop-url-handler.desktop;$#x-scheme-handler/devin=devin-desktop-url-handler.desktop;missing.desktop;browser.desktop;#' \
+    "${DEFAULTS_FILE}"
 
   run manager_env uninstall --yes
 
