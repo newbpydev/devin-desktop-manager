@@ -1724,9 +1724,12 @@ desktop_escape_command() {
 
 legacy_file_is_user_regular() {
   local path="$1"
+  local owner mode
 
-  [[ -f "${path}" && ! -L "${path}" &&
-    "$(stat -c '%u' -- "${path}" 2>/dev/null)" == "${EUID}" ]]
+  [[ -f "${path}" && ! -L "${path}" ]] || return 1
+  owner="$(stat -c '%u' -- "${path}" 2>/dev/null)" || return 1
+  mode="$(stat -c '%a' -- "${path}" 2>/dev/null)" || return 1
+  [[ "${owner}" == "${EUID}" ]] && preflight_mode_is_safe "${mode}"
 }
 
 legacy_directory_is_user_owned() {
@@ -1925,6 +1928,25 @@ legacy_reason_mime_key() {
   fi
 }
 
+legacy_desktop_id_is_available() {
+  local desktop_id="$1"
+  local data_directory
+  local -a data_directories=() system_data_directories=()
+
+  is_safe_desktop_id "${desktop_id}" || return 1
+  data_directories=("${DATA_HOME}")
+  IFS=':' read -r -a system_data_directories \
+    <<<"${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+  for data_directory in "${system_data_directories[@]}"; do
+    [[ "${data_directory}" == /* ]] || continue
+    data_directories+=("${data_directory}")
+  done
+  for data_directory in "${data_directories[@]}"; do
+    [[ -f "${data_directory}/applications/${desktop_id}" ]] && return 0
+  done
+  return 1
+}
+
 legacy_mimeapps_file_is_safe() {
   local file="$1"
   local section="" line mime_type value desktop_id expected reason_mime
@@ -2018,7 +2040,8 @@ legacy_mimeapps_file_is_safe() {
           record_has_expected=true
         fi
       elif [[ "${section}" == "[Default Applications]" &&
-        "${record_has_expected}" == "true" && -z "${record_fallback}" ]]; then
+        "${record_has_expected}" == "true" && -z "${record_fallback}" ]] &&
+        legacy_desktop_id_is_available "${desktop_id}"; then
         record_fallback="${desktop_id}"
       fi
     done

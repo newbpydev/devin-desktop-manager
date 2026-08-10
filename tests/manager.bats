@@ -921,6 +921,24 @@ EOF
   assert_classification_refused release-inventory
 }
 
+@test "[LIR-U1-R04] other-writable integration evidence remains refused" {
+  local data_home="${TEST_HOME}/.local/share"
+  local path reason
+
+  seed_complete_initial_manager_layout
+  while IFS='|' read -r path reason; do
+    chmod 0666 "${path}"
+    assert_classification_refused "${reason}"
+    chmod 0644 "${path}"
+  done <<EOF
+${data_home}/applications/devin-desktop.desktop|main-desktop
+${data_home}/applications/devin-desktop-url-handler.desktop|url-desktop
+${data_home}/icons/hicolor/512x512/apps/devin-desktop.png|icon
+${data_home}/mime/packages/devin-desktop-workspace.xml|mime
+${DEFAULTS_FILE}|default-provenance:unknown
+EOF
+}
+
 @test "[LIR-U1-R04] non-regular legacy executables remain refused" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
   local release executable backup
@@ -1149,9 +1167,14 @@ EOF
 
 @test "[LIR-U2-R08] update preserves legacy default fallbacks for uninstall" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local applications="${TEST_HOME}/.local/share/applications"
   local state_file="${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
 
   seed_complete_initial_manager_layout
+  touch \
+    "${applications}/browser.desktop" \
+    "${applications}/editor.desktop" \
+    "${applications}/workspace.desktop"
   sed -i \
     's#^x-scheme-handler/devin=devin-desktop-url-handler.desktop;$#x-scheme-handler/devin=devin-desktop-url-handler.desktop;browser.desktop;#' \
     "${DEFAULTS_FILE}"
@@ -1188,6 +1211,34 @@ EOF
   [ "$(query_default x-scheme-handler/windsurf)" = "editor.desktop" ]
   [ "$(query_default application/x-devin-desktop-workspace)" = \
     "workspace.desktop" ]
+}
+
+@test "[LIR-U2-R08] update skips unavailable legacy default fallbacks" {
+  local applications="${TEST_HOME}/.local/share/applications"
+  local state_file="${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
+
+  seed_complete_initial_manager_layout
+  printf '%s\n' \
+    '[Desktop Entry]' \
+    'Type=Application' \
+    'Name=Browser' \
+    >"${applications}/browser.desktop"
+  sed -i \
+    's#^x-scheme-handler/devin=devin-desktop-url-handler.desktop;$#x-scheme-handler/devin=devin-desktop-url-handler.desktop;missing.desktop;browser.desktop;#' \
+    "${DEFAULTS_FILE}"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  [ "$(jq -r '.originalDefaults["x-scheme-handler/devin"]' "${state_file}")" = \
+    "browser.desktop" ]
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [ "$(query_default x-scheme-handler/devin)" = "browser.desktop" ]
 }
 
 @test "[LIR-U2-R02] make install publishes the fixed manager and recovers the app" {
