@@ -1748,6 +1748,7 @@ legacy_tree_is_user_owned_and_unmounted() {
   local mountpoints
 
   legacy_directory_is_user_owned "${root}" || return 1
+  user_directory_ancestry_is_safe "${root}" || return 1
   find "${root}" -xdev -exec stat -c '%u' -- {} + |
     awk -v expected_owner="${EUID}" '
       $0 != expected_owner { invalid = 1 }
@@ -1768,7 +1769,7 @@ legacy_tree_is_user_owned_and_unmounted() {
       END { exit invalid ? 1 : 0 }
     ' || return 1
   mountpoints="$({
-    find "${root}" -xdev -type d \
+    find "${root}" -xdev \
       -exec findmnt -rn --mountpoint {} -o TARGET \; 2>/dev/null
   })" || return 1
   [[ -z "${mountpoints}" ]]
@@ -3456,15 +3457,18 @@ asset_matches_release() {
   local release_dir path_hash release_hash
 
   legacy_file_is_user_regular "${path}" || return 1
-  path_hash="$(sha256sum "${path}" | awk '{print $1}')"
+  path_hash="$(sha256sum "${path}" 2>/dev/null | awk '{print $1}')" || return 1
+  [[ "${path_hash}" =~ ^[0-9a-f]{64}$ ]] || return 1
   for release_dir in \
     "$(release_path "${CURRENT_LINK}" 2>/dev/null || true)" \
     "$(release_path "${PREVIOUS_LINK}" 2>/dev/null || true)"; do
     [[ -n "${release_dir}" && -f "${release_dir}/integration/${release_name}" ]] ||
       continue
     release_hash="$(
-      sha256sum "${release_dir}/integration/${release_name}" | awk '{print $1}'
-    )"
+      sha256sum "${release_dir}/integration/${release_name}" 2>/dev/null |
+        awk '{print $1}'
+    )" || return 1
+    [[ "${release_hash}" =~ ^[0-9a-f]{64}$ ]] || return 1
     if [[ "${path_hash}" == "${release_hash}" ]]; then
       return 0
     fi
@@ -5159,12 +5163,11 @@ command_doctor() {
   fi
 }
 
-user_file_parent_is_safe() {
-  local file="$1"
-  local directory owner permissions special_mode group_mode other_mode
+user_directory_ancestry_is_safe() {
+  local directory="$1"
+  local owner permissions special_mode group_mode other_mode
   local direct_parent=true
 
-  directory="$(dirname "${file}")"
   [[ "${directory}" == /* ]] || return 1
   while :; do
     [[ -d "${directory}" && ! -L "${directory}" ]] || return 1
@@ -5192,6 +5195,10 @@ user_file_parent_is_safe() {
     directory="$(dirname "${directory}")"
     direct_parent=false
   done
+}
+
+user_file_parent_is_safe() {
+  user_directory_ancestry_is_safe "$(dirname "$1")"
 }
 
 mimeapps_temporary_is_safe() {

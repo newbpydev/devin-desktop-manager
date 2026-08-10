@@ -795,6 +795,29 @@ EOF
   assert_classification_refused mime
 }
 
+@test "[LIR-U1-R04] unreadable legacy asset hashes remain refused" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local icon="${TEST_HOME}/.local/share/icons/hicolor/512x512/apps/devin-desktop.png"
+  local release release_icon real_sha256sum
+
+  seed_complete_initial_manager_layout
+  release="${install_root}/$(readlink "${install_root}/current")"
+  release_icon="${release}/integration/devin-desktop.png"
+  real_sha256sum="$(command -v sha256sum)"
+  cat >"${MOCK_BIN}/sha256sum" <<EOF
+#!/usr/bin/env bash
+for candidate in "\$@"; do
+  if [[ "\${candidate}" == "${icon}" || "\${candidate}" == "${release_icon}" ]]; then
+    exit 1
+  fi
+done
+exec "${real_sha256sum}" "\$@"
+EOF
+  chmod 0755 "${MOCK_BIN}/sha256sum"
+
+  assert_classification_refused icon
+}
+
 @test "[LIR-U1-R04] foreign-owned legacy roots and releases remain refused" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
   local releases="${install_root}/releases"
@@ -843,10 +866,11 @@ EOF
 
 @test "[LIR-U1-R04] mounted release and temporary trees remain refused" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
-  local release integration mounted_path
+  local release launcher integration mounted_path
 
   seed_complete_initial_manager_layout
   release="${install_root}/$(readlink "${install_root}/current")"
+  launcher="${release}/app/bin/devin-desktop"
   integration="${install_root}/.integration-12345"
   mkdir -p -- "${integration}/partial"
   cat >"${MOCK_BIN}/findmnt" <<'EOF'
@@ -859,10 +883,19 @@ exit 1
 EOF
   chmod 0755 "${MOCK_BIN}/findmnt"
 
-  for mounted_path in "${release}/app" "${integration}"; do
+  for mounted_path in "${release}/app" "${launcher}" "${integration}"; do
     export MOCK_FINDMNT_MOUNTPOINT="${mounted_path}"
     assert_classification_refused release-inventory
   done
+}
+
+@test "[LIR-U1-R04] unsafe adopted root ancestry remains refused" {
+  local replaceable_ancestor="${TEST_HOME}/.local/opt"
+
+  seed_complete_initial_manager_layout
+  chmod 0777 "${replaceable_ancestor}"
+
+  assert_classification_refused release-inventory
 }
 
 @test "[LIR-U1-R04] other-writable adopted directories remain refused" {
@@ -946,7 +979,7 @@ EOF
 }
 
 @test "[LIR-U1-R04] unsafe legacy integration ancestry remains refused" {
-  local replaceable_ancestor="${TEST_HOME}/.local"
+  local replaceable_ancestor="${TEST_HOME}/.local/share/icons/hicolor/512x512"
 
   seed_complete_initial_manager_layout
   chmod 0777 "${replaceable_ancestor}"
