@@ -1322,7 +1322,7 @@ legacy_release_metadata_is_valid() {
   local version build product_version sha256 artifact_url expected_id
   local url_prefix="https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/"
 
-  [[ -d "${release_dir}" && ! -L "${release_dir}" ]] || return 1
+  legacy_directory_is_user_owned "${release_dir}" || return 1
   directory_can_be_listed "${release_dir}" || return 1
   [[ -f "${metadata}" && ! -L "${metadata}" ]] || return 1
   jq -e \
@@ -1409,7 +1409,7 @@ legacy_release_inventory_is_valid() {
   local release_entry
   local saw_release=false
 
-  [[ -d "${RELEASES_DIR}" && ! -L "${RELEASES_DIR}" ]] || return 1
+  legacy_directory_is_user_owned "${RELEASES_DIR}" || return 1
   directory_can_be_listed "${RELEASES_DIR}" || return 1
   if [[ -e "${CURRENT_LINK}" || -L "${CURRENT_LINK}" ]]; then
     release_target "${CURRENT_LINK}" >/dev/null || return 1
@@ -1490,13 +1490,13 @@ legacy_install_root_is_valid() {
   local entry name
   local saw_lock=false saw_releases=false
 
-  [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] || return 1
+  legacy_directory_is_user_owned "${INSTALL_ROOT}" || return 1
   directory_can_be_listed "${INSTALL_ROOT}" || return 1
   while IFS= read -r -d '' entry; do
     name="$(basename "${entry}")"
     case "${name}" in
       releases)
-        [[ -d "${entry}" && ! -L "${entry}" ]] || return 1
+        legacy_directory_is_user_owned "${entry}" || return 1
         saw_releases=true
         ;;
       current|previous)
@@ -1542,7 +1542,7 @@ legacy_cache_root_is_valid() {
   if [[ ! -e "${CACHE_ROOT}" && ! -L "${CACHE_ROOT}" ]]; then
     return 0
   fi
-  [[ -d "${CACHE_ROOT}" && ! -L "${CACHE_ROOT}" ]] || return 1
+  legacy_directory_is_user_owned "${CACHE_ROOT}" || return 1
   directory_can_be_listed "${CACHE_ROOT}" || return 1
   legacy_root_marker_is_compatible "${CACHE_ROOT}" || return 1
   while IFS= read -r -d '' entry; do
@@ -1570,7 +1570,7 @@ legacy_cache_root_is_valid() {
 legacy_state_root_is_valid() {
   local entry name
 
-  [[ -d "${STATE_DIR}" && ! -L "${STATE_DIR}" ]] || return 1
+  legacy_directory_is_user_owned "${STATE_DIR}" || return 1
   directory_can_be_listed "${STATE_DIR}" || return 1
   legacy_root_marker_is_compatible "${STATE_DIR}" || return 1
   while IFS= read -r -d '' entry; do
@@ -1595,7 +1595,7 @@ legacy_pre_activation_state_root_is_valid() {
   if [[ ! -e "${STATE_DIR}" && ! -L "${STATE_DIR}" ]]; then
     return 0
   fi
-  [[ -d "${STATE_DIR}" && ! -L "${STATE_DIR}" ]] || return 1
+  legacy_directory_is_user_owned "${STATE_DIR}" || return 1
   directory_can_be_listed "${STATE_DIR}" || return 1
   legacy_root_marker_is_compatible "${STATE_DIR}" || return 1
   while IFS= read -r -d '' entry; do
@@ -1712,6 +1712,13 @@ legacy_file_is_user_regular() {
   local path="$1"
 
   [[ -f "${path}" && ! -L "${path}" &&
+    "$(stat -c '%u' -- "${path}" 2>/dev/null)" == "${EUID}" ]]
+}
+
+legacy_directory_is_user_owned() {
+  local path="$1"
+
+  [[ -d "${path}" && ! -L "${path}" &&
     "$(stat -c '%u' -- "${path}" 2>/dev/null)" == "${EUID}" ]]
 }
 
@@ -1961,6 +1968,9 @@ legacy_desktop_specific_defaults_are_absent() {
       return 1
     }
     while IFS= read -r line || [[ -n "${line}" ]]; do
+      case "${line}" in
+        ""|'#'*|';'*) continue ;;
+      esac
       [[ "${line}" == *=* ]] || continue
       mime_type="${line%%=*}"
       value="${line#*=}"
@@ -2112,7 +2122,7 @@ classify_markerless_layout() {
 
   reset_legacy_classification
 
-  [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] ||
+  legacy_directory_is_user_owned "${INSTALL_ROOT}" ||
     classify_legacy_refusal install-root "${INSTALL_ROOT}" || return 1
   [[ ! -e "${sentinel}" && ! -L "${sentinel}" ]] ||
     classify_legacy_refusal install-root "${sentinel}" || return 1
@@ -4934,6 +4944,7 @@ command_set_defaults() {
 command_doctor() {
   local current_dir metadata_build metadata_product command_target
   local handler
+  local recoverable_legacy=false
   local -a failures=()
   local -a warnings=()
 
@@ -4946,10 +4957,14 @@ command_doctor() {
     ! -e "${INSTALL_ROOT}/${OWNERSHIP_SENTINEL_NAME}" &&
     ! -L "${INSTALL_ROOT}/${OWNERSHIP_SENTINEL_NAME}" ]]; then
     if classify_markerless_layout; then
-      report_recoverable_legacy_installation
-      return 1
+      if [[ "${LEGACY_CLASSIFICATION}" == "public-pre-activation" ]]; then
+        report_recoverable_legacy_installation
+        return 1
+      fi
+      recoverable_legacy=true
+    else
+      die_legacy_classification_refusal
     fi
-    die_legacy_classification_refusal
   fi
 
   current_dir="$(release_path "${CURRENT_LINK}")" ||
@@ -4957,6 +4972,11 @@ command_doctor() {
   metadata_build="$(jq -r '.build // empty' "${current_dir}/release.json")"
   metadata_product="$(jq -r '.productVersion // empty' "${current_dir}/release.json")"
   validate_release "${current_dir}" "${metadata_build}" "${metadata_product}"
+
+  if [[ "${recoverable_legacy}" == "true" ]]; then
+    report_recoverable_legacy_installation
+    return 1
+  fi
 
   [[ -L "${APP_COMMAND}" ]] || failures+=("terminal command is not a symlink")
   command_target="$(readlink -f "${APP_COMMAND}" 2>/dev/null || true)"

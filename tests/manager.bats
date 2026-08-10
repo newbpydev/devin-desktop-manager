@@ -770,6 +770,40 @@ EOF
   assert_classification_refused mime
 }
 
+@test "[LIR-U1-R04] foreign-owned legacy roots and releases remain refused" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local releases="${install_root}/releases"
+  local release
+  local cache_root="${TEST_HOME}/.cache/devin-desktop-manager"
+  local state_root="${TEST_HOME}/.local/state/devin-desktop-manager"
+  local real_stat path expected_reason
+
+  seed_complete_initial_manager_layout
+  release="${install_root}/$(readlink "${install_root}/current")"
+  real_stat="$(command -v stat)"
+  cat >"${MOCK_BIN}/stat" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "-c" && "\${2:-}" == "%u" &&
+  "\${4:-}" == "\${MOCK_FOREIGN_OWNER_PATH:-}" ]]; then
+  printf '%s\n' "$((EUID + 1))"
+  exit 0
+fi
+exec "${real_stat}" "\$@"
+EOF
+  chmod 0755 "${MOCK_BIN}/stat"
+
+  while IFS='|' read -r path expected_reason; do
+    export MOCK_FOREIGN_OWNER_PATH="${path}"
+    assert_classification_refused "${expected_reason}"
+  done <<EOF
+${install_root}|install-root
+${releases}|release-inventory
+${release}|release-inventory
+${cache_root}|cache-root
+${state_root}|state-root
+EOF
+}
+
 @test "[LIR-U1-R06] untraceable legacy effective defaults remain refused" {
   seed_complete_initial_manager_layout
   sed -i \
@@ -874,6 +908,19 @@ EOF
   [ "${status}" -eq 1 ]
   [ "${output}" = \
     "refused|desktop-specific-default:x-scheme-handler/devin|${TEST_HOME}/.config/gnome-mimeapps.list" ]
+}
+
+@test "[LIR-U1-R05] desktop-specific comments do not block recovery" {
+  seed_complete_initial_manager_layout
+  printf '%s\n' \
+    '# previous=x-scheme-handler/devin=devin-desktop-url-handler.desktop;' \
+    '; x-scheme-handler/windsurf=devin-desktop-url-handler.desktop;' \
+    >"${TEST_HOME}/.config/gnome-mimeapps.list"
+
+  classify_test_layout
+
+  [ "${status}" -eq 0 ]
+  [ "${output}" = "initial-complete|||||" ]
 }
 
 @test "[LIR-U2-R01] update transactionally recovers a complete initial-manager layout" {
@@ -1191,6 +1238,26 @@ EOF
   [[ "${output}" == *"revalidate"*"under lock"* ]]
   [[ "${output}" != *"Installation problems:"* ]]
   [[ "${output}" != *"main desktop entry is invalid"* ]]
+}
+
+@test "[LIR-U3-R01] doctor validates the release before reporting recovery" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local release
+
+  seed_complete_initial_manager_layout
+  release="${install_root}/$(readlink "${install_root}/current")"
+  cat >"${release}/app/bin/devin-desktop" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '3.4.27' '0d4bf12ed4a7597cb8ae9016fe8474468aad98a2' 'x64'
+exit 9
+EOF
+  chmod 0755 "${release}/app/bin/devin-desktop"
+
+  run manager_env doctor
+
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"release version probe failed"* ]]
+  [[ "${output}" != *"recoverable Legacy Installation"* ]]
 }
 
 @test "[LIR-U3-R02] doctor remains healthy after legacy recovery" {
