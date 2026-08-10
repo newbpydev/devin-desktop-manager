@@ -5161,16 +5161,37 @@ command_doctor() {
 
 user_file_parent_is_safe() {
   local file="$1"
-  local parent permissions group_mode other_mode
+  local directory owner permissions special_mode group_mode other_mode
+  local direct_parent=true
 
-  parent="$(dirname "${file}")"
-  legacy_directory_is_user_owned "${parent}" || return 1
-  permissions="$(stat -c '%a' -- "${parent}" 2>/dev/null)" || return 1
-  [[ "${permissions}" =~ ^[0-7]{3,4}$ ]] || return 1
-  permissions="${permissions: -3}"
-  group_mode="${permissions:1:1}"
-  other_mode="${permissions:2:1}"
-  (((group_mode & 2) == 0 && (other_mode & 2) == 0))
+  directory="$(dirname "${file}")"
+  [[ "${directory}" == /* ]] || return 1
+  while :; do
+    [[ -d "${directory}" && ! -L "${directory}" ]] || return 1
+    owner="$(stat -c '%u' -- "${directory}" 2>/dev/null)" || return 1
+    if [[ "${direct_parent}" == "true" ]]; then
+      [[ "${owner}" == "${EUID}" ]] || return 1
+    else
+      [[ "${owner}" == 0 || "${owner}" == "${EUID}" ]] || return 1
+    fi
+    permissions="$(stat -c '%a' -- "${directory}" 2>/dev/null)" || return 1
+    [[ "${permissions}" =~ ^[0-7]{3,4}$ ]] || return 1
+    if ((${#permissions} == 4)); then
+      special_mode="${permissions:0:1}"
+    else
+      special_mode=0
+    fi
+    permissions="${permissions: -3}"
+    group_mode="${permissions:1:1}"
+    other_mode="${permissions:2:1}"
+    if (((group_mode & 2) != 0 || (other_mode & 2) != 0)); then
+      [[ "${direct_parent}" != "true" ]] || return 1
+      (((special_mode & 1) == 1)) || return 1
+    fi
+    [[ "${directory}" != / ]] || break
+    directory="$(dirname "${directory}")"
+    direct_parent=false
+  done
 }
 
 mimeapps_temporary_is_safe() {

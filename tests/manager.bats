@@ -945,6 +945,15 @@ EOF
   done
 }
 
+@test "[LIR-U1-R04] unsafe legacy integration ancestry remains refused" {
+  local replaceable_ancestor="${TEST_HOME}/.local"
+
+  seed_complete_initial_manager_layout
+  chmod 0777 "${replaceable_ancestor}"
+
+  assert_classification_refused install-root
+}
+
 @test "[LIR-U1-R06] untraceable legacy effective defaults remain refused" {
   seed_complete_initial_manager_layout
   sed -i \
