@@ -1322,7 +1322,7 @@ legacy_release_metadata_is_valid() {
   local version build product_version sha256 artifact_url expected_id
   local url_prefix="https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/"
 
-  legacy_directory_is_user_owned "${release_dir}" || return 1
+  legacy_release_tree_is_user_owned "${release_dir}" || return 1
   directory_can_be_listed "${release_dir}" || return 1
   [[ -f "${metadata}" && ! -L "${metadata}" ]] || return 1
   jq -e \
@@ -1722,6 +1722,17 @@ legacy_directory_is_user_owned() {
     "$(stat -c '%u' -- "${path}" 2>/dev/null)" == "${EUID}" ]]
 }
 
+legacy_release_tree_is_user_owned() {
+  local release_dir="$1"
+
+  legacy_directory_is_user_owned "${release_dir}" || return 1
+  find "${release_dir}" -xdev -exec stat -c '%u' -- {} + |
+    awk -v expected_owner="${EUID}" '
+      $0 != expected_owner { invalid = 1 }
+      END { exit invalid ? 1 : 0 }
+    '
+}
+
 legacy_desktop_is_user_regular() {
   legacy_file_is_user_regular "$1"
 }
@@ -1734,10 +1745,10 @@ legacy_desktop_semantics_are_valid() {
   escaped_command="$(desktop_escape_command "${APP_COMMAND}")"
   legacy_desktop_is_user_regular "${path}" || return 1
   desktop-file-validate "${path}" >/dev/null 2>&1 || return 1
-  awk \
+  DEVIN_DESKTOP_MANAGER_AWK_QUOTED_COMMAND="\"${escaped_command}\"" \
+    awk \
     -v role="${role}" \
     -v command="${APP_COMMAND}" \
-    -v quoted_command="\"${escaped_command}\"" \
     -v mime_devin="${MIME_DEVIN}" \
     -v mime_windsurf="${MIME_WINDSURF}" \
     -v mime_workspace="${MIME_WORKSPACE}" '
@@ -1760,7 +1771,12 @@ legacy_desktop_semantics_are_valid() {
       return key ~ /^(Name|GenericName|Comment)(\[[^][]+\])?$/
     }
     function reject() { invalid = 1 }
-    BEGIN { section = ""; desktop_sections = 0; action_sections = 0 }
+    BEGIN {
+      section = ""
+      desktop_sections = 0
+      action_sections = 0
+      quoted_command = ENVIRON["DEVIN_DESKTOP_MANAGER_AWK_QUOTED_COMMAND"]
+    }
     /\r$/ { reject(); next }
     /^[[:space:]]*($|#)/ { next }
     /^\[/ {

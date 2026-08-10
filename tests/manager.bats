@@ -725,6 +725,27 @@ assert_classification_refused() {
   assert_classification_refused main-desktop
 }
 
+@test "[LIR-U1-R04] escaped Exec paths remain recoverable" {
+  local applications
+  local desktop
+
+  TEST_HOME="${BATS_TEST_TMPDIR}/home\$literal"
+  DEFAULTS_FILE="${TEST_HOME}/.config/mimeapps.list"
+  export TEST_HOME DEFAULTS_FILE
+  seed_complete_initial_manager_layout
+  applications="${TEST_HOME}/.local/share/applications"
+  for desktop in \
+    "${applications}/devin-desktop.desktop" \
+    "${applications}/devin-desktop-url-handler.desktop"; do
+    sed -i '/^Exec=/s/[$]/\\$/g' "${desktop}"
+  done
+
+  classify_test_layout
+
+  [ "${status}" -eq 0 ]
+  [ "${output}" = "initial-complete|||||" ]
+}
+
 @test "[LIR-U1-R04] foreign-owned desktop evidence remains refused" {
   local desktop="${TEST_HOME}/.local/share/applications/devin-desktop.desktop"
   local real_stat
@@ -754,11 +775,12 @@ EOF
   real_stat="$(command -v stat)"
   cat >"${MOCK_BIN}/stat" <<EOF
 #!/usr/bin/env bash
-if [[ "\${1:-}" == "-c" && "\${2:-}" == "%u" &&
-  "\${4:-}" == "\${MOCK_FOREIGN_OWNER_PATH:-}" ]]; then
-  printf '%s\n' "$((EUID + 1))"
-  exit 0
-fi
+for candidate in "\$@"; do
+  if [[ "\${candidate}" == "\${MOCK_FOREIGN_OWNER_PATH:-}" ]]; then
+    printf '%s\n' "$((EUID + 1))"
+    exit 0
+  fi
+done
 exec "${real_stat}" "\$@"
 EOF
   chmod 0755 "${MOCK_BIN}/stat"
@@ -774,20 +796,24 @@ EOF
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
   local releases="${install_root}/releases"
   local release
+  local metadata launcher
   local cache_root="${TEST_HOME}/.cache/devin-desktop-manager"
   local state_root="${TEST_HOME}/.local/state/devin-desktop-manager"
   local real_stat path expected_reason
 
   seed_complete_initial_manager_layout
   release="${install_root}/$(readlink "${install_root}/current")"
+  metadata="${release}/release.json"
+  launcher="${release}/app/bin/devin-desktop"
   real_stat="$(command -v stat)"
   cat >"${MOCK_BIN}/stat" <<EOF
 #!/usr/bin/env bash
-if [[ "\${1:-}" == "-c" && "\${2:-}" == "%u" &&
-  "\${4:-}" == "\${MOCK_FOREIGN_OWNER_PATH:-}" ]]; then
-  printf '%s\n' "$((EUID + 1))"
-  exit 0
-fi
+for candidate in "\$@"; do
+  if [[ "\${candidate}" == "\${MOCK_FOREIGN_OWNER_PATH:-}" ]]; then
+    printf '%s\n' "$((EUID + 1))"
+    exit 0
+  fi
+done
 exec "${real_stat}" "\$@"
 EOF
   chmod 0755 "${MOCK_BIN}/stat"
@@ -799,6 +825,8 @@ EOF
 ${install_root}|install-root
 ${releases}|release-inventory
 ${release}|release-inventory
+${metadata}|release-inventory
+${launcher}|release-inventory
 ${cache_root}|cache-root
 ${state_root}|state-root
 EOF
