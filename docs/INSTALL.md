@@ -6,7 +6,7 @@ Devin Desktop Manager v0.1 supports glibc-based Linux x86_64 desktops with:
 
 - Bash 4.4 or newer;
 - GNU Make compatible with 4.3 behavior or newer;
-- `curl`, `jq`, `bsdtar`, `sha256sum`, `flock`, `findmnt`, `ldd`, `readlink`,
+- `curl`, `jq`, `bsdtar`, `sha256sum`, `flock`, `ldd`, `readlink`,
   `find`, `timeout`, `unshare`, and standard POSIX text tools;
 - `desktop-file-validate`, `update-desktop-database`,
   `update-mime-database`, and `xdg-mime`;

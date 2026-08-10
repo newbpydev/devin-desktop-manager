@@ -308,12 +308,12 @@ preflight_capabilities_release_state() {
 }
 
 preflight_capabilities_timed_mutation() {
-  preflight_check_commands flock stat find findmnt timeout mv mktemp unshare cp chmod rm \
+  preflight_check_commands flock stat find timeout mv mktemp unshare cp chmod rm \
     mkdir ln rmdir cat cmp true
 }
 
 preflight_capabilities_untimed_mutation() {
-  preflight_check_commands flock stat find findmnt mv mktemp cp chmod rm mkdir ln rmdir \
+  preflight_check_commands flock stat find mv mktemp cp chmod rm mkdir ln rmdir \
     cat cmp
 }
 
@@ -327,7 +327,7 @@ preflight_capabilities_desktop_integration() {
 }
 
 preflight_capabilities_doctor() {
-  preflight_check_commands jq sha256sum grep awk stat find findmnt timeout unshare cat \
+  preflight_check_commands jq sha256sum grep awk stat find timeout unshare cat \
     true dirname basename
 }
 
@@ -884,12 +884,12 @@ require_download_commands() {
 }
 
 require_release_commands() {
-  require_commands jq sha256sum ldd readlink find findmnt timeout dirname stat awk
+  require_commands jq sha256sum ldd readlink find timeout dirname stat awk
 }
 
 require_mutation_commands() {
   require_download_commands
-  require_commands flock ldd readlink find findmnt mktemp timeout unshare
+  require_commands flock ldd readlink find mktemp timeout unshare
 }
 
 require_integration_commands() {
@@ -1746,6 +1746,56 @@ legacy_symlink_is_user_owned() {
     "$(stat -c '%u' -- "${path}" 2>/dev/null)" == "${EUID}" ]]
 }
 
+legacy_mountinfo_path() {
+  printf '/proc/self/mountinfo\n'
+}
+
+legacy_mount_table_has_no_targets_at_or_below() {
+  local root="$1"
+  local mountinfo
+
+  mountinfo="$(legacy_mountinfo_path)" || return 1
+  [[ -r "${mountinfo}" ]] || return 1
+  DEVIN_DESKTOP_MANAGER_MOUNT_ROOT="${root}" awk '
+    function decode_mount_path(value, encoded) {
+      encoded = value
+      gsub(/\\(040|011|012|134)/, "", encoded)
+      if (encoded ~ /\\/) {
+        invalid_escape = 1
+        return value
+      }
+      gsub(/\\040/, " ", value)
+      gsub(/\\011/, "\t", value)
+      gsub(/\\012/, "\n", value)
+      gsub(/\\134/, sprintf("%c", 92), value)
+      return value
+    }
+    BEGIN { root = ENVIRON["DEVIN_DESKTOP_MANAGER_MOUNT_ROOT"] }
+    {
+      separator = 0
+      for (field_index = 7; field_index <= NF; field_index++) {
+        if ($field_index == "-") {
+          separator = field_index
+          break
+        }
+      }
+      if ($1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ ||
+          $3 !~ /^[0-9]+:[0-9]+$/ ||
+          substr($5, 1, 1) != "/" ||
+          separator == 0 || separator > NF - 3) {
+        invalid = 1
+        next
+      }
+      target = decode_mount_path($5)
+      if (target == root || index(target, root "/") == 1) mounted = 1
+      saw_mount = 1
+    }
+    END {
+      exit saw_mount && !invalid && !invalid_escape && !mounted ? 0 : 1
+    }
+  ' "${mountinfo}"
+}
+
 legacy_tree_is_user_owned_and_unmounted() {
   local root="$1"
   local canonical_root
@@ -1772,13 +1822,7 @@ legacy_tree_is_user_owned_and_unmounted() {
       END { exit invalid ? 1 : 0 }
     ' || return 1
   canonical_root="$(readlink -f -- "${root}")" || return 1
-  findmnt -J -R --canonicalize \
-    --target "${canonical_root}" -o TARGET 2>/dev/null |
-    jq -e --arg root "${canonical_root}" '
-      [.. | objects | .target? // empty] as $targets |
-      ($targets | length) > 0 and
-      ($targets | all(. != $root and (startswith($root + "/") | not)))
-    ' >/dev/null
+  legacy_mount_table_has_no_targets_at_or_below "${canonical_root}"
 }
 
 legacy_release_tree_is_user_owned() {
@@ -5737,7 +5781,7 @@ perform_uninstall() {
 command_uninstall() {
   local answer="${1:-}"
 
-  require_commands jq sha256sum readlink flock awk mktemp find findmnt
+  require_commands jq sha256sum readlink flock awk mktemp find
   require_integration_commands
 
   if [[ "${answer}" != "--yes" ]]; then

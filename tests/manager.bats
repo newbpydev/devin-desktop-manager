@@ -620,6 +620,43 @@ assert_classification_refused() {
   fi
 }
 
+run_legacy_tree_with_mountinfo() {
+  local root="$1"
+  local mountinfo="$2"
+  local access_log="${3:-}"
+
+  run env \
+    TEST_MOUNTINFO_PATH="${mountinfo}" \
+    TEST_MOUNTINFO_LOG="${access_log}" \
+    HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" \
+    bash -c '
+      source "$1"
+      legacy_mountinfo_path() {
+        if [[ -n "${TEST_MOUNTINFO_LOG}" ]]; then
+          printf x >>"${TEST_MOUNTINFO_LOG}"
+        fi
+        printf "%s\n" "${TEST_MOUNTINFO_PATH}"
+      }
+      legacy_tree_is_user_owned_and_unmounted "$2"
+    ' _ "${MANAGER}" "${root}"
+}
+
+write_mountinfo_fixture() {
+  local file="$1"
+  local target="$2"
+  local encoded_target
+
+  encoded_target="${target//\\/\\134}"
+  encoded_target="${encoded_target// /\\040}"
+  printf '1 0 0:1 / %s rw - tmpfs tmpfs rw\n' \
+    "${encoded_target}" >"${file}"
+}
+
 @test "[LIR-U1-C01] legacy-named public post-link profile remains recoverable" {
   local applications="${TEST_HOME}/.local/share/applications"
 
@@ -883,112 +920,63 @@ EOF
 
 @test "[LIR-U1-R04] mounted release and temporary trees remain refused" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
-  local release launcher integration mounted_path
+  local release launcher integration mounted_path mountinfo
 
   seed_complete_initial_manager_layout
   release="${install_root}/$(readlink "${install_root}/current")"
   launcher="${release}/app/bin/devin-desktop"
   integration="${install_root}/.integration-12345"
+  mountinfo="${BATS_TEST_TMPDIR}/mountinfo"
   mkdir -p -- "${integration}/partial"
-  cat >"${MOCK_BIN}/findmnt" <<'EOF'
-#!/usr/bin/env bash
-jq -n --arg target "${MOCK_FINDMNT_MOUNTPOINT}" \
-  '{filesystems: [{target: $target}]}'
-EOF
-  chmod 0755 "${MOCK_BIN}/findmnt"
 
   for mounted_path in "${release}/app" "${launcher}" "${integration}"; do
-    export MOCK_FINDMNT_MOUNTPOINT="${mounted_path}"
-    assert_classification_refused release-inventory
+    write_mountinfo_fixture "${mountinfo}" "${mounted_path}"
+    run_legacy_tree_with_mountinfo "${install_root}" "${mountinfo}"
+    [ "${status}" -ne 0 ]
   done
 }
 
 @test "[LIR-U1-R04] adopted tree mount scan snapshots once" {
   local root="${TEST_HOME}/tree"
-  local findmnt_log="${CURL_LOG}.findmnt"
+  local mountinfo="${BATS_TEST_TMPDIR}/mountinfo"
+  local mountinfo_log="${CURL_LOG}.mountinfo"
 
   mkdir -p -- "${root}"
   touch "${root}"/payload-{1..100}
-  cat >"${MOCK_BIN}/findmnt" <<EOF
-#!/usr/bin/env bash
-printf '%s\n' "\$*" >>"${findmnt_log}"
-printf '%s\n' '{"filesystems":[{"target":"/"}]}'
-EOF
-  chmod 0755 "${MOCK_BIN}/findmnt"
+  write_mountinfo_fixture "${mountinfo}" /
 
-  run env \
-    HOME="${TEST_HOME}" \
-    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
-    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
-    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
-    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
-    PATH="${MOCK_BIN}:${PATH}" \
-    bash -c '
-      source "$1"
-      legacy_tree_is_user_owned_and_unmounted "$2"
-    ' _ "${MANAGER}" "${root}"
+  run_legacy_tree_with_mountinfo "${root}" "${mountinfo}" "${mountinfo_log}"
 
   [ "${status}" -eq 0 ]
-  [ "$(wc -l <"${findmnt_log}")" -eq 1 ]
-  grep -q -- '--target' "${findmnt_log}"
+  [ "$(wc -c <"${mountinfo_log}")" -eq 1 ]
 }
 
 @test "[LIR-U1-R04] adopted tree mount scan preserves spaced target identity" {
   local canonical_root="${TEST_HOME}/tree with space"
   local root="${TEST_HOME}/alias/../tree with space"
+  local mountinfo="${BATS_TEST_TMPDIR}/mountinfo"
 
   mkdir -p -- "${TEST_HOME}/alias" "${canonical_root}/mounted file"
-  cat >"${MOCK_BIN}/findmnt" <<EOF
-#!/usr/bin/env bash
-jq -n --arg target "${canonical_root}/mounted file" \
-  '{filesystems: [{target: \$target}]}'
-EOF
-  chmod 0755 "${MOCK_BIN}/findmnt"
+  write_mountinfo_fixture "${mountinfo}" "${canonical_root}/mounted file"
 
-  run env \
-    HOME="${TEST_HOME}" \
-    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
-    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
-    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
-    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
-    PATH="${MOCK_BIN}:${PATH}" \
-    bash -c '
-      source "$1"
-      legacy_tree_is_user_owned_and_unmounted "$2"
-    ' _ "${MANAGER}" "${root}"
+  run_legacy_tree_with_mountinfo "${root}" "${mountinfo}"
 
-  [ "${status}" -eq 1 ]
+  [ "${status}" -ne 0 ]
 }
 
 @test "[LIR-U1-R04] adopted tree mount snapshots fail closed" {
   local root="${TEST_HOME}/tree"
-  local mode
+  local empty="${BATS_TEST_TMPDIR}/empty-mountinfo"
+  local malformed="${BATS_TEST_TMPDIR}/malformed-mountinfo"
+  local missing="${BATS_TEST_TMPDIR}/missing-mountinfo"
+  local mountinfo
 
   mkdir -p -- "${root}"
-  cat >"${MOCK_BIN}/findmnt" <<'EOF'
-#!/usr/bin/env bash
-case "${MOCK_FINDMNT_MODE}" in
-  failure) exit 1 ;;
-  empty) printf '%s\n' '{"filesystems":[]}' ;;
-  malformed) printf '{\n' ;;
-esac
-EOF
-  chmod 0755 "${MOCK_BIN}/findmnt"
+  : >"${empty}"
+  printf 'malformed\n' >"${malformed}"
 
-  for mode in failure empty malformed; do
-    run env \
-      MOCK_FINDMNT_MODE="${mode}" \
-      HOME="${TEST_HOME}" \
-      XDG_CACHE_HOME="${TEST_HOME}/.cache" \
-      XDG_CONFIG_HOME="${TEST_HOME}/.config" \
-      XDG_DATA_HOME="${TEST_HOME}/.local/share" \
-      XDG_STATE_HOME="${TEST_HOME}/.local/state" \
-      PATH="${MOCK_BIN}:${PATH}" \
-      bash -c '
-        source "$1"
-        legacy_tree_is_user_owned_and_unmounted "$2"
-      ' _ "${MANAGER}" "${root}"
-
+  for mountinfo in "${missing}" "${empty}" "${malformed}"; do
+    run_legacy_tree_with_mountinfo "${root}" "${mountinfo}"
     [ "${status}" -ne 0 ]
   done
 }
