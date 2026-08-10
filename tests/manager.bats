@@ -597,7 +597,10 @@ assert_classification_refused() {
 
   classify_test_layout
   [ "${status}" -eq 1 ]
-  [[ "${output}" == "refused|${expected_reason}|"* ]]
+  if [[ "${output}" != "refused|${expected_reason}|"* ]]; then
+    printf 'unexpected classification: %s\n' "${output}" >&3
+    return 1
+  fi
 }
 
 @test "[LIR-U1-C01] legacy-named public post-link profile remains recoverable" {
@@ -798,10 +801,15 @@ EOF
   local release
   local metadata launcher
   local cache_root="${TEST_HOME}/.cache/devin-desktop-manager"
+  local cache_artifact
   local state_root="${TEST_HOME}/.local/state/devin-desktop-manager"
   local real_stat path expected_reason
 
   seed_complete_initial_manager_layout
+  printf 'cached artifact\n' >"${cache_root}/Devin-linux-x64-3.4.27.deb"
+  cache_artifact="$(find "${cache_root}" -mindepth 1 -maxdepth 1 \
+    -type f ! -name '.devin-desktop-manager-owned' -print -quit)"
+  [ -n "${cache_artifact}" ]
   release="${install_root}/$(readlink "${install_root}/current")"
   metadata="${release}/release.json"
   launcher="${release}/app/bin/devin-desktop"
@@ -828,8 +836,44 @@ ${release}|release-inventory
 ${metadata}|release-inventory
 ${launcher}|release-inventory
 ${cache_root}|cache-root
+${cache_artifact}|cache-root
 ${state_root}|state-root
 EOF
+}
+
+@test "[LIR-U1-R04] mounted release and temporary trees remain refused" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local release integration mounted_path
+
+  seed_complete_initial_manager_layout
+  release="${install_root}/$(readlink "${install_root}/current")"
+  integration="${install_root}/.integration-12345"
+  mkdir -p -- "${integration}/partial"
+  cat >"${MOCK_BIN}/findmnt" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"${MOCK_FINDMNT_MOUNTPOINT:-}"* ]]; then
+  printf '%s\n' "${MOCK_FINDMNT_MOUNTPOINT}"
+  exit 0
+fi
+exit 1
+EOF
+  chmod 0755 "${MOCK_BIN}/findmnt"
+
+  for mounted_path in "${release}/app" "${integration}"; do
+    export MOCK_FINDMNT_MOUNTPOINT="${mounted_path}"
+    assert_classification_refused release-inventory
+  done
+}
+
+@test "[LIR-U1-R04] other-writable adopted directories remain refused" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local integration="${install_root}/.integration-12345"
+
+  seed_complete_initial_manager_layout
+  mkdir -p -- "${integration}/partial"
+  chmod 0777 "${integration}"
+
+  assert_classification_refused release-inventory
 }
 
 @test "[LIR-U1-R06] untraceable legacy effective defaults remain refused" {
@@ -844,6 +888,16 @@ EOF
   [ "${status}" -eq 1 ]
   [ "${output}" = \
     "refused|default-provenance:x-scheme-handler/devin|devin-desktop-url-handler.desktop" ]
+}
+
+@test "[LIR-U1-R06] added association cannot establish effective default provenance" {
+  seed_complete_initial_manager_layout
+  sed -i \
+    '0,/^x-scheme-handler\/devin=devin-desktop-url-handler.desktop;$/{/^x-scheme-handler\/devin=devin-desktop-url-handler.desktop;$/d;}' \
+    "${DEFAULTS_FILE}"
+  export MOCK_XDG_QUERY_DEVIN="devin-desktop-url-handler.desktop"
+
+  assert_classification_refused default-provenance:x-scheme-handler/devin
 }
 
 @test "[LIR-U1-R06] MIME provenance near-miss matrix remains refused" {
@@ -1167,6 +1221,94 @@ EOF
   grep -Fqx \
     'application/x-devin-desktop-workspace=workspace-extra.desktop;' \
     "${DEFAULTS_FILE}"
+}
+
+@test "[LIR-U2-R08] MIME cleanup does not replace an unchanged file" {
+  local mimeapps="${TEST_HOME}/.local/share/mimeapps.list"
+  local inode_before
+
+  install_fixture
+  printf '%s\n' \
+    '[Default Applications]' \
+    'text/plain=editor.desktop;' \
+    >"${mimeapps}"
+  inode_before="$(stat -c '%i' -- "${mimeapps}")"
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [ "$(stat -c '%i' -- "${mimeapps}")" = "${inode_before}" ]
+  grep -Fqx 'text/plain=editor.desktop;' "${mimeapps}"
+}
+
+@test "[LIR-U2-R08] MIME cleanup preserves extended attributes" {
+  local mimeapps="${TEST_HOME}/.local/share/mimeapps.list"
+
+  command -v setfattr >/dev/null 2>&1 || skip "setfattr is unavailable"
+  command -v getfattr >/dev/null 2>&1 || skip "getfattr is unavailable"
+  install_fixture
+  printf '%s\n' \
+    '[Added Associations]' \
+    'x-scheme-handler/devin=devin-desktop-manager-url-handler.desktop;' \
+    >"${mimeapps}"
+  setfattr -n user.devin-desktop-test -v preserved -- "${mimeapps}"
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [ "$(getfattr --only-values -n user.devin-desktop-test -- "${mimeapps}")" = \
+    "preserved" ]
+}
+
+@test "[LIR-U2-R08] MIME cleanup ignores a precreated predictable symlink" {
+  local mimeapps="${TEST_HOME}/.config/mimeapps.list"
+  local victim="${BATS_TEST_TMPDIR}/mime-victim"
+
+  mkdir -p -- "$(dirname "${mimeapps}")"
+  printf '%s\n' \
+    '[Added Associations]' \
+    'x-scheme-handler/devin=devin-desktop-manager-url-handler.desktop;' \
+    >"${mimeapps}"
+  printf 'do not overwrite\n' >"${victim}"
+
+  run env \
+    HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" \
+    bash -c '
+      source "$1"
+      ln -s -- "$3" "${CONFIG_HOME}/mimeapps.list.new.$$"
+      rewrite_mimeapps_without_handler \
+        "${CONFIG_HOME}/mimeapps.list" \
+        "${MIME_DEVIN}" "${URL_DESKTOP_ID}"
+    ' _ "${MANAGER}" "${mimeapps}" "${victim}"
+
+  [ "${status}" -eq 0 ]
+  [ "$(cat "${victim}")" = "do not overwrite" ]
+  [ -f "${mimeapps}" ]
+  [ ! -L "${mimeapps}" ]
+}
+
+@test "[LIR-U2-R08] MIME cleanup refuses an other-writable parent" {
+  local data_home="${TEST_HOME}/.local/share"
+  local mimeapps="${data_home}/mimeapps.list"
+  local before
+
+  install_fixture
+  printf '%s\n' \
+    '[Added Associations]' \
+    'x-scheme-handler/devin=devin-desktop-manager-url-handler.desktop;' \
+    >"${mimeapps}"
+  before="$(sha256sum "${mimeapps}" | awk '{print $1}')"
+  chmod 0777 "${data_home}"
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -ne 0 ]
+  [ "$(sha256sum "${mimeapps}" | awk '{print $1}')" = "${before}" ]
 }
 
 @test "[LIR-U2-R06] post-write default mismatch restores and retries safely" {

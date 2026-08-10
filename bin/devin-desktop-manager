@@ -302,12 +302,12 @@ preflight_capabilities_release_state() {
 }
 
 preflight_capabilities_timed_mutation() {
-  preflight_check_commands flock stat find timeout mv mktemp unshare cp chmod rm \
+  preflight_check_commands flock stat find findmnt timeout mv mktemp unshare cp chmod rm \
     mkdir ln rmdir cat cmp true
 }
 
 preflight_capabilities_untimed_mutation() {
-  preflight_check_commands flock stat find mv mktemp cp chmod rm mkdir ln rmdir \
+  preflight_check_commands flock stat find findmnt mv mktemp cp chmod rm mkdir ln rmdir \
     cat cmp
 }
 
@@ -321,7 +321,7 @@ preflight_capabilities_desktop_integration() {
 }
 
 preflight_capabilities_doctor() {
-  preflight_check_commands jq sha256sum grep awk stat find timeout unshare cat \
+  preflight_check_commands jq sha256sum grep awk stat find findmnt timeout unshare cat \
     true basename
 }
 
@@ -878,12 +878,12 @@ require_download_commands() {
 }
 
 require_release_commands() {
-  require_commands jq sha256sum ldd readlink find timeout
+  require_commands jq sha256sum ldd readlink find findmnt timeout
 }
 
 require_mutation_commands() {
   require_download_commands
-  require_commands flock ldd readlink find mktemp timeout unshare
+  require_commands flock ldd readlink find findmnt mktemp timeout unshare
 }
 
 require_integration_commands() {
@@ -1490,7 +1490,7 @@ legacy_install_root_is_valid() {
   local entry name
   local saw_lock=false saw_releases=false
 
-  legacy_directory_is_user_owned "${INSTALL_ROOT}" || return 1
+  legacy_tree_is_user_owned_and_unmounted "${INSTALL_ROOT}" || return 1
   directory_can_be_listed "${INSTALL_ROOT}" || return 1
   while IFS= read -r -d '' entry; do
     name="$(basename "${entry}")"
@@ -1542,7 +1542,7 @@ legacy_cache_root_is_valid() {
   if [[ ! -e "${CACHE_ROOT}" && ! -L "${CACHE_ROOT}" ]]; then
     return 0
   fi
-  legacy_directory_is_user_owned "${CACHE_ROOT}" || return 1
+  legacy_tree_is_user_owned_and_unmounted "${CACHE_ROOT}" || return 1
   directory_can_be_listed "${CACHE_ROOT}" || return 1
   legacy_root_marker_is_compatible "${CACHE_ROOT}" || return 1
   while IFS= read -r -d '' entry; do
@@ -1570,7 +1570,7 @@ legacy_cache_root_is_valid() {
 legacy_state_root_is_valid() {
   local entry name
 
-  legacy_directory_is_user_owned "${STATE_DIR}" || return 1
+  legacy_tree_is_user_owned_and_unmounted "${STATE_DIR}" || return 1
   directory_can_be_listed "${STATE_DIR}" || return 1
   legacy_root_marker_is_compatible "${STATE_DIR}" || return 1
   while IFS= read -r -d '' entry; do
@@ -1595,7 +1595,7 @@ legacy_pre_activation_state_root_is_valid() {
   if [[ ! -e "${STATE_DIR}" && ! -L "${STATE_DIR}" ]]; then
     return 0
   fi
-  legacy_directory_is_user_owned "${STATE_DIR}" || return 1
+  legacy_tree_is_user_owned_and_unmounted "${STATE_DIR}" || return 1
   directory_can_be_listed "${STATE_DIR}" || return 1
   legacy_root_marker_is_compatible "${STATE_DIR}" || return 1
   while IFS= read -r -d '' entry; do
@@ -1722,15 +1722,41 @@ legacy_directory_is_user_owned() {
     "$(stat -c '%u' -- "${path}" 2>/dev/null)" == "${EUID}" ]]
 }
 
-legacy_release_tree_is_user_owned() {
-  local release_dir="$1"
+legacy_tree_is_user_owned_and_unmounted() {
+  local root="$1"
+  local mountpoints
 
-  legacy_directory_is_user_owned "${release_dir}" || return 1
-  find "${release_dir}" -xdev -exec stat -c '%u' -- {} + |
+  legacy_directory_is_user_owned "${root}" || return 1
+  find "${root}" -xdev -exec stat -c '%u' -- {} + |
     awk -v expected_owner="${EUID}" '
       $0 != expected_owner { invalid = 1 }
       END { exit invalid ? 1 : 0 }
-    '
+    ' || return 1
+  find "${root}" -xdev -type d -exec stat -c '%u %a' -- {} + |
+    awk -v expected_owner="${EUID}" '
+      {
+        mode = $2
+        group_mode = substr(mode, length(mode) - 1, 1)
+        other_mode = substr(mode, length(mode), 1)
+        if ($1 != expected_owner || mode !~ /^[0-7]+$/ ||
+            (length(mode) != 3 && length(mode) != 4) ||
+            group_mode ~ /[2367]/ || other_mode ~ /[2367]/) {
+          invalid = 1
+        }
+      }
+      END { exit invalid ? 1 : 0 }
+    ' || return 1
+  mountpoints="$({
+    find "${root}" -xdev -type d \
+      -exec findmnt -rn --mountpoint {} -o TARGET \; 2>/dev/null
+  })" || return 1
+  [[ -z "${mountpoints}" ]]
+}
+
+legacy_release_tree_is_user_owned() {
+  local release_dir="$1"
+
+  legacy_tree_is_user_owned_and_unmounted "${release_dir}"
 }
 
 legacy_desktop_is_user_regular() {
@@ -1958,11 +1984,13 @@ legacy_mimeapps_file_is_safe() {
         LEGACY_OBSERVED="${desktop_id}"
         return 1
       fi
-      case "${mime_type}" in
-        "${MIME_DEVIN}") LEGACY_PROVENANCE_DEVIN=true ;;
-        "${MIME_WINDSURF}") LEGACY_PROVENANCE_WINDSURF=true ;;
-        "${MIME_WORKSPACE}") LEGACY_PROVENANCE_WORKSPACE=true ;;
-      esac
+      if [[ "${section}" == "[Default Applications]" ]]; then
+        case "${mime_type}" in
+          "${MIME_DEVIN}") LEGACY_PROVENANCE_DEVIN=true ;;
+          "${MIME_WINDSURF}") LEGACY_PROVENANCE_WINDSURF=true ;;
+          "${MIME_WORKSPACE}") LEGACY_PROVENANCE_WORKSPACE=true ;;
+        esac
+      fi
     done
   done <"${file}"
 }
@@ -5046,15 +5074,42 @@ command_doctor() {
   fi
 }
 
+mimeapps_parent_is_safe() {
+  local file="$1"
+  local parent permissions group_mode other_mode
+
+  parent="$(dirname "${file}")"
+  legacy_directory_is_user_owned "${parent}" || return 1
+  permissions="$(stat -c '%a' -- "${parent}" 2>/dev/null)" || return 1
+  [[ "${permissions}" =~ ^[0-7]{3,4}$ ]] || return 1
+  permissions="${permissions: -3}"
+  group_mode="${permissions:1:1}"
+  other_mode="${permissions:2:1}"
+  (((group_mode & 2) == 0 && (other_mode & 2) == 0))
+}
+
+mimeapps_temporary_is_safe() {
+  local temporary="$1"
+
+  [[ -f "${temporary}" && ! -L "${temporary}" &&
+    "$(stat -c '%u:%h' -- "${temporary}" 2>/dev/null)" == "${EUID}:1" ]]
+}
+
 rewrite_mimeapps_without_handler() {
   local file="$1"
   local mime_type="$2"
   local desktop_id="$3"
   local temporary
 
-  [[ -f "${file}" && ! -L "${file}" ]] || return 0
-  temporary="${file}.new.$$"
-  awk -v mime="${mime_type}" -v remove_id="${desktop_id}" '
+  [[ -e "${file}" || -L "${file}" ]] || return 0
+  legacy_file_is_user_regular "${file}" || return 1
+  mimeapps_parent_is_safe "${file}" || return 1
+  temporary="$(mktemp -- "${file}.new.XXXXXXXX")" || return 1
+  if ! mimeapps_temporary_is_safe "${temporary}"; then
+    rm -f -- "${temporary}" || true
+    return 1
+  fi
+  if ! awk -v mime="${mime_type}" -v remove_id="${desktop_id}" '
     /^\[/ { section = $0 }
     (section == "[Default Applications]" ||
       section == "[Added Associations]") && index($0, mime "=") == 1 {
@@ -5072,9 +5127,21 @@ rewrite_mimeapps_without_handler() {
       next
     }
     { print }
-  ' "${file}" >"${temporary}" || return 1
-  chmod --reference="${file}" "${temporary}" || return 1
-  mv -Tf -- "${temporary}" "${file}" || return 1
+  ' "${file}" >"${temporary}"; then
+    rm -f -- "${temporary}" || true
+    return 1
+  fi
+  if cmp -s -- "${file}" "${temporary}"; then
+    rm -f -- "${temporary}" || return 1
+    return 0
+  fi
+  if ! cp --attributes-only --preserve=all -- "${file}" "${temporary}" ||
+    ! chmod --reference="${file}" "${temporary}" ||
+    ! mimeapps_temporary_is_safe "${temporary}" ||
+    ! mv -Tf -- "${temporary}" "${file}"; then
+    rm -f -- "${temporary}" || true
+    return 1
+  fi
   record_user_configuration_path_result "${file}"
 }
 
@@ -5458,7 +5525,7 @@ perform_uninstall() {
 command_uninstall() {
   local answer="${1:-}"
 
-  require_commands jq sha256sum readlink flock awk mktemp find
+  require_commands jq sha256sum readlink flock awk mktemp find findmnt
   require_integration_commands
 
   if [[ "${answer}" != "--yes" ]]; then
