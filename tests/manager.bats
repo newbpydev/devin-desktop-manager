@@ -443,6 +443,23 @@ query_default() {
     "${MOCK_BIN}/xdg-mime" query default "$1"
 }
 
+write_fallback_desktop() {
+  local path="$1"
+  local name="$2"
+  local hidden="${3:-false}"
+
+  mkdir -p -- "$(dirname "${path}")"
+  printf '%s\n' \
+    '[Desktop Entry]' \
+    'Type=Application' \
+    "Name=${name}" \
+    'Exec=/bin/true' \
+    >"${path}"
+  if [[ "${hidden}" == "true" ]]; then
+    printf 'Hidden=true\n' >>"${path}"
+  fi
+}
+
 install_fixture() {
   write_manifest_curl \
     "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
@@ -917,12 +934,13 @@ EOF
 }
 
 @test "[LIR-U1-R04] adopted tree mount scan preserves spaced target identity" {
-  local root="${TEST_HOME}/tree with space"
+  local canonical_root="${TEST_HOME}/tree with space"
+  local root="${TEST_HOME}/alias/../tree with space"
 
-  mkdir -p -- "${root}/mounted file"
+  mkdir -p -- "${TEST_HOME}/alias" "${canonical_root}/mounted file"
   cat >"${MOCK_BIN}/findmnt" <<EOF
 #!/usr/bin/env bash
-jq -n --arg target "${root}/mounted file" \
+jq -n --arg target "${canonical_root}/mounted file" \
   '{filesystems: [{target: \$target}]}'
 EOF
   chmod 0755 "${MOCK_BIN}/findmnt"
@@ -1257,10 +1275,9 @@ EOF
   local state_file="${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
 
   seed_complete_initial_manager_layout
-  touch \
-    "${applications}/browser.desktop" \
-    "${applications}/editor.desktop" \
-    "${applications}/workspace.desktop"
+  write_fallback_desktop "${applications}/browser.desktop" Browser
+  write_fallback_desktop "${applications}/editor.desktop" Editor
+  write_fallback_desktop "${applications}/workspace.desktop" Workspace
   sed -i \
     's#^x-scheme-handler/devin=devin-desktop-url-handler.desktop;$#x-scheme-handler/devin=devin-desktop-url-handler.desktop;browser.desktop;#' \
     "${DEFAULTS_FILE}"
@@ -1304,14 +1321,39 @@ EOF
   local state_file="${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
 
   seed_complete_initial_manager_layout
-  printf '%s\n' \
-    '[Desktop Entry]' \
-    'Type=Application' \
-    'Name=Browser' \
-    >"${applications}/browser.desktop"
+  write_fallback_desktop "${applications}/browser.desktop" Browser
   sed -i \
     's#^x-scheme-handler/devin=devin-desktop-url-handler.desktop;$#x-scheme-handler/devin=devin-desktop-url-handler.desktop;missing.desktop;browser.desktop;#' \
     "${DEFAULTS_FILE}"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  [ "$(jq -r '.originalDefaults["x-scheme-handler/devin"]' "${state_file}")" = \
+    "browser.desktop" ]
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [ "$(query_default x-scheme-handler/devin)" = "browser.desktop" ]
+}
+
+@test "[LIR-U2-R08] hidden fallback masks lower-precedence desktop copies" {
+  local applications="${TEST_HOME}/.local/share/applications"
+  local state_file="${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
+  local system_data="${BATS_TEST_TMPDIR}/system/share"
+
+  seed_complete_initial_manager_layout
+  write_fallback_desktop "${applications}/hidden.desktop" Hidden true
+  write_fallback_desktop \
+    "${system_data}/applications/hidden.desktop" 'System Hidden Copy'
+  write_fallback_desktop "${applications}/browser.desktop" Browser
+  sed -i \
+    's#^x-scheme-handler/devin=devin-desktop-url-handler.desktop;$#x-scheme-handler/devin=devin-desktop-url-handler.desktop;hidden.desktop;browser.desktop;#' \
+    "${DEFAULTS_FILE}"
+  export XDG_DATA_DIRS="${system_data}"
   write_manifest_curl \
     "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
 
@@ -1332,12 +1374,8 @@ EOF
   local state_file="${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
 
   seed_complete_initial_manager_layout
-  mkdir -p -- "${applications}/vendor-name"
-  printf '%s\n' \
-    '[Desktop Entry]' \
-    'Type=Application' \
-    'Name=Editor' \
-    >"${applications}/vendor-name/editor.desktop"
+  write_fallback_desktop \
+    "${applications}/vendor-name/editor.desktop" Editor
   sed -i \
     's#^x-scheme-handler/devin=devin-desktop-url-handler.desktop;$#x-scheme-handler/devin=devin-desktop-url-handler.desktop;vendor-name-editor.desktop;#' \
     "${DEFAULTS_FILE}"

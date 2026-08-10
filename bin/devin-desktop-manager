@@ -1748,6 +1748,7 @@ legacy_symlink_is_user_owned() {
 
 legacy_tree_is_user_owned_and_unmounted() {
   local root="$1"
+  local canonical_root
 
   legacy_directory_is_user_owned "${root}" || return 1
   user_directory_ancestry_is_safe "${root}" || return 1
@@ -1770,8 +1771,10 @@ legacy_tree_is_user_owned_and_unmounted() {
       }
       END { exit invalid ? 1 : 0 }
     ' || return 1
-  findmnt -J -R --target "${root}" -o TARGET 2>/dev/null |
-    jq -e --arg root "${root}" '
+  canonical_root="$(readlink -f -- "${root}")" || return 1
+  findmnt -J -R --canonicalize \
+    --target "${canonical_root}" -o TARGET 2>/dev/null |
+    jq -e --arg root "${canonical_root}" '
       [.. | objects | .target? // empty] as $targets |
       ($targets | length) > 0 and
       ($targets | all(. != $root and (startswith($root + "/") | not)))
@@ -1933,7 +1936,11 @@ legacy_desktop_relative_path_is_available() {
   local desktop_id="$2"
   local prefix="" remainder="${desktop_id}" segment
 
-  [[ -f "${directory}/${desktop_id}" ]] && return 0
+  if [[ -e "${directory}/${desktop_id}" ||
+    -L "${directory}/${desktop_id}" ]]; then
+    LEGACY_DESKTOP_CANDIDATE="${directory}/${desktop_id}"
+    return 0
+  fi
   while [[ "${remainder}" == *-* ]]; do
     segment="${remainder%%-*}"
     remainder="${remainder#*-}"
@@ -1953,6 +1960,30 @@ legacy_desktop_relative_path_is_available() {
   return 1
 }
 
+legacy_desktop_candidate_is_available() {
+  local path="$1"
+
+  [[ -f "${path}" ]] || return 1
+  desktop-file-validate "${path}" >/dev/null 2>&1 || return 1
+  awk '
+    $0 == "[Desktop Entry]" { in_desktop = 1; next }
+    /^\[/ { in_desktop = 0 }
+    in_desktop && /^[[:space:]]*Type[[:space:]]*=/ {
+      value = $0
+      sub(/^[^=]*=[[:space:]]*/, "", value)
+      sub(/[[:space:]]*$/, "", value)
+      type = value
+    }
+    in_desktop && /^[[:space:]]*Hidden[[:space:]]*=/ {
+      value = $0
+      sub(/^[^=]*=[[:space:]]*/, "", value)
+      sub(/[[:space:]]*$/, "", value)
+      if (value == "true" || value == "1") hidden = 1
+    }
+    END { exit type == "Application" && !hidden ? 0 : 1 }
+  ' "${path}"
+}
+
 legacy_desktop_id_is_available() {
   local desktop_id="$1"
   local data_directory
@@ -1967,8 +1998,13 @@ legacy_desktop_id_is_available() {
     data_directories+=("${data_directory}")
   done
   for data_directory in "${data_directories[@]}"; do
-    legacy_desktop_relative_path_is_available \
-      "${data_directory}/applications" "${desktop_id}" && return 0
+    LEGACY_DESKTOP_CANDIDATE=""
+    if legacy_desktop_relative_path_is_available \
+      "${data_directory}/applications" "${desktop_id}"; then
+      legacy_desktop_candidate_is_available "${LEGACY_DESKTOP_CANDIDATE}" &&
+        return 0
+      return 1
+    fi
   done
   return 1
 }
