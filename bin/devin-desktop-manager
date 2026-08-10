@@ -322,7 +322,7 @@ preflight_capabilities_desktop_integration() {
 
 preflight_capabilities_doctor() {
   preflight_check_commands jq sha256sum grep awk stat find findmnt timeout unshare cat \
-    true basename
+    true dirname basename
 }
 
 preflight_check_environment() {
@@ -878,7 +878,7 @@ require_download_commands() {
 }
 
 require_release_commands() {
-  require_commands jq sha256sum ldd readlink find findmnt timeout
+  require_commands jq sha256sum ldd readlink find findmnt timeout dirname
 }
 
 require_mutation_commands() {
@@ -1914,7 +1914,7 @@ legacy_mimeapps_file_is_safe() {
     LEGACY_OBSERVED="${file}"
     return 1
   }
-  mimeapps_parent_is_safe "${file}" || {
+  user_file_parent_is_safe "${file}" || {
     LEGACY_REASON="default-provenance:unknown"
     LEGACY_OBSERVED="${file}"
     return 1
@@ -2094,6 +2094,18 @@ classify_initial_manager_defaults() {
 initial_manager_integration_is_valid() {
   local path
 
+  for path in \
+    "${APP_COMMAND}" \
+    "${LEGACY_MAIN_DESKTOP}" \
+    "${LEGACY_URL_DESKTOP}" \
+    "${LEGACY_ICON_FILE}" \
+    "${LEGACY_MIME_FILE}"; do
+    user_file_parent_is_safe "${path}" || {
+      LEGACY_REASON="install-root"
+      LEGACY_OBSERVED="$(dirname "${path}")"
+      return 1
+    }
+  done
   [[ -L "${APP_COMMAND}" &&
     "$(readlink "${APP_COMMAND}")" == "${CURRENT_LINK}/app/bin/devin-desktop" ]] || {
     LEGACY_REASON="app-link"
@@ -5079,7 +5091,7 @@ command_doctor() {
   fi
 }
 
-mimeapps_parent_is_safe() {
+user_file_parent_is_safe() {
   local file="$1"
   local parent permissions group_mode other_mode
 
@@ -5108,7 +5120,7 @@ rewrite_mimeapps_without_handler() {
 
   [[ -e "${file}" || -L "${file}" ]] || return 0
   legacy_file_is_user_regular "${file}" || return 1
-  mimeapps_parent_is_safe "${file}" || return 1
+  user_file_parent_is_safe "${file}" || return 1
   temporary="$(mktemp -- "${file}.new.XXXXXXXX")" || return 1
   if ! mimeapps_temporary_is_safe "${temporary}"; then
     rm -f -- "${temporary}" || true

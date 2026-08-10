@@ -888,6 +888,22 @@ EOF
   assert_classification_refused release-inventory
 }
 
+@test "[LIR-U1-R04] unsafe legacy integration parents remain refused" {
+  local data_home="${TEST_HOME}/.local/share"
+  local path
+
+  seed_complete_initial_manager_layout
+  for path in \
+    "${TEST_HOME}/.local/bin" \
+    "${data_home}/applications" \
+    "${data_home}/icons/hicolor/512x512/apps" \
+    "${data_home}/mime/packages"; do
+    chmod 0777 "${path}"
+    assert_classification_refused install-root
+    chmod 0755 "${path}"
+  done
+}
+
 @test "[LIR-U1-R06] untraceable legacy effective defaults remain refused" {
   seed_complete_initial_manager_layout
   sed -i \
@@ -1638,6 +1654,20 @@ EOF
   [[ "${output}" == *"readlink"* ]]
   [[ "${output}" != *"bsdtar"* ]]
   [ ! -e "${TEST_HOME}/.local/state" ]
+}
+
+@test "[PMC-U2-R02] doctor preflight includes parent-path capabilities" {
+  run env HOME="${TEST_HOME}" bash -c '
+    source "$1"
+    preflight_check_commands() {
+      printf "%s\n" "$@"
+    }
+    preflight_capabilities_doctor
+  ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *$'\ndirname\n'* || "${output}" == dirname$'\n'* ||
+    "${output}" == *$'\ndirname' ]]
 }
 
 @test "[PMC-U2-R03] private profiles reject unknown commands as usage" {
