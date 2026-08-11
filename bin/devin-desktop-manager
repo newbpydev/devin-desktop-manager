@@ -2103,6 +2103,10 @@ legacy_desktop_id_is_available() {
     LEGACY_DESKTOP_CANDIDATE=""
     if legacy_desktop_relative_path_is_available \
       "${data_directory}/applications" "${desktop_id}"; then
+      if [[ -L "${LEGACY_DESKTOP_CANDIDATE}" &&
+        ! -e "${LEGACY_DESKTOP_CANDIDATE}" ]]; then
+        continue
+      fi
       legacy_desktop_candidate_is_available "${LEGACY_DESKTOP_CANDIDATE}" &&
         return 0
       return 1

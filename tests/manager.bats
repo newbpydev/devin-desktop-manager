@@ -1471,6 +1471,35 @@ EOF
   [ "$(query_default x-scheme-handler/devin)" = "browser.desktop" ]
 }
 
+@test "[LIR-U2-R08] dangling fallback links do not mask system copies" {
+  local applications="${TEST_HOME}/.local/share/applications"
+  local state_file="${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
+  local system_data="${BATS_TEST_TMPDIR}/system/share"
+
+  seed_complete_initial_manager_layout
+  ln -s -- missing.desktop "${applications}/browser.desktop"
+  write_fallback_desktop \
+    "${system_data}/applications/browser.desktop" 'System Browser'
+  write_fallback_desktop "${applications}/editor.desktop" Editor
+  sed -i \
+    's#^x-scheme-handler/devin=devin-desktop-url-handler.desktop;$#x-scheme-handler/devin=devin-desktop-url-handler.desktop;missing.desktop;browser.desktop;editor.desktop;#' \
+    "${DEFAULTS_FILE}"
+  export XDG_DATA_DIRS="${system_data}"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  [ "$(jq -r '.originalDefaults["x-scheme-handler/devin"]' "${state_file}")" = \
+    "browser.desktop" ]
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [ "$(query_default x-scheme-handler/devin)" = "browser.desktop" ]
+}
+
 @test "[LIR-U2-R08] update resolves nested desktop ID fallbacks" {
   local applications="${TEST_HOME}/.local/share/applications"
   local state_file="${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
