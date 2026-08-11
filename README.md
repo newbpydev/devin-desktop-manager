@@ -130,11 +130,27 @@ mode `0600` at
 Desktop, icon, and MIME files use manager-specific names under
 `${XDG_DATA_HOME:-~/.local/share}`.
 
-An installation created by the public 0.1.0 layout is migrated automatically
-after its release links, metadata, state paths, and managed-file hashes all
-validate. This is the only non-empty markerless layout the manager adopts. For
-any other markerless root, the manager stops without changing it; move the
-conflicting directory aside and inspect it manually.
+Recognized markerless installations are migrated automatically only after all
+profile-specific ownership evidence validates. This includes the public 0.1.0
+layouts and the complete initial-manager layout with exact legacy desktop
+semantics, release-matching assets, and traceable MIME associations. `doctor`
+reports that exact state as a recoverable Legacy Installation. A near-miss,
+modern manager default without state, modified file, or untraceable association
+is left unchanged; inspect or move aside the reported conflict. Do not add a
+marker by hand or delete a lock to force adoption.
+
+If an installed 0.1.0 manager refuses this legacy profile, first obtain the
+verified 0.1.1 source, then install the fixed manager before updating the app:
+
+```bash
+make install-manager
+devin-desktop-manager --version
+make update
+make doctor
+```
+
+The old manager's `update` command updates Devin Desktop, not the manager
+binary, so it cannot bootstrap this compatibility fix by itself.
 
 The separate official `devin` CLI and Devin/Windsurf user configuration are
 outside this project's ownership and are preserved by uninstall.

@@ -6,8 +6,8 @@ Devin Desktop Manager v0.1 supports glibc-based Linux x86_64 desktops with:
 
 - Bash 4.4 or newer;
 - GNU Make compatible with 4.3 behavior or newer;
-- `curl`, `jq`, `bsdtar`, `sha256sum`, `flock`, `ldd`, `readlink`, `find`,
-  `timeout`, `unshare`, and standard POSIX text tools;
+- `curl`, `jq`, `bsdtar`, `sha256sum`, `flock`, `ldd`, `readlink`,
+  `find`, `timeout`, `unshare`, and standard POSIX text tools;
 - `desktop-file-validate`, `update-desktop-database`,
   `update-mime-database`, and `xdg-mime`;
 - unprivileged user namespaces.
@@ -33,8 +33,8 @@ verify it, then extract and install:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf devin-desktop-manager-0.1.0.tar.gz
-cd devin-desktop-manager-0.1.0
+tar -xzf devin-desktop-manager-0.1.1.tar.gz
+cd devin-desktop-manager-0.1.1
 make install
 make doctor
 ```
@@ -61,6 +61,33 @@ make doctor
 No command requires `sudo`. Running the manager as root is intentionally
 refused. Add `~/.local/bin` to `PATH` if your distribution does not already.
 
+## Recover an installation made by the initial manager
+
+Start from verified 0.1.1 source. The old 0.1.0 manager cannot update itself;
+its `update` command updates Devin Desktop only. From the verified Git checkout
+or extracted 0.1.1 archive, publish the repaired manager first and prove which
+binary will run:
+
+```bash
+make install-manager
+devin-desktop-manager --version
+# Expected: devin-desktop-manager 0.1.1
+make doctor
+make update
+make doctor
+```
+
+Before recovery, `doctor` returns status 1 and identifies an exact complete
+initial-manager profile as a recoverable Legacy Installation. `update`,
+`rollback`, and uninstall revalidate that profile under their normal locks;
+they never treat the earlier diagnosis as ownership authority. Close Devin
+Desktop if requested, then retry the same command.
+
+A refusal naming an invariant means the layout is not safely attributable.
+Ownership was not claimed. Preserve the files, inspect or move aside only the
+reported conflict, and retry. Do not add a marker by hand, edit release
+metadata, delete transaction state, or remove persistent lock files.
+
 Checkout targets always execute `bin/devin-desktop-manager`. The legacy
 `MANAGER=...` Make override is no longer accepted; call a separately installed
 manager directly when that is what you intend to test. `COVERAGE_DIR` and
@@ -71,12 +98,13 @@ command.
 ## Existing path collisions
 
 The manager creates versioned ownership markers in its installation, cache,
-and state roots. It automatically migrates the public 0.1.0 markerless layout
-only after validating its release links, release metadata, state paths, and
-managed-file hashes. A near-miss or any other path containing data without a
-valid marker is left unchanged. Move that conflicting path aside, inspect its
-contents, and retry. Do not add a marker by hand: ownership metadata is part of
-the manager's deletion safety boundary.
+and state roots. It automatically migrates the recognized public 0.1.0 layouts
+and the complete initial-manager profile only after validating their release
+links, metadata, state paths, desktop semantics, assets, and MIME provenance. A
+near-miss or any other path containing data without valid proof is left
+unchanged. Move that conflicting path aside, inspect its contents, and retry.
+Do not add a marker by hand: ownership metadata is part of the manager's
+deletion safety boundary.
 
 Interrupted mutations leave a private transaction journal beside the state
 directory. The next mutating command acquires the manager lock and restores

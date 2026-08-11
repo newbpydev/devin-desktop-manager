@@ -38,7 +38,7 @@ make --version | sed -n '1p'
 
 mkdir -p -- "${HOME:?}" "${TMPDIR:?}"
 
-filter='^\[PMC-(U1-R0[134]|U2-R0[2345]|U3-R0[2357]|U10-R0[14]|U5-R0[25]|U6-R0[12]|U7-R02|U8-R0[1-4])\]'
+filter='^(\[PMC-(U1-R0[134]|U2-R0[2345]|U3-R0[2357]|U10-R0[14]|U5-R0[25]|U6-R0[12]|U7-R02|U8-R0[1-4])\]|\[LIR-(U1-R0[14]|U2-R06|U3-R01|U4-R0[1236])\])'
 files=(
   tests/makefile.bats
   tests/preflight.bats

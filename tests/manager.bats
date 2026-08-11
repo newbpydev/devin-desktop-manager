@@ -54,6 +54,20 @@ start_lock_holder() {
   return 1
 }
 
+wait_for_process_executable() {
+  local process_id="$1"
+  local expected="$2"
+  local attempt executable
+
+  for attempt in {1..500}; do
+    executable="$(readlink "/proc/${process_id}/exe" 2>/dev/null || true)"
+    [[ "${executable}" == "${expected}" ]] && return 0
+    kill -0 "${process_id}" 2>/dev/null || return 1
+    sleep 0.01
+  done
+  return 1
+}
+
 teardown() {
   stop_lock_holder
 }
@@ -114,8 +128,25 @@ case "${1:-}" in
       "${KDE_SESSION_VERSION:-}" == "5" ]]; then
       exit 4
     fi
+    if [[ -n "${MOCK_XDG_QUERY_AFTER_DEFAULT:-}" &&
+      -e "${CURL_LOG}.xdg-default-called" ]]; then
+      printf '%s\n' "${MOCK_XDG_QUERY_AFTER_DEFAULT}"
+      exit 0
+    fi
+    case "$3" in
+      x-scheme-handler/devin) override="${MOCK_XDG_QUERY_DEVIN:-}" ;;
+      x-scheme-handler/windsurf) override="${MOCK_XDG_QUERY_WINDSURF:-}" ;;
+      application/x-devin-desktop-workspace)
+        override="${MOCK_XDG_QUERY_WORKSPACE:-}"
+        ;;
+      *) override="" ;;
+    esac
+    if [[ -n "${override}" ]]; then
+      printf '%s\n' "${override}"
+      exit 0
+    fi
     [[ -f "${database}" ]] || exit 0
-    awk -F= -v key="$3" '
+    current="$(awk -F= -v key="$3" '
       $0 == "[Default Applications]" { defaults = 1; next }
       /^\[/ { defaults = 0 }
       defaults && $1 == key {
@@ -123,12 +154,26 @@ case "${1:-}" in
         print $2
         exit
       }
-    ' "${database}"
+    ' "${database}")"
+    if [[ -n "${current}" ]]; then
+      printf '%s\n' "${current}"
+      exit 0
+    fi
+    case "$3" in
+      x-scheme-handler/devin) fallback="${MOCK_XDG_FALLBACK_DEVIN:-}" ;;
+      x-scheme-handler/windsurf) fallback="${MOCK_XDG_FALLBACK_WINDSURF:-}" ;;
+      application/x-devin-desktop-workspace)
+        fallback="${MOCK_XDG_FALLBACK_WORKSPACE:-}"
+        ;;
+      *) fallback="" ;;
+    esac
+    printf '%s\n' "${fallback}"
     ;;
   default)
     [[ $# -eq 3 ]] || exit 2
     desktop_id="$2"
     mime_type="$3"
+    : >"${CURL_LOG}.xdg-default-called"
     temporary="${database}.tmp"
     [[ -f "${database}" ]] || printf '[Default Applications]\n' >"${database}"
     awk -v key="${mime_type}" -v value="${desktop_id};" '
@@ -398,6 +443,23 @@ query_default() {
     "${MOCK_BIN}/xdg-mime" query default "$1"
 }
 
+write_fallback_desktop() {
+  local path="$1"
+  local name="$2"
+  local hidden="${3:-false}"
+
+  mkdir -p -- "$(dirname "${path}")"
+  printf '%s\n' \
+    '[Desktop Entry]' \
+    'Type=Application' \
+    "Name=${name}" \
+    'Exec=/bin/true' \
+    >"${path}"
+  if [[ "${hidden}" == "true" ]]; then
+    printf 'Hidden=true\n' >>"${path}"
+  fi
+}
+
 install_fixture() {
   write_manifest_curl \
     "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
@@ -419,14 +481,1690 @@ downgrade_to_public_0_1_layout() {
     "${install_root}/.devin-desktop-manager-owned" \
     "${cache_root}/.devin-desktop-manager-owned" \
     "${state_root}/.devin-desktop-manager-owned"
+  if [[ -f "${state_root}/state.json" ]]; then
+    temporary="${state_root}/state.json.legacy"
+    jq '.managerVersion = "0.1.0"' \
+      "${state_root}/state.json" >"${temporary}"
+    mv -Tf -- "${temporary}" "${state_root}/state.json"
+  fi
   : >"${install_root}/.manager.lock"
 }
 
-@test "version reports the public CLI contract" {
+seed_complete_initial_manager_layout() {
+  install_fixture
+  downgrade_owned_installation_to_initial_manager_layout
+}
+
+seed_complete_initial_manager_layout_with_previous() {
+  local second="${BATS_TEST_TMPDIR}/legacy-previous.deb"
+  local second_build="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+  install_fixture
+  "${FIXTURE_BUILDER}" "${second}" safe "${second_build}" "3.4.28"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${second_build}/Devin-linux-x64-3.4.28.deb" \
+    "${second}" "3.4.28" "${second_build}" 1783378474000
+  manager_env update
+  downgrade_owned_installation_to_initial_manager_layout
+}
+
+downgrade_owned_installation_to_initial_manager_layout() {
+  local data_home="${TEST_HOME}/.local/share"
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+
+  downgrade_to_public_0_1_layout
+  rm -f -- "${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
+  rm -f -- \
+    "${data_home}/applications/devin-desktop-manager.desktop" \
+    "${data_home}/applications/devin-desktop-manager-url-handler.desktop"
+  mv -- \
+    "${data_home}/icons/hicolor/512x512/apps/devin-desktop-manager.png" \
+    "${data_home}/icons/hicolor/512x512/apps/devin-desktop.png"
+  mv -- \
+    "${data_home}/mime/packages/devin-desktop-manager-workspace.xml" \
+    "${data_home}/mime/packages/devin-desktop-workspace.xml"
+  cat >"${data_home}/applications/devin-desktop.desktop" <<EOF
+[Desktop Entry]
+Name=Devin
+Comment=Tomorrow's Editor, Today.
+GenericName=Text Editor
+Exec="${TEST_HOME}/.local/bin/devin-desktop" %F
+TryExec=${TEST_HOME}/.local/bin/devin-desktop
+Icon=devin-desktop
+Type=Application
+StartupNotify=false
+StartupWMClass=Devin
+Categories=TextEditor;Development;IDE;
+MimeType=application/x-devin-desktop-workspace;
+Actions=new-empty-window;
+Keywords=vscode;
+X-Devin-Desktop-Manager=true
+
+[Desktop Action new-empty-window]
+Name=New Empty Window
+Exec="${TEST_HOME}/.local/bin/devin-desktop" --new-window %F
+Icon=devin-desktop
+EOF
+  cat >"${data_home}/applications/devin-desktop-url-handler.desktop" <<EOF
+[Desktop Entry]
+Name=Devin - URL Handler
+Comment=Tomorrow's Editor, Today.
+GenericName=Text Editor
+Exec="${TEST_HOME}/.local/bin/devin-desktop" --open-url %U
+TryExec=${TEST_HOME}/.local/bin/devin-desktop
+Icon=devin-desktop
+Type=Application
+NoDisplay=true
+StartupNotify=true
+StartupWMClass=Devin
+Categories=Utility;TextEditor;Development;IDE;
+MimeType=x-scheme-handler/devin;x-scheme-handler/windsurf;
+Keywords=vscode;
+X-Devin-Desktop-Manager=true
+EOF
+  chmod 0644 \
+    "${data_home}/applications/devin-desktop.desktop" \
+    "${data_home}/applications/devin-desktop-url-handler.desktop"
+  mkdir -p "$(dirname "${DEFAULTS_FILE}")"
+  cat >"${DEFAULTS_FILE}" <<'EOF'
+[Default Applications]
+x-scheme-handler/devin=devin-desktop-url-handler.desktop;
+x-scheme-handler/windsurf=devin-desktop-url-handler.desktop;
+application/x-devin-desktop-workspace=devin-desktop.desktop;
+
+[Added Associations]
+x-scheme-handler/devin=devin-desktop-url-handler.desktop;
+x-scheme-handler/windsurf=devin-desktop-url-handler.desktop;
+application/x-devin-desktop-workspace=devin-desktop.desktop;
+EOF
+  [[ -L "${install_root}/current" ]]
+}
+
+classify_test_layout() {
+  run env \
+    HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" \
+    bash -c '
+      source "$1"
+      if classify_markerless_layout; then
+        printf "%s|%s|%s|%s|%s|%s\n" \
+          "${LEGACY_CLASSIFICATION}" \
+          "${LEGACY_REASON}" \
+          "${LEGACY_OBSERVED}" \
+          "${LEGACY_ORIGINAL_DEVIN}" \
+          "${LEGACY_ORIGINAL_WINDSURF}" \
+          "${LEGACY_ORIGINAL_WORKSPACE}"
+      else
+        result=$?
+        printf "%s|%s|%s\n" \
+          "${LEGACY_CLASSIFICATION}" \
+          "${LEGACY_REASON}" \
+          "${LEGACY_OBSERVED}"
+        exit "${result}"
+      fi
+    ' _ "${MANAGER}"
+}
+
+assert_classification_refused() {
+  local expected_reason="$1"
+
+  classify_test_layout
+  [ "${status}" -eq 1 ]
+  if [[ "${output}" != "refused|${expected_reason}|"* ]]; then
+    printf 'unexpected classification: %s\n' "${output}" >&3
+    return 1
+  fi
+}
+
+run_legacy_tree_with_mountinfo() {
+  local root="$1"
+  local mountinfo="$2"
+  local access_log="${3:-}"
+
+  run env \
+    TEST_MOUNTINFO_PATH="${mountinfo}" \
+    TEST_MOUNTINFO_LOG="${access_log}" \
+    HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" \
+    bash -c '
+      source "$1"
+      legacy_mountinfo_path() {
+        if [[ -n "${TEST_MOUNTINFO_LOG}" ]]; then
+          printf x >>"${TEST_MOUNTINFO_LOG}"
+        fi
+        printf "%s\n" "${TEST_MOUNTINFO_PATH}"
+      }
+      legacy_tree_is_user_owned_and_unmounted "$2"
+    ' _ "${MANAGER}" "${root}"
+}
+
+write_mountinfo_fixture() {
+  local file="$1"
+  local target="$2"
+  local encoded_target
+
+  encoded_target="${target//\\/\\134}"
+  encoded_target="${encoded_target// /\\040}"
+  printf '1 0 0:1 / %s rw - tmpfs tmpfs rw\n' \
+    "${encoded_target}" >"${file}"
+}
+
+@test "[LIR-U1-C01] legacy-named public post-link profile remains recoverable" {
+  local applications="${TEST_HOME}/.local/share/applications"
+
+  seed_complete_initial_manager_layout
+  printf '%s\n' \
+    '[Desktop Entry]' \
+    'Type=Application' \
+    'Name=Legacy Devin' \
+    'X-Devin-Desktop-Manager=true' \
+    >"${applications}/devin-desktop.desktop"
+  printf '%s\n' \
+    '[Desktop Entry]' \
+    'Type=Application' \
+    'Name=Legacy URL' \
+    'X-Devin-Desktop-Manager=true' \
+    >"${applications}/devin-desktop-url-handler.desktop"
+  rm -f -- "${DEFAULTS_FILE}"
+
+  classify_test_layout
+
+  [ "${status}" -eq 0 ]
+  [ "${output}" = "public-post-link|||||" ]
+}
+
+@test "[LIR-U1-R01] exact complete initial-manager layout is recoverable" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+
+  seed_complete_initial_manager_layout_with_previous
+
+  classify_test_layout
+
+  [ "${status}" -eq 0 ]
+  [ "${output}" = "initial-complete|||||" ]
+  [ -L "${install_root}/current" ]
+  [ -L "${install_root}/previous" ]
+}
+
+@test "[LIR-U1-R02] complete layout preserves a safe external default" {
+  local cache_root="${TEST_HOME}/.cache/devin-desktop-manager"
+  local state_root="${TEST_HOME}/.local/state/devin-desktop-manager"
+
+  seed_complete_initial_manager_layout
+  sed -i \
+    '0,/^x-scheme-handler\/devin=devin-desktop-url-handler.desktop;$/s//x-scheme-handler\/devin=browser.desktop;/' \
+    "${DEFAULTS_FILE}"
+  sed -i \
+    '0,/^x-scheme-handler\/windsurf=devin-desktop-url-handler.desktop;$/{/^x-scheme-handler\/windsurf=devin-desktop-url-handler.desktop;$/d;}' \
+    "${DEFAULTS_FILE}"
+  rm -rf -- "${cache_root}" "${state_root}"
+
+  classify_test_layout
+
+  [ "${status}" -eq 0 ]
+  [ "${output}" = "initial-complete|||browser.desktop||" ]
+  [ ! -e "${cache_root}" ]
+  [ ! -e "${state_root}" ]
+}
+
+@test "[LIR-U1-R03] state-less modern manager default remains refused" {
+  seed_complete_initial_manager_layout
+  sed -i \
+    '0,/devin-desktop-url-handler.desktop/s//devin-desktop-manager-url-handler.desktop/' \
+    "${DEFAULTS_FILE}"
+
+  classify_test_layout
+
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == "refused|default-shape:x-scheme-handler/devin|"* ]]
+}
+
+@test "[LIR-U1-R03] effective-default near-miss matrix remains refused" {
+  seed_complete_initial_manager_layout
+  export MOCK_XDG_QUERY_DEVIN="../../unsafe"
+  assert_classification_refused default-shape:x-scheme-handler/devin
+
+  unset MOCK_XDG_QUERY_DEVIN
+  export MOCK_XDG_QUERY_FAIL=1
+  assert_classification_refused default-query:x-scheme-handler/devin
+
+  unset MOCK_XDG_QUERY_FAIL
+  sed -i \
+    '0,/devin-desktop-url-handler.desktop/s//devin-desktop.desktop/' \
+    "${DEFAULTS_FILE}"
+  assert_classification_refused default-shape:x-scheme-handler/devin
+}
+
+@test "[LIR-U1-R04] modified legacy desktop semantics remain refused" {
+  local desktop="${TEST_HOME}/.local/share/applications/devin-desktop.desktop"
+
+  seed_complete_initial_manager_layout
+  sed -i 's# --new-window %F# --reuse-window %F#' "${desktop}"
+
+  classify_test_layout
+
+  [ "${status}" -eq 1 ]
+  [ "${output}" = "refused|main-desktop|${desktop}" ]
+}
+
+@test "[LIR-U1-R04] desktop semantic near-miss matrix remains refused" {
+  local desktop="${TEST_HOME}/.local/share/applications/devin-desktop.desktop"
+  local baseline="${BATS_TEST_TMPDIR}/legacy-main.desktop"
+
+  seed_complete_initial_manager_layout
+  cp -- "${desktop}" "${baseline}"
+
+  sed -i 's#^TryExec=.*#TryExec=/tmp/not-devin#' "${desktop}"
+  assert_classification_refused main-desktop
+
+  cp -- "${baseline}" "${desktop}"
+  sed -i 's#^Icon=devin-desktop$#Icon=unowned-icon#' "${desktop}"
+  assert_classification_refused main-desktop
+
+  cp -- "${baseline}" "${desktop}"
+  sed -i '/^Type=Application$/a DBusActivatable=true' "${desktop}"
+  assert_classification_refused main-desktop
+
+  cp -- "${baseline}" "${desktop}"
+  sed -i '/^TryExec=/a TryExec=/tmp/duplicate' "${desktop}"
+  assert_classification_refused main-desktop
+
+  rm -f -- "${desktop}"
+  ln -s "${baseline}" "${desktop}"
+  assert_classification_refused main-desktop
+}
+
+@test "[LIR-U1-R04] escaped Exec paths remain recoverable" {
+  local applications
+  local desktop
+
+  TEST_HOME="${BATS_TEST_TMPDIR}/home\$literal"
+  DEFAULTS_FILE="${TEST_HOME}/.config/mimeapps.list"
+  export TEST_HOME DEFAULTS_FILE
+  seed_complete_initial_manager_layout
+  applications="${TEST_HOME}/.local/share/applications"
+  for desktop in \
+    "${applications}/devin-desktop.desktop" \
+    "${applications}/devin-desktop-url-handler.desktop"; do
+    sed -i '/^Exec=/s/[$]/\\$/g' "${desktop}"
+  done
+
+  classify_test_layout
+
+  [ "${status}" -eq 0 ]
+  [ "${output}" = "initial-complete|||||" ]
+}
+
+@test "[LIR-U1-R04] foreign-owned desktop evidence remains refused" {
+  local desktop="${TEST_HOME}/.local/share/applications/devin-desktop.desktop"
+  local real_stat
+
+  seed_complete_initial_manager_layout
+  real_stat="$(command -v stat)"
+  cat >"${MOCK_BIN}/stat" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "-c" && "\${2:-}" == "%u" && "\${4:-}" == "${desktop}" ]]; then
+  printf '%s\n' "$((EUID + 1))"
+  exit 0
+fi
+exec "${real_stat}" "\$@"
+EOF
+  chmod 0755 "${MOCK_BIN}/stat"
+
+  assert_classification_refused main-desktop
+}
+
+@test "[LIR-U1-R04] foreign-owned legacy assets remain refused" {
+  local data_home="${TEST_HOME}/.local/share"
+  local icon="${data_home}/icons/hicolor/512x512/apps/devin-desktop.png"
+  local mime="${data_home}/mime/packages/devin-desktop-workspace.xml"
+  local real_stat
+
+  seed_complete_initial_manager_layout
+  real_stat="$(command -v stat)"
+  cat >"${MOCK_BIN}/stat" <<EOF
+#!/usr/bin/env bash
+for candidate in "\$@"; do
+  if [[ "\${candidate}" == "\${MOCK_FOREIGN_OWNER_PATH:-}" ]]; then
+    printf '%s\n' "$((EUID + 1))"
+    exit 0
+  fi
+done
+exec "${real_stat}" "\$@"
+EOF
+  chmod 0755 "${MOCK_BIN}/stat"
+
+  export MOCK_FOREIGN_OWNER_PATH="${icon}"
+  assert_classification_refused icon
+
+  export MOCK_FOREIGN_OWNER_PATH="${mime}"
+  assert_classification_refused mime
+}
+
+@test "[LIR-U1-R04] unreadable legacy asset hashes remain refused" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local icon="${TEST_HOME}/.local/share/icons/hicolor/512x512/apps/devin-desktop.png"
+  local release release_icon real_sha256sum
+
+  seed_complete_initial_manager_layout
+  release="${install_root}/$(readlink "${install_root}/current")"
+  release_icon="${release}/integration/devin-desktop.png"
+  real_sha256sum="$(command -v sha256sum)"
+  cat >"${MOCK_BIN}/sha256sum" <<EOF
+#!/usr/bin/env bash
+for candidate in "\$@"; do
+  if [[ "\${candidate}" == "${icon}" || "\${candidate}" == "${release_icon}" ]]; then
+    exit 1
+  fi
+done
+exec "${real_sha256sum}" "\$@"
+EOF
+  chmod 0755 "${MOCK_BIN}/sha256sum"
+
+  assert_classification_refused icon
+}
+
+@test "[LIR-U1-R04] foreign-owned legacy roots and releases remain refused" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local releases="${install_root}/releases"
+  local release
+  local metadata launcher
+  local cache_root="${TEST_HOME}/.cache/devin-desktop-manager"
+  local cache_artifact
+  local state_root="${TEST_HOME}/.local/state/devin-desktop-manager"
+  local real_stat path expected_reason
+
+  seed_complete_initial_manager_layout
+  printf 'cached artifact\n' >"${cache_root}/Devin-linux-x64-3.4.27.deb"
+  cache_artifact="$(find "${cache_root}" -mindepth 1 -maxdepth 1 \
+    -type f ! -name '.devin-desktop-manager-owned' -print -quit)"
+  [ -n "${cache_artifact}" ]
+  release="${install_root}/$(readlink "${install_root}/current")"
+  metadata="${release}/release.json"
+  launcher="${release}/app/bin/devin-desktop"
+  real_stat="$(command -v stat)"
+  cat >"${MOCK_BIN}/stat" <<EOF
+#!/usr/bin/env bash
+for candidate in "\$@"; do
+  if [[ "\${candidate}" == "\${MOCK_FOREIGN_OWNER_PATH:-}" ]]; then
+    printf '%s\n' "$((EUID + 1))"
+    exit 0
+  fi
+done
+exec "${real_stat}" "\$@"
+EOF
+  chmod 0755 "${MOCK_BIN}/stat"
+
+  while IFS='|' read -r path expected_reason; do
+    export MOCK_FOREIGN_OWNER_PATH="${path}"
+    assert_classification_refused "${expected_reason}"
+  done <<EOF
+${install_root}|install-root
+${releases}|release-inventory
+${release}|release-inventory
+${metadata}|release-inventory
+${launcher}|release-inventory
+${cache_root}|cache-root
+${cache_artifact}|cache-root
+${state_root}|state-root
+EOF
+}
+
+@test "[LIR-U1-R04] mounted release and temporary trees remain refused" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local release launcher integration mounted_path mountinfo
+
+  seed_complete_initial_manager_layout
+  release="${install_root}/$(readlink "${install_root}/current")"
+  launcher="${release}/app/bin/devin-desktop"
+  integration="${install_root}/.integration-12345"
+  mountinfo="${BATS_TEST_TMPDIR}/mountinfo"
+  mkdir -p -- "${integration}/partial"
+
+  for mounted_path in "${release}/app" "${launcher}" "${integration}"; do
+    write_mountinfo_fixture "${mountinfo}" "${mounted_path}"
+    run_legacy_tree_with_mountinfo "${install_root}" "${mountinfo}"
+    [ "${status}" -ne 0 ]
+  done
+}
+
+@test "[LIR-U1-R04] adopted tree mount scan snapshots once" {
+  local root="${TEST_HOME}/tree"
+  local mountinfo="${BATS_TEST_TMPDIR}/mountinfo"
+  local mountinfo_log="${CURL_LOG}.mountinfo"
+
+  mkdir -p -- "${root}"
+  touch "${root}"/payload-{1..100}
+  write_mountinfo_fixture "${mountinfo}" /
+
+  run_legacy_tree_with_mountinfo "${root}" "${mountinfo}" "${mountinfo_log}"
+
+  [ "${status}" -eq 0 ]
+  [ "$(wc -c <"${mountinfo_log}")" -eq 1 ]
+}
+
+@test "[LIR-U1-R04] adopted mount refusal precedes tree traversal" {
+  local root="${TEST_HOME}/tree"
+  local mountinfo="${BATS_TEST_TMPDIR}/mountinfo"
+  local find_log="${CURL_LOG}.find"
+
+  mkdir -p -- "${root}"
+  write_mountinfo_fixture "${mountinfo}" "${root}"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    ": >${find_log@Q}" \
+    'exit 99' \
+    >"${MOCK_BIN}/find"
+  chmod 0755 "${MOCK_BIN}/find"
+
+  run_legacy_tree_with_mountinfo "${root}" "${mountinfo}"
+
+  [ "${status}" -ne 0 ]
+  [ ! -e "${find_log}" ]
+}
+
+@test "[LIR-U1-R04] adopted tree mount scan preserves spaced target identity" {
+  local canonical_root="${TEST_HOME}/tree with space"
+  local root="${TEST_HOME}/alias/../tree with space"
+  local mountinfo="${BATS_TEST_TMPDIR}/mountinfo"
+
+  mkdir -p -- "${TEST_HOME}/alias" "${canonical_root}/mounted file"
+  write_mountinfo_fixture "${mountinfo}" "${canonical_root}/mounted file"
+
+  run_legacy_tree_with_mountinfo "${root}" "${mountinfo}"
+
+  [ "${status}" -ne 0 ]
+}
+
+@test "[LIR-U1-R04] adopted tree mount snapshots fail closed" {
+  local root="${TEST_HOME}/tree"
+  local empty="${BATS_TEST_TMPDIR}/empty-mountinfo"
+  local malformed="${BATS_TEST_TMPDIR}/malformed-mountinfo"
+  local missing="${BATS_TEST_TMPDIR}/missing-mountinfo"
+  local mountinfo
+
+  mkdir -p -- "${root}"
+  : >"${empty}"
+  printf 'malformed\n' >"${malformed}"
+
+  for mountinfo in "${missing}" "${empty}" "${malformed}"; do
+    run_legacy_tree_with_mountinfo "${root}" "${mountinfo}"
+    [ "${status}" -ne 0 ]
+  done
+}
+
+@test "[LIR-U1-R04] unsafe adopted root ancestry remains refused" {
+  local replaceable_ancestor="${TEST_HOME}/.local/opt"
+
+  seed_complete_initial_manager_layout
+  chmod 0777 "${replaceable_ancestor}"
+
+  assert_classification_refused release-inventory
+}
+
+@test "[LIR-U1-R04] other-writable adopted directories remain refused" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local integration="${install_root}/.integration-12345"
+
+  seed_complete_initial_manager_layout
+  mkdir -p -- "${integration}/partial"
+  chmod 0777 "${integration}"
+
+  assert_classification_refused release-inventory
+}
+
+@test "[LIR-U1-R04] other-writable adopted payload files remain refused" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local release launcher
+
+  seed_complete_initial_manager_layout
+  release="${install_root}/$(readlink "${install_root}/current")"
+  launcher="${release}/app/bin/devin-desktop"
+  chmod 0777 "${launcher}"
+
+  assert_classification_refused release-inventory
+}
+
+@test "[LIR-U1-R04] other-writable integration evidence remains refused" {
+  local data_home="${TEST_HOME}/.local/share"
+  local path reason
+
+  seed_complete_initial_manager_layout
+  while IFS='|' read -r path reason; do
+    chmod 0666 "${path}"
+    assert_classification_refused "${reason}"
+    chmod 0644 "${path}"
+  done <<EOF
+${data_home}/applications/devin-desktop.desktop|main-desktop
+${data_home}/applications/devin-desktop-url-handler.desktop|url-desktop
+${data_home}/icons/hicolor/512x512/apps/devin-desktop.png|icon
+${data_home}/mime/packages/devin-desktop-workspace.xml|mime
+${DEFAULTS_FILE}|default-provenance:unknown
+EOF
+}
+
+@test "[LIR-U1-R04] non-regular legacy executables remain refused" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local release executable backup
+
+  seed_complete_initial_manager_layout
+  release="${install_root}/$(readlink "${install_root}/current")"
+  for executable in \
+    "${release}/app/devin-desktop" \
+    "${release}/app/bin/devin-desktop"; do
+    backup="${BATS_TEST_TMPDIR}/$(basename "$(dirname "${executable}")")-devin-desktop"
+    cp -a -- "${executable}" "${backup}"
+    rm -f -- "${executable}"
+    mkdir -- "${executable}"
+    chmod 0755 "${executable}"
+    assert_classification_refused release-inventory
+    rmdir -- "${executable}"
+    mv -- "${backup}" "${executable}"
+  done
+}
+
+@test "[LIR-U1-R04] symlinked launcher ancestors remain refused" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local release external_bin
+
+  seed_complete_initial_manager_layout
+  release="${install_root}/$(readlink "${install_root}/current")"
+  external_bin="${BATS_TEST_TMPDIR}/external-bin"
+  mv -- "${release}/app/bin" "${external_bin}"
+  ln -s -- "${external_bin}" "${release}/app/bin"
+
+  assert_classification_refused release-inventory
+}
+
+@test "[LIR-U1-R04] absent legacy roots require safe parent ancestry" {
+  local cache_root="${TEST_HOME}/.cache/devin-desktop-manager"
+
+  seed_complete_initial_manager_layout
+  rm -rf -- "${cache_root}"
+  chmod 0777 -- "${TEST_HOME}/.cache"
+
+  assert_classification_refused cache-root
+}
+
+@test "[LIR-U1-R04] absent legacy state requires safe parent ancestry" {
+  local state_root="${TEST_HOME}/.local/state/devin-desktop-manager"
+
+  seed_complete_initial_manager_layout
+  rm -rf -- "${state_root}"
+  chmod 0777 -- "${TEST_HOME}/.local/state"
+
+  assert_classification_refused state-root
+}
+
+@test "[LIR-U1-R04] foreign-owned application symlink remains refused" {
+  local app_command="${TEST_HOME}/.local/bin/devin-desktop"
+  local real_stat
+
+  seed_complete_initial_manager_layout
+  real_stat="$(command -v stat)"
+  cat >"${MOCK_BIN}/stat" <<EOF
+#!/usr/bin/env bash
+for candidate in "\$@"; do
+  if [[ "\${candidate}" == "${app_command}" ]]; then
+    printf '%s\n' "$((EUID + 1))"
+    exit 0
+  fi
+done
+exec "${real_stat}" "\$@"
+EOF
+  chmod 0755 "${MOCK_BIN}/stat"
+
+  assert_classification_refused app-link
+}
+
+@test "[LIR-U1-R04] unsafe legacy integration parents remain refused" {
+  local data_home="${TEST_HOME}/.local/share"
+  local path
+
+  seed_complete_initial_manager_layout
+  for path in \
+    "${TEST_HOME}/.local/bin" \
+    "${data_home}/applications" \
+    "${data_home}/icons/hicolor/512x512/apps" \
+    "${data_home}/mime/packages"; do
+    chmod 0777 "${path}"
+    assert_classification_refused install-root
+    chmod 0755 "${path}"
+  done
+}
+
+@test "[LIR-U1-R04] unsafe legacy integration ancestry remains refused" {
+  local replaceable_ancestor="${TEST_HOME}/.local/share/icons/hicolor/512x512"
+
+  seed_complete_initial_manager_layout
+  chmod 0777 "${replaceable_ancestor}"
+
+  assert_classification_refused install-root
+}
+
+@test "[LIR-U1-R06] untraceable legacy effective defaults remain refused" {
+  seed_complete_initial_manager_layout
+  sed -i \
+    '/^x-scheme-handler\/devin=devin-desktop-url-handler.desktop;$/d' \
+    "${DEFAULTS_FILE}"
+  export MOCK_XDG_QUERY_DEVIN="devin-desktop-url-handler.desktop"
+
+  classify_test_layout
+
+  [ "${status}" -eq 1 ]
+  [ "${output}" = \
+    "refused|default-provenance:x-scheme-handler/devin|devin-desktop-url-handler.desktop" ]
+}
+
+@test "[LIR-U1-R06] added association cannot establish effective default provenance" {
+  seed_complete_initial_manager_layout
+  sed -i \
+    '0,/^x-scheme-handler\/devin=devin-desktop-url-handler.desktop;$/{/^x-scheme-handler\/devin=devin-desktop-url-handler.desktop;$/d;}' \
+    "${DEFAULTS_FILE}"
+  export MOCK_XDG_QUERY_DEVIN="devin-desktop-url-handler.desktop"
+
+  assert_classification_refused default-provenance:x-scheme-handler/devin
+}
+
+@test "[LIR-U1-R06] external config defaults cannot establish manager provenance" {
+  local external_config="${BATS_TEST_TMPDIR}/system-config"
+
+  seed_complete_initial_manager_layout
+  mkdir -p -- "${external_config}"
+  mv -- "${DEFAULTS_FILE}" "${TEST_HOME}/.local/share/mimeapps.list"
+  printf '%s\n' \
+    '[Default Applications]' \
+    'x-scheme-handler/devin=devin-desktop-url-handler.desktop;browser.desktop;' \
+    >"${external_config}/mimeapps.list"
+  export XDG_CONFIG_DIRS="${external_config}"
+  export MOCK_XDG_QUERY_DEVIN="devin-desktop-url-handler.desktop"
+
+  classify_test_layout
+
+  [ "${status}" -eq 1 ]
+  [ "${output}" = \
+    "refused|default-provenance:x-scheme-handler/devin|${external_config}/mimeapps.list" ]
+}
+
+@test "[LIR-U1-R06] hidden external manager defaults remain refused" {
+  local external_config="${BATS_TEST_TMPDIR}/system-config"
+
+  seed_complete_initial_manager_layout
+  mkdir -p -- "${external_config}"
+  printf '%s\n' \
+    '[Default Applications]' \
+    'x-scheme-handler/devin=devin-desktop-url-handler.desktop;browser.desktop;' \
+    >"${external_config}/mimeapps.list"
+  export XDG_CONFIG_DIRS="${external_config}"
+
+  classify_test_layout
+
+  [ "${status}" -eq 1 ]
+  [ "${output}" = \
+    "refused|default-provenance:x-scheme-handler/devin|${external_config}/mimeapps.list" ]
+}
+
+@test "[LIR-U1-R06] hidden system data manager defaults remain refused" {
+  local external_data="${BATS_TEST_TMPDIR}/system-data"
+
+  seed_complete_initial_manager_layout
+  mkdir -p -- "${external_data}/applications"
+  printf '%s\n' \
+    '[Default Applications]' \
+    'x-scheme-handler/devin=devin-desktop-url-handler.desktop;browser.desktop;' \
+    >"${external_data}/applications/mimeapps.list"
+  export XDG_DATA_DIRS="${external_data}"
+
+  classify_test_layout
+
+  [ "${status}" -eq 1 ]
+  [ "${output}" = \
+    "refused|default-provenance:x-scheme-handler/devin|${external_data}/applications/mimeapps.list" ]
+}
+
+@test "[LIR-U1-R06] MIME provenance near-miss matrix remains refused" {
+  local baseline="${BATS_TEST_TMPDIR}/mimeapps.list"
+  local parked="${BATS_TEST_TMPDIR}/mimeapps.regular"
+
+  seed_complete_initial_manager_layout
+  cp -- "${DEFAULTS_FILE}" "${baseline}"
+
+  printf '%s\n' \
+    '[Removed Associations]' \
+    'x-scheme-handler/devin=devin-desktop-url-handler.desktop;' \
+    >>"${DEFAULTS_FILE}"
+  assert_classification_refused default-shape:x-scheme-handler/devin
+
+  cp -- "${baseline}" "${DEFAULTS_FILE}"
+  printf '%s\n' \
+    'text/plain=devin-desktop-url-handler.desktop;' \
+    >>"${DEFAULTS_FILE}"
+  assert_classification_refused default-provenance:text/plain
+
+  cp -- "${baseline}" "${DEFAULTS_FILE}"
+  sed -i \
+    '0,/devin-desktop-url-handler.desktop/s//devin-desktop-manager-url-handler.desktop/' \
+    "${DEFAULTS_FILE}"
+  assert_classification_refused default-shape:x-scheme-handler/devin
+
+  cp -- "${baseline}" "${DEFAULTS_FILE}"
+  printf 'malformed association record\n' >>"${DEFAULTS_FILE}"
+  assert_classification_refused default-shape:unknown
+
+  cp -- "${baseline}" "${DEFAULTS_FILE}"
+  printf '%s\n' 'text/plain=../../unsafe;' >>"${DEFAULTS_FILE}"
+  classify_test_layout
+  [ "${status}" -eq 1 ]
+  [ "${output}" = "refused|default-shape:text/plain|../../unsafe" ]
+
+  cp -- "${baseline}" "${DEFAULTS_FILE}"
+  printf '%s\n' \
+    'unsafe key=devin-desktop-url-handler.desktop;' \
+    >>"${DEFAULTS_FILE}"
+  classify_test_layout
+  [ "${status}" -eq 1 ]
+  [ "${output}" = \
+    "refused|default-provenance:unknown|${DEFAULTS_FILE}" ]
+
+  cp -- "${baseline}" "${DEFAULTS_FILE}"
+  printf 'text/plain=other.desktop;\r\n' >>"${DEFAULTS_FILE}"
+  classify_test_layout
+  [ "${status}" -eq 1 ]
+  [ "${output}" = "refused|default-shape:unknown|${DEFAULTS_FILE}" ]
+
+  cp -- "${baseline}" "${DEFAULTS_FILE}"
+  mv -- "${DEFAULTS_FILE}" "${parked}"
+  ln -s "${parked}" "${DEFAULTS_FILE}"
+  classify_test_layout
+  [ "${status}" -eq 1 ]
+  [ "${output}" = \
+    "refused|default-provenance:unknown|${DEFAULTS_FILE}" ]
+}
+
+@test "[LIR-U1-R06] foreign-owned MIME provenance remains refused" {
+  local real_stat
+
+  seed_complete_initial_manager_layout
+  real_stat="$(command -v stat)"
+  cat >"${MOCK_BIN}/stat" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "-c" && "\${2:-}" == "%u" &&
+  "\${4:-}" == "${DEFAULTS_FILE}" ]]; then
+  printf '%s\n' "$((EUID + 1))"
+  exit 0
+fi
+exec "${real_stat}" "\$@"
+EOF
+  chmod 0755 "${MOCK_BIN}/stat"
+
+  assert_classification_refused default-provenance:unknown
+}
+
+@test "[LIR-U1-R06] MIME provenance beneath an unsafe parent remains refused" {
+  seed_complete_initial_manager_layout
+  chmod 0777 "$(dirname "${DEFAULTS_FILE}")"
+
+  assert_classification_refused default-provenance:unknown
+}
+
+@test "[LIR-U1-R05] desktop-specific manager records cannot grant ownership" {
+  seed_complete_initial_manager_layout
+  printf '%s\n' \
+    '[Default Applications]' \
+    'x-scheme-handler/devin=devin-desktop-url-handler.desktop;' \
+    >"${TEST_HOME}/.config/gnome-mimeapps.list"
+
+  classify_test_layout
+
+  [ "${status}" -eq 1 ]
+  [ "${output}" = \
+    "refused|desktop-specific-default:x-scheme-handler/devin|${TEST_HOME}/.config/gnome-mimeapps.list" ]
+}
+
+@test "[LIR-U1-R05] desktop-specific comments do not block recovery" {
+  seed_complete_initial_manager_layout
+  printf '%s\n' \
+    '# previous=x-scheme-handler/devin=devin-desktop-url-handler.desktop;' \
+    '; x-scheme-handler/windsurf=devin-desktop-url-handler.desktop;' \
+    >"${TEST_HOME}/.config/gnome-mimeapps.list"
+
+  classify_test_layout
+
+  [ "${status}" -eq 0 ]
+  [ "${output}" = "initial-complete|||||" ]
+}
+
+@test "[LIR-U2-R01] update transactionally recovers a complete initial-manager layout" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local data_home="${TEST_HOME}/.local/share"
+
+  seed_complete_initial_manager_layout
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"migrating verified initial-manager installation"* ]]
+  [ -f "${install_root}/.devin-desktop-manager-owned" ]
+  [ "$(stat -c %a "${TEST_HOME}/.local/state/devin-desktop-manager/state.json")" = "600" ]
+  [ -f "${data_home}/applications/devin-desktop-manager.desktop" ]
+  [ ! -e "${data_home}/applications/devin-desktop.desktop" ]
+  [ "$(query_default x-scheme-handler/devin)" = \
+    "devin-desktop-manager-url-handler.desktop" ]
+  run grep -F 'devin-desktop-url-handler.desktop' "${DEFAULTS_FILE}"
+  [ "${status}" -eq 1 ]
+  run grep -F 'devin-desktop.desktop' "${DEFAULTS_FILE}"
+  [ "${status}" -eq 1 ]
+}
+
+@test "[LIR-U2-R08] update preserves legacy default fallbacks for uninstall" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local applications="${TEST_HOME}/.local/share/applications"
+  local state_file="${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
+
+  seed_complete_initial_manager_layout
+  write_fallback_desktop "${applications}/browser.desktop" Browser
+  write_fallback_desktop "${applications}/editor.desktop" Editor
+  write_fallback_desktop "${applications}/workspace.desktop" Workspace
+  sed -i \
+    's#^x-scheme-handler/devin=devin-desktop-url-handler.desktop;$#x-scheme-handler/devin=devin-desktop-url-handler.desktop;browser.desktop;#' \
+    "${DEFAULTS_FILE}"
+  sed -i \
+    's#^x-scheme-handler/windsurf=devin-desktop-url-handler.desktop;$#x-scheme-handler/windsurf=devin-desktop-url-handler.desktop;editor.desktop;#' \
+    "${DEFAULTS_FILE}"
+  sed -i \
+    's#^application/x-devin-desktop-workspace=devin-desktop.desktop;$#application/x-devin-desktop-workspace=devin-desktop.desktop;workspace.desktop;#' \
+    "${DEFAULTS_FILE}"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  [ "$(query_default x-scheme-handler/devin)" = \
+    "devin-desktop-manager-url-handler.desktop" ]
+  [ "$(query_default x-scheme-handler/windsurf)" = \
+    "devin-desktop-manager-url-handler.desktop" ]
+  [ "$(query_default application/x-devin-desktop-workspace)" = \
+    "devin-desktop-manager.desktop" ]
+  [ "$(jq -r '.originalDefaults["x-scheme-handler/devin"]' "${state_file}")" = \
+    "browser.desktop" ]
+  [ "$(jq -r '.originalDefaults["x-scheme-handler/windsurf"]' "${state_file}")" = \
+    "editor.desktop" ]
+  [ "$(jq -r '.originalDefaults["application/x-devin-desktop-workspace"]' "${state_file}")" = \
+    "workspace.desktop" ]
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [ ! -e "${install_root}" ]
+  [ "$(query_default x-scheme-handler/devin)" = "browser.desktop" ]
+  [ "$(query_default x-scheme-handler/windsurf)" = "editor.desktop" ]
+  [ "$(query_default application/x-devin-desktop-workspace)" = \
+    "workspace.desktop" ]
+}
+
+@test "[LIR-U2-R08] update skips unavailable legacy default fallbacks" {
+  local applications="${TEST_HOME}/.local/share/applications"
+  local state_file="${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
+
+  seed_complete_initial_manager_layout
+  write_fallback_desktop "${applications}/browser.desktop" Browser
+  sed -i \
+    's#^x-scheme-handler/devin=devin-desktop-url-handler.desktop;$#x-scheme-handler/devin=devin-desktop-url-handler.desktop;missing.desktop;browser.desktop;#' \
+    "${DEFAULTS_FILE}"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  [ "$(jq -r '.originalDefaults["x-scheme-handler/devin"]' "${state_file}")" = \
+    "browser.desktop" ]
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [ "$(query_default x-scheme-handler/devin)" = "browser.desktop" ]
+}
+
+@test "[LIR-U2-R08] update skips fallbacks with unavailable TryExec" {
+  local applications="${TEST_HOME}/.local/share/applications"
+  local state_file="${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
+
+  seed_complete_initial_manager_layout
+  write_fallback_desktop "${applications}/unavailable.desktop" Unavailable
+  printf 'TryExec=devin-desktop-missing-fallback-command\n' \
+    >>"${applications}/unavailable.desktop"
+  write_fallback_desktop "${applications}/browser.desktop" Browser
+  printf 'TryExec=/bin/true\n' >>"${applications}/browser.desktop"
+  sed -i \
+    's#^x-scheme-handler/devin=devin-desktop-url-handler.desktop;$#x-scheme-handler/devin=devin-desktop-url-handler.desktop;unavailable.desktop;browser.desktop;#' \
+    "${DEFAULTS_FILE}"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  [ "$(jq -r '.originalDefaults["x-scheme-handler/devin"]' "${state_file}")" = \
+    "browser.desktop" ]
+}
+
+@test "[LIR-U2-R08] hidden fallback masks lower-precedence desktop copies" {
+  local applications="${TEST_HOME}/.local/share/applications"
+  local state_file="${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
+  local system_data="${BATS_TEST_TMPDIR}/system/share"
+
+  seed_complete_initial_manager_layout
+  write_fallback_desktop "${applications}/hidden.desktop" Hidden true
+  write_fallback_desktop \
+    "${system_data}/applications/hidden.desktop" 'System Hidden Copy'
+  write_fallback_desktop "${applications}/browser.desktop" Browser
+  sed -i \
+    's#^x-scheme-handler/devin=devin-desktop-url-handler.desktop;$#x-scheme-handler/devin=devin-desktop-url-handler.desktop;hidden.desktop;browser.desktop;#' \
+    "${DEFAULTS_FILE}"
+  export XDG_DATA_DIRS="${system_data}"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  [ "$(jq -r '.originalDefaults["x-scheme-handler/devin"]' "${state_file}")" = \
+    "browser.desktop" ]
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [ "$(query_default x-scheme-handler/devin)" = "browser.desktop" ]
+}
+
+@test "[LIR-U2-R08] dangling fallback links do not mask system copies" {
+  local applications="${TEST_HOME}/.local/share/applications"
+  local state_file="${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
+  local system_data="${BATS_TEST_TMPDIR}/system/share"
+
+  seed_complete_initial_manager_layout
+  ln -s -- missing.desktop "${applications}/browser.desktop"
+  write_fallback_desktop \
+    "${system_data}/applications/browser.desktop" 'System Browser'
+  write_fallback_desktop "${applications}/editor.desktop" Editor
+  sed -i \
+    's#^x-scheme-handler/devin=devin-desktop-url-handler.desktop;$#x-scheme-handler/devin=devin-desktop-url-handler.desktop;missing.desktop;browser.desktop;editor.desktop;#' \
+    "${DEFAULTS_FILE}"
+  export XDG_DATA_DIRS="${system_data}"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  [ "$(jq -r '.originalDefaults["x-scheme-handler/devin"]' "${state_file}")" = \
+    "browser.desktop" ]
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [ "$(query_default x-scheme-handler/devin)" = "browser.desktop" ]
+}
+
+@test "[LIR-U2-R08] non-regular fallbacks do not mask system copies" {
+  local applications="${TEST_HOME}/.local/share/applications"
+  local system_data="${BATS_TEST_TMPDIR}/system/share"
+  local candidate="${applications}/browser.desktop"
+  local directory_target="${BATS_TEST_TMPDIR}/directory-target"
+  local shape
+
+  mkdir -p -- "${applications}" "${directory_target}"
+  write_fallback_desktop \
+    "${system_data}/applications/browser.desktop" 'System Browser'
+  for shape in directory fifo symlink-directory; do
+    rm -rf -- "${candidate}"
+    case "${shape}" in
+      directory) mkdir -- "${candidate}" ;;
+      fifo) mkfifo -- "${candidate}" ;;
+      symlink-directory) ln -s -- "${directory_target}" "${candidate}" ;;
+    esac
+
+    run env HOME="${TEST_HOME}" \
+      XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+      XDG_DATA_DIRS="${system_data}" \
+      PATH="${MOCK_BIN}:${PATH}" \
+      bash -c 'source "$1"; legacy_desktop_id_is_available browser.desktop' \
+      _ "${MANAGER}"
+
+    [ "${status}" -eq 0 ]
+  done
+}
+
+@test "[LIR-U2-R08] update resolves nested desktop ID fallbacks" {
+  local applications="${TEST_HOME}/.local/share/applications"
+  local state_file="${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
+
+  seed_complete_initial_manager_layout
+  write_fallback_desktop \
+    "${applications}/vendor-name/editor.desktop" Editor
+  sed -i \
+    's#^x-scheme-handler/devin=devin-desktop-url-handler.desktop;$#x-scheme-handler/devin=devin-desktop-url-handler.desktop;vendor-name-editor.desktop;#' \
+    "${DEFAULTS_FILE}"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  [ "$(jq -r '.originalDefaults["x-scheme-handler/devin"]' "${state_file}")" = \
+    "vendor-name-editor.desktop" ]
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [ "$(query_default x-scheme-handler/devin)" = "vendor-name-editor.desktop" ]
+}
+
+@test "[LIR-U2-R02] make install publishes the fixed manager and recovers the app" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local installed_manager="${TEST_HOME}/.local/bin/devin-desktop-manager"
+
+  seed_complete_initial_manager_layout
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" \
+    make --no-print-directory -s -C "${PROJECT_ROOT}" install
+
+  [ "${status}" -eq 0 ]
+  [ -x "${installed_manager}" ]
+  [ "$("${installed_manager}" --version)" = "devin-desktop-manager 0.1.1" ]
+  [ -f "${TEST_HOME}/.local/state/devin-desktop-manager/state.json" ]
+  [ "$(find "${install_root}/releases" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ]
+
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" \
+    make --no-print-directory -s -C "${PROJECT_ROOT}" install
+
+  [ "${status}" -eq 0 ]
+  [ "$(find "${install_root}/releases" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ]
+  [ "$(grep -c '^x-scheme-handler/devin=devin-desktop-manager-url-handler.desktop;$' "${DEFAULTS_FILE}")" -eq 1 ]
+}
+
+@test "[LIR-U2-R04] prompt-free uninstall recovers and removes a complete layout" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local data_home="${TEST_HOME}/.local/share"
+
+  seed_complete_initial_manager_layout
+  sed -i \
+    '0,/^x-scheme-handler\/devin=devin-desktop-url-handler.desktop;$/s//x-scheme-handler\/devin=browser.desktop;/' \
+    "${DEFAULTS_FILE}"
+  grep -Fqx \
+    'x-scheme-handler/devin=devin-desktop-url-handler.desktop;' \
+    "${DEFAULTS_FILE}"
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [ ! -e "${install_root}" ]
+  [ ! -e "${data_home}/applications/devin-desktop.desktop" ]
+  [ ! -e "${data_home}/applications/devin-desktop-url-handler.desktop" ]
+  [ "$(query_default x-scheme-handler/devin)" = "browser.desktop" ]
+  run grep -F 'devin-desktop-url-handler.desktop' "${DEFAULTS_FILE}"
+  [ "${status}" -eq 1 ]
+  run grep -F 'devin-desktop.desktop' "${DEFAULTS_FILE}"
+  [ "${status}" -eq 1 ]
+}
+
+@test "[LIR-U2-R04] direct uninstall accepts a revealed safe system default" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+
+  seed_complete_initial_manager_layout
+  export MOCK_XDG_FALLBACK_DEVIN="browser.desktop"
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [ ! -e "${install_root}" ]
+  [ "$(query_default x-scheme-handler/devin)" = "browser.desktop" ]
+}
+
+@test "[LIR-U2-R04] direct uninstall reveals an available saved fallback" {
+  local applications="${TEST_HOME}/.local/share/applications"
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+
+  seed_complete_initial_manager_layout
+  write_fallback_desktop "${applications}/browser.desktop" Browser
+  sed -i \
+    's#^x-scheme-handler/devin=devin-desktop-url-handler.desktop;$#x-scheme-handler/devin=devin-desktop-url-handler.desktop;missing.desktop;browser.desktop;#' \
+    "${DEFAULTS_FILE}"
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [ ! -e "${install_root}" ]
+  [ "$(query_default x-scheme-handler/devin)" = "browser.desktop" ]
+}
+
+@test "[LIR-U2-R05] running app blocks complete-profile ownership mutation" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local current_release metadata metadata_before defaults_before running_pid
+
+  seed_complete_initial_manager_layout
+  current_release="${install_root}/$(readlink "${install_root}/current")"
+  metadata="${current_release}/release.json"
+  metadata_before="$(sha256sum "${metadata}" | awk '{print $1}')"
+  defaults_before="$(sha256sum "${DEFAULTS_FILE}" | awk '{print $1}')"
+  cp -- /bin/sleep "${current_release}/app/bin/devin-desktop"
+  chmod 0755 "${current_release}/app/bin/devin-desktop"
+  "${current_release}/app/bin/devin-desktop" 30 &
+  running_pid=$!
+  wait_for_process_executable \
+    "${running_pid}" "${current_release}/app/bin/devin-desktop"
+
+  run manager_env update
+  kill "${running_pid}" 2>/dev/null || true
+  wait "${running_pid}" 2>/dev/null || true
+
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"Devin Desktop is running"* ]]
+  [ ! -e "${install_root}/.devin-desktop-manager-owned" ]
+  [ "$(sha256sum "${metadata}" | awk '{print $1}')" = "${metadata_before}" ]
+  [ "$(sha256sum "${DEFAULTS_FILE}" | awk '{print $1}')" = "${defaults_before}" ]
+}
+
+@test "[LIR-U2-R05] running app blocks interrupted-recovery cleanup" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local current_release integration defaults_before running_pid
+
+  seed_complete_initial_manager_layout
+  rm -f -- "${CURL_LOG}.xdg-default-called"
+  export MOCK_XDG_QUERY_AFTER_DEFAULT="unexpected.desktop"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+  run manager_env update
+  [ "${status}" -eq 1 ]
+
+  unset MOCK_XDG_QUERY_AFTER_DEFAULT
+  current_release="${install_root}/$(readlink "${install_root}/current")"
+  integration="${install_root}/.integration-12345"
+  defaults_before="$(sha256sum "${DEFAULTS_FILE}" | awk '{print $1}')"
+  mkdir -- "${integration}"
+  cp -- /bin/sleep "${current_release}/app/bin/devin-desktop"
+  chmod 0755 "${current_release}/app/bin/devin-desktop"
+  "${current_release}/app/bin/devin-desktop" 30 &
+  running_pid=$!
+  wait_for_process_executable \
+    "${running_pid}" "${current_release}/app/bin/devin-desktop"
+
+  run manager_env update
+  kill "${running_pid}" 2>/dev/null || true
+  wait "${running_pid}" 2>/dev/null || true
+
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"Devin Desktop is running"* ]]
+  [ -d "${integration}" ]
+  [ "$(sha256sum "${DEFAULTS_FILE}" | awk '{print $1}')" = "${defaults_before}" ]
+  [ ! -e "${TEST_HOME}/.local/state/devin-desktop-manager/state.json" ]
+}
+
+@test "[LIR-U2-R05] running app gate canonicalizes a noncanonical home" {
+  local canonical_home="${BATS_TEST_TMPDIR}/canonical-home"
+  local current_release metadata_before running_pid
+
+  mkdir -p -- "${BATS_TEST_TMPDIR}/alias" "${canonical_home}"
+  TEST_HOME="${BATS_TEST_TMPDIR}/alias/../canonical-home/"
+  DEFAULTS_FILE="${TEST_HOME}/.config/mimeapps.list"
+  export TEST_HOME DEFAULTS_FILE
+  seed_complete_initial_manager_layout
+  current_release="${TEST_HOME}/.local/opt/devin-desktop/$(
+    readlink "${TEST_HOME}/.local/opt/devin-desktop/current"
+  )"
+  metadata_before="$(sha256sum "${current_release}/release.json" | awk '{print $1}')"
+  cp -- /bin/sleep "${current_release}/app/bin/devin-desktop"
+  chmod 0755 "${current_release}/app/bin/devin-desktop"
+  "${current_release}/app/bin/devin-desktop" 30 &
+  running_pid=$!
+  wait_for_process_executable \
+    "${running_pid}" "${canonical_home}/.local/opt/devin-desktop/$(
+      readlink "${TEST_HOME}/.local/opt/devin-desktop/current"
+    )/app/bin/devin-desktop"
+
+  run manager_env update
+  kill "${running_pid}" 2>/dev/null || true
+  wait "${running_pid}" 2>/dev/null || true
+
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"Devin Desktop is running"* ]]
+  [ "$(sha256sum "${current_release}/release.json" | awk '{print $1}')" = \
+    "${metadata_before}" ]
+}
+
+@test "[LIR-U2-R03] rollback recovers the layout and remains reversible" {
+  local second="${BATS_TEST_TMPDIR}/second.deb"
+  local second_build="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local newer_target older_target
+
+  install_fixture
+  "${FIXTURE_BUILDER}" "${second}" safe "${second_build}" "3.4.28"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${second_build}/Devin-linux-x64-3.4.28.deb" \
+    "${second}" "3.4.28" "${second_build}" 1783378474000
+  manager_env update
+  newer_target="$(readlink "${install_root}/current")"
+  older_target="$(readlink "${install_root}/previous")"
+  downgrade_owned_installation_to_initial_manager_layout
+
+  run manager_env rollback
+
+  [ "${status}" -eq 0 ]
+  [ "$(readlink "${install_root}/current")" = "${older_target}" ]
+  [ "$(readlink "${install_root}/previous")" = "${newer_target}" ]
+  [ -f "${TEST_HOME}/.local/state/devin-desktop-manager/state.json" ]
+
+  run manager_env rollback
+
+  [ "${status}" -eq 0 ]
+  [ "$(readlink "${install_root}/current")" = "${newer_target}" ]
+  [ "$(readlink "${install_root}/previous")" = "${older_target}" ]
+}
+
+@test "[LIR-U2-R08] cleanup preserves unrelated MIME association order" {
+  seed_complete_initial_manager_layout
+  cat >"${DEFAULTS_FILE}" <<'EOF'
+# preserve this comment
+[Default Applications]
+x-scheme-handler/devin=browser.desktop;
+x-scheme-handler/windsurf=devin-desktop-url-handler.desktop;
+application/x-devin-desktop-workspace=devin-desktop.desktop;
+
+[Added Associations]
+x-scheme-handler/devin=first.desktop;devin-desktop-url-handler.desktop;last.desktop;
+x-scheme-handler/windsurf=devin-desktop-url-handler.desktop;other.desktop;
+application/x-devin-desktop-workspace=workspace-extra.desktop;devin-desktop.desktop;
+EOF
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  grep -Fqx '# preserve this comment' "${DEFAULTS_FILE}"
+  grep -Fqx 'x-scheme-handler/devin=browser.desktop;' "${DEFAULTS_FILE}"
+  grep -Fqx 'x-scheme-handler/devin=first.desktop;last.desktop;' "${DEFAULTS_FILE}"
+  grep -Fqx 'x-scheme-handler/windsurf=other.desktop;' "${DEFAULTS_FILE}"
+  grep -Fqx \
+    'application/x-devin-desktop-workspace=workspace-extra.desktop;' \
+    "${DEFAULTS_FILE}"
+}
+
+@test "[LIR-U2-R08] MIME cleanup does not replace an unchanged file" {
+  local mimeapps="${TEST_HOME}/.local/share/mimeapps.list"
+  local inode_before
+
+  install_fixture
+  printf '%s\n' \
+    '[Default Applications]' \
+    'text/plain=editor.desktop;' \
+    >"${mimeapps}"
+  inode_before="$(stat -c '%i' -- "${mimeapps}")"
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [ "$(stat -c '%i' -- "${mimeapps}")" = "${inode_before}" ]
+  grep -Fqx 'text/plain=editor.desktop;' "${mimeapps}"
+}
+
+@test "[LIR-U2-R08] MIME cleanup preserves extended attributes" {
+  local mimeapps="${TEST_HOME}/.local/share/mimeapps.list"
+
+  command -v setfattr >/dev/null 2>&1 || skip "setfattr is unavailable"
+  command -v getfattr >/dev/null 2>&1 || skip "getfattr is unavailable"
+  install_fixture
+  printf '%s\n' \
+    '[Added Associations]' \
+    'x-scheme-handler/devin=devin-desktop-manager-url-handler.desktop;' \
+    >"${mimeapps}"
+  setfattr -n user.devin-desktop-test -v preserved -- "${mimeapps}"
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [ "$(getfattr --only-values -n user.devin-desktop-test -- "${mimeapps}")" = \
+    "preserved" ]
+}
+
+@test "[LIR-U2-R08] MIME cleanup ignores a precreated predictable symlink" {
+  local mimeapps="${TEST_HOME}/.config/mimeapps.list"
+  local victim="${BATS_TEST_TMPDIR}/mime-victim"
+
+  mkdir -p -- "$(dirname "${mimeapps}")"
+  printf '%s\n' \
+    '[Added Associations]' \
+    'x-scheme-handler/devin=devin-desktop-manager-url-handler.desktop;' \
+    >"${mimeapps}"
+  printf 'do not overwrite\n' >"${victim}"
+
+  run env \
+    HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" \
+    bash -c '
+      source "$1"
+      ln -s -- "$3" "${CONFIG_HOME}/mimeapps.list.new.$$"
+      rewrite_mimeapps_without_handler \
+        "${CONFIG_HOME}/mimeapps.list" \
+        "${MIME_DEVIN}" "${URL_DESKTOP_ID}"
+    ' _ "${MANAGER}" "${mimeapps}" "${victim}"
+
+  [ "${status}" -eq 0 ]
+  [ "$(cat "${victim}")" = "do not overwrite" ]
+  [ -f "${mimeapps}" ]
+  [ ! -L "${mimeapps}" ]
+}
+
+@test "[LIR-U2-R08] MIME cleanup refuses an other-writable parent" {
+  local data_home="${TEST_HOME}/.local/share"
+  local mimeapps="${data_home}/mimeapps.list"
+  local before
+
+  install_fixture
+  printf '%s\n' \
+    '[Added Associations]' \
+    'x-scheme-handler/devin=devin-desktop-manager-url-handler.desktop;' \
+    >"${mimeapps}"
+  before="$(sha256sum "${mimeapps}" | awk '{print $1}')"
+  chmod 0777 "${data_home}"
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -ne 0 ]
+  [ "$(sha256sum "${mimeapps}" | awk '{print $1}')" = "${before}" ]
+}
+
+@test "[LIR-U2-R08] MIME cleanup fails closed on a post-install symlink" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local parked="${BATS_TEST_TMPDIR}/mimeapps.real"
+  local before
+
+  install_fixture
+  mv -- "${DEFAULTS_FILE}" "${parked}"
+  ln -s -- "${parked}" "${DEFAULTS_FILE}"
+  before="$(sha256sum "${parked}" | awk '{print $1}')"
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -ne 0 ]
+  [ -d "${install_root}" ]
+  [ -f "${TEST_HOME}/.local/state/devin-desktop-manager/state.json" ]
+  [ -L "${DEFAULTS_FILE}" ]
+  [ "$(sha256sum "${parked}" | awk '{print $1}')" = "${before}" ]
+}
+
+@test "[LIR-U2-R06] post-write default mismatch restores and retries safely" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local defaults_before
+
+  seed_complete_initial_manager_layout
+  defaults_before="$(sha256sum "${DEFAULTS_FILE}" | awk '{print $1}')"
+  rm -f -- "${CURL_LOG}.xdg-default-called"
+  export MOCK_XDG_QUERY_AFTER_DEFAULT="unexpected.desktop"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+
+  run manager_env update
+
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"restoring the previous release and desktop state"* ]]
+  [ "$(sha256sum "${DEFAULTS_FILE}" | awk '{print $1}')" = "${defaults_before}" ]
+  [ -f "${TEST_HOME}/.local/share/applications/devin-desktop.desktop" ]
+  [ ! -e "${TEST_HOME}/.local/state/devin-desktop-manager/state.json" ]
+  [ -f "${install_root}/.devin-desktop-manager-owned" ]
+
+  unset MOCK_XDG_QUERY_AFTER_DEFAULT
+  rm -f -- "${CURL_LOG}.xdg-default-called"
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  [ -f "${TEST_HOME}/.local/state/devin-desktop-manager/state.json" ]
+  run grep -F 'devin-desktop-url-handler.desktop' "${DEFAULTS_FILE}"
+  [ "${status}" -eq 1 ]
+  run grep -F 'devin-desktop.desktop' "${DEFAULTS_FILE}"
+  [ "${status}" -eq 1 ]
+}
+
+@test "[LIR-U2-R07] recovered lifecycle operations remain idempotent" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local state_file="${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
+  local state_before
+
+  seed_complete_initial_manager_layout
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+  manager_env update
+  state_before="$(sha256sum "${state_file}" | awk '{print $1}')"
+
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  [ "$(sha256sum "${state_file}" | awk '{print $1}')" = "${state_before}" ]
+  [ "$(find "${install_root}/releases" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ]
+  [ "$(grep -c '^x-scheme-handler/devin=devin-desktop-manager-url-handler.desktop;$' "${DEFAULTS_FILE}")" -eq 1 ]
+
+  run manager_env uninstall --yes
+  [ "${status}" -eq 0 ]
+  run manager_env uninstall --yes
+  [ "${status}" -eq 0 ]
+  [ ! -e "${install_root}" ]
+}
+
+@test "[LIR-U2-R09] retry revalidates restored legacy evidence before cleanup" {
+  local legacy_main="${TEST_HOME}/.local/share/applications/devin-desktop.desktop"
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+
+  seed_complete_initial_manager_layout
+  rm -f -- "${CURL_LOG}.xdg-default-called"
+  export MOCK_XDG_QUERY_AFTER_DEFAULT="unexpected.desktop"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+
+  run manager_env update
+
+  [ "${status}" -eq 1 ]
+  [ -f "${install_root}/.devin-desktop-manager-owned" ]
+  [ ! -e "${TEST_HOME}/.local/state/devin-desktop-manager/state.json" ]
+
+  unset MOCK_XDG_QUERY_AFTER_DEFAULT
+  sed -i 's/StartupNotify=false/StartupNotify=true/' "${legacy_main}"
+  run manager_env update
+
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"interrupted legacy recovery could not be safely revalidated"* ]]
+  [[ "${output}" == *"conflict [main-desktop]"* ]]
+  [[ "${output}" == *"no desktop files or associations were changed"* ]]
+  grep -Fqx 'StartupNotify=true' "${legacy_main}"
+  [ ! -e "${TEST_HOME}/.local/state/devin-desktop-manager/state.json" ]
+}
+
+@test "[LIR-U3-R01] doctor reports one recoverable legacy diagnosis" {
+  seed_complete_initial_manager_layout
+
+  run manager_env doctor
+
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"recoverable Legacy Installation"* ]]
+  [[ "${output}" == *"devin-desktop-manager update"* ]]
+  [[ "${output}" == *"devin-desktop-manager uninstall"* ]]
+  [[ "${output}" == *"revalidate"*"under lock"* ]]
+  [[ "${output}" != *"Installation problems:"* ]]
+  [[ "${output}" != *"main desktop entry is invalid"* ]]
+}
+
+@test "[LIR-U3-R01] doctor validates the release before reporting recovery" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local release
+
+  seed_complete_initial_manager_layout
+  release="${install_root}/$(readlink "${install_root}/current")"
+  cat >"${release}/app/bin/devin-desktop" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '3.4.27' '0d4bf12ed4a7597cb8ae9016fe8474468aad98a2' 'x64'
+exit 9
+EOF
+  chmod 0755 "${release}/app/bin/devin-desktop"
+
+  run manager_env doctor
+
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"release version probe failed"* ]]
+  [[ "${output}" != *"recoverable Legacy Installation"* ]]
+}
+
+@test "[LIR-U3-R01] doctor rejects an invalid legacy GUI executable" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local release
+
+  seed_complete_initial_manager_layout
+  release="${install_root}/$(readlink "${install_root}/current")"
+  cat >"${release}/app/devin-desktop" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod 0755 "${release}/app/devin-desktop"
+  cat >"${MOCK_BIN}/ldd" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+  printf 'ldd (GNU libc) 2.39\n'
+  exit 0
+fi
+printf 'not a dynamic executable\n' >&2
+exit 1
+EOF
+  chmod 0755 "${MOCK_BIN}/ldd"
+
+  run manager_env doctor
+
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"release executable validation failed"* ]]
+  [[ "${output}" != *"recoverable Legacy Installation"* ]]
+}
+
+@test "[LIR-U3-R02] doctor remains healthy after legacy recovery" {
+  seed_complete_initial_manager_layout
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+  manager_env update
+
+  run manager_env doctor
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"Healthy: 3.4.27"* ]]
+  [[ "${output}" != *"recoverable Legacy Installation"* ]]
+  [[ "${output}" != *"Installation problems:"* ]]
+}
+
+@test "[LIR-U3-R03] lifecycle refusal identifies the invariant without claiming ownership" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local desktop="${TEST_HOME}/.local/share/applications/devin-desktop.desktop"
+
+  seed_complete_initial_manager_layout
+  sed -i 's# --new-window %F# --reuse-window %F#' "${desktop}"
+
+  run manager_env update
+
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"main-desktop"* ]]
+  [[ "${output}" == *"${desktop}"* ]]
+  [[ "${output}" == *"ownership was not claimed"* ]]
+  [[ "${output}" == *"inspect or move aside"* ]]
+  [[ "${output}" == *"rerun devin-desktop-manager update"* ]]
+  [ ! -e "${install_root}/.devin-desktop-manager-owned" ]
+}
+
+@test "[LIR-U3-R04] doctor classification is read-only" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local metadata metadata_before defaults_before
+
+  seed_complete_initial_manager_layout
+  metadata="$(find "${install_root}/releases" -name release.json -type f -print -quit)"
+  metadata_before="$(sha256sum "${metadata}" | awk '{print $1}')"
+  defaults_before="$(sha256sum "${DEFAULTS_FILE}" | awk '{print $1}')"
+
+  run manager_env doctor
+
+  [ "${status}" -eq 1 ]
+  [ ! -e "${install_root}/.devin-desktop-manager-owned" ]
+  [ ! -e "${TEST_HOME}/.local/state/devin-desktop-manager/state.json" ]
+  [ "$(sha256sum "${metadata}" | awk '{print $1}')" = "${metadata_before}" ]
+  [ "$(sha256sum "${DEFAULTS_FILE}" | awk '{print $1}')" = "${defaults_before}" ]
+}
+
+@test "[LIR-U3-R06] lifecycle revalidates after a recoverable doctor result" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local desktop="${TEST_HOME}/.local/share/applications/devin-desktop.desktop"
+
+  seed_complete_initial_manager_layout
+  run manager_env doctor
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"recoverable Legacy Installation"* ]]
+  sed -i 's# --new-window %F# --reuse-window %F#' "${desktop}"
+
+  run manager_env update
+
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"main-desktop"* ]]
+  [ ! -e "${install_root}/.devin-desktop-manager-owned" ]
+}
+
+@test "[LIR-U3-R05] make install preserves unsafe-conflict guidance" {
+  local desktop="${TEST_HOME}/.local/share/applications/devin-desktop.desktop"
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+
+  seed_complete_initial_manager_layout
+  sed -i 's# --new-window %F# --reuse-window %F#' "${desktop}"
+
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" \
+    make --no-print-directory -s -C "${PROJECT_ROOT}" install
+
+  [ "${status}" -eq 2 ]
+  [[ "${output}" == *"conflict [main-desktop]"* ]]
+  [[ "${output}" == *"ownership was not claimed"* ]]
+  [[ "${output}" == *"inspect/move aside a reported conflict"* ]]
+  [ ! -e "${install_root}/.devin-desktop-manager-owned" ]
+  grep -Fq -- '--reuse-window %F' "${desktop}"
+}
+
+@test "[LIR-U4-R03] version reports the public CLI contract" {
   run "${MANAGER}" --version
 
   [ "${status}" -eq 0 ]
-  [ "${output}" = "devin-desktop-manager 0.1.0" ]
+  [ "${output}" = "devin-desktop-manager 0.1.1" ]
 }
 
 @test "no arguments show help successfully" {
@@ -502,6 +2240,36 @@ EOF
   [[ "${output}" == *"readlink"* ]]
   [[ "${output}" != *"bsdtar"* ]]
   [ ! -e "${TEST_HOME}/.local/state" ]
+}
+
+@test "[PMC-U2-R02] doctor preflight includes parent-path capabilities" {
+  run env HOME="${TEST_HOME}" bash -c '
+    source "$1"
+    preflight_check_commands() {
+      printf "%s\n" "$@"
+    }
+    preflight_capabilities_doctor
+  ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *$'\ndirname\n'* || "${output}" == dirname$'\n'* ||
+    "${output}" == *$'\ndirname' ]]
+}
+
+@test "[PMC-U2-R02] release runtime includes classification capabilities" {
+  run env HOME="${TEST_HOME}" bash -c '
+    source "$1"
+    require_commands() {
+      printf "%s\n" "$@"
+    }
+    require_release_commands
+  ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *$'\nstat\n'* || "${output}" == stat$'\n'* ||
+    "${output}" == *$'\nstat' ]]
+  [[ "${output}" == *$'\nawk\n'* || "${output}" == awk$'\n'* ||
+    "${output}" == *$'\nawk' ]]
 }
 
 @test "[PMC-U2-R03] private profiles reject unknown commands as usage" {

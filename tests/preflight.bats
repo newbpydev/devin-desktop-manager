@@ -39,11 +39,11 @@ make_sparse_bin() {
 
   grep -Fq 'preflight" install-manager' "${PROJECT_ROOT}/scripts/install-manager"
   grep -Fq 'preflight" check-coverage' "${PROJECT_ROOT}/scripts/check-coverage"
-  grep -Fq "[package-run]='exact-git-root-local package-local package-output-local output-lock'" \
+  grep -Fq '["package-run"]='"'exact-git-root-local package-local package-output-local output-lock'" \
     "${PROJECT_ROOT}/scripts/preflight"
-  grep -Fq "[release-contract]='exact-git-root-local release-contract-local'" \
+  grep -Fq '["release-contract"]='"'exact-git-root-local release-contract-local'" \
     "${PROJECT_ROOT}/scripts/preflight"
-  grep -Fq "[release-contract-official]='release-contract release-handoff-local'" \
+  grep -Fq '["release-contract-official"]='"'release-contract release-handoff-local'" \
     "${PROJECT_ROOT}/scripts/preflight"
   grep -Fq 'preflight" fixture-mini-deb' "${FIXTURE_BUILDER}"
 }
@@ -361,9 +361,9 @@ EOF
 }
 
 @test "[PMC-U6-C01] release composite reuses package coverage and contract profiles" {
-  grep -Fq "[package]='package-run'" "${PREFLIGHT}"
-  grep -Fq "[release-check]='lint coverage package release-contract'" "${PREFLIGHT}"
-  grep -Fq "[release-check-official]='release-check release-contract-official'" "${PREFLIGHT}"
+  grep -Fq '["package"]='"'package-run'" "${PREFLIGHT}"
+  grep -Fq '["release-check"]='"'lint coverage package release-contract'" "${PREFLIGHT}"
+  grep -Fq '["release-check-official"]='"'release-check release-contract-official'" "${PREFLIGHT}"
   [ "$(grep -c '^    package-output-local)' "${PREFLIGHT}")" -eq 1 ]
   [ "$(grep -c '^    release-contract-local)' "${PREFLIGHT}")" -eq 1 ]
   [ "$(grep -c '^    release-handoff-local)' "${PREFLIGHT}")" -eq 1 ]
@@ -374,11 +374,11 @@ EOF
   sparse="$(make_sparse_bin bash git awk grep timeout env mkdir rm find sha256sum readlink stat)"
 
   run env PATH="${sparse}" "${HARNESS_BASH}" "${PROJECT_ROOT}/scripts/release-check" \
-    --project-root "${PROJECT_ROOT}" 0.1.0
+    --project-root "${PROJECT_ROOT}" 0.1.1
   [ "${status}" -eq 0 ]
 
   run env PATH="${sparse}" "${HARNESS_BASH}" "${PROJECT_ROOT}/scripts/release-check" \
-    --project-root "${PROJECT_ROOT}" --release-tag v0.1.0 0.1.0
+    --project-root "${PROJECT_ROOT}" --release-tag v0.1.1 0.1.1
   [ "${status}" -eq 1 ]
   [[ "${output}" == *"command.tail"* ]]
   [[ "${output}" != *"package handoff"* ]]
@@ -391,5 +391,5 @@ EOF
 
   run "${HARNESS_BASH}" "${PREFLIGHT}" clean --project-root "${PROJECT_ROOT}"
   [ "${status}" -ne 2 ]
-  grep -Fq "[clean]='clean-local output-lock'" "${PREFLIGHT}"
+  grep -Fq '["clean"]='"'clean-local output-lock'" "${PREFLIGHT}"
 }

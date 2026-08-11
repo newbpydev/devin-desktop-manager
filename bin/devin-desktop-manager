@@ -14,7 +14,7 @@ shopt -s inherit_errexit 2>/dev/null ||
   }
 umask 077
 
-readonly MANAGER_VERSION="0.1.0"
+readonly MANAGER_VERSION="0.1.1"
 readonly MANAGER_ID="io.github.newbpydev.devin-desktop-manager"
 readonly MANAGER_DESKTOP_MARKER="X-Devin-Desktop-Manager=true"
 readonly LEGACY_MANAGER_VERSION="0.1.0"
@@ -106,6 +106,23 @@ declare -a PREFLIGHT_PURPOSES=()
 declare -a PREFLIGHT_OBSERVED=()
 declare -a PREFLIGHT_REMEDIATIONS=()
 PREFLIGHT_LIMIT_EXCEEDED=false
+
+LEGACY_CLASSIFICATION=""
+LEGACY_REASON=""
+LEGACY_OBSERVED=""
+LEGACY_REQUIRES_APP_STOP=false
+LEGACY_ORIGINAL_DEVIN=""
+LEGACY_ORIGINAL_WINDSURF=""
+LEGACY_ORIGINAL_WORKSPACE=""
+LEGACY_FALLBACK_DEVIN=""
+LEGACY_FALLBACK_WINDSURF=""
+LEGACY_FALLBACK_WORKSPACE=""
+LEGACY_PROVENANCE_FILE_DEVIN=""
+LEGACY_PROVENANCE_FILE_WINDSURF=""
+LEGACY_PROVENANCE_FILE_WORKSPACE=""
+LEGACY_CURRENT_DEVIN_OWNED=false
+LEGACY_CURRENT_WINDSURF_OWNED=false
+LEGACY_CURRENT_WORKSPACE_OWNED=false
 
 info() {
   printf 'devin-desktop-manager: %s\n' "$*" >&2
@@ -314,7 +331,7 @@ preflight_capabilities_desktop_integration() {
 
 preflight_capabilities_doctor() {
   preflight_check_commands jq sha256sum grep awk stat find timeout unshare cat \
-    true basename
+    true dirname basename
 }
 
 preflight_check_environment() {
@@ -870,7 +887,7 @@ require_download_commands() {
 }
 
 require_release_commands() {
-  require_commands jq sha256sum ldd readlink find timeout
+  require_commands jq sha256sum ldd readlink find timeout dirname stat awk
 }
 
 require_mutation_commands() {
@@ -1314,7 +1331,7 @@ legacy_release_metadata_is_valid() {
   local version build product_version sha256 artifact_url expected_id
   local url_prefix="https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/"
 
-  [[ -d "${release_dir}" && ! -L "${release_dir}" ]] || return 1
+  legacy_release_tree_is_user_owned "${release_dir}" || return 1
   directory_can_be_listed "${release_dir}" || return 1
   [[ -f "${metadata}" && ! -L "${metadata}" ]] || return 1
   jq -e \
@@ -1366,11 +1383,15 @@ legacy_release_metadata_is_valid() {
   [[ "${expected_release_name}" == "${expected_id}" ]] || return 1
 
   [[ -d "${release_dir}/app" && ! -L "${release_dir}/app" ]] || return 1
+  [[ -d "${release_dir}/app/bin" && ! -L "${release_dir}/app/bin" ]] ||
+    return 1
   [[ -d "${release_dir}/integration" &&
     ! -L "${release_dir}/integration" ]] || return 1
-  [[ -x "${release_dir}/app/devin-desktop" &&
+  [[ -f "${release_dir}/app/devin-desktop" &&
+    -x "${release_dir}/app/devin-desktop" &&
     ! -L "${release_dir}/app/devin-desktop" ]] || return 1
-  [[ -x "${release_dir}/app/bin/devin-desktop" &&
+  [[ -f "${release_dir}/app/bin/devin-desktop" &&
+    -x "${release_dir}/app/bin/devin-desktop" &&
     ! -L "${release_dir}/app/bin/devin-desktop" ]] || return 1
   [[ -f "${release_dir}/integration/devin-desktop.png" &&
     ! -L "${release_dir}/integration/devin-desktop.png" ]] || return 1
@@ -1401,7 +1422,7 @@ legacy_release_inventory_is_valid() {
   local release_entry
   local saw_release=false
 
-  [[ -d "${RELEASES_DIR}" && ! -L "${RELEASES_DIR}" ]] || return 1
+  legacy_directory_is_user_owned "${RELEASES_DIR}" || return 1
   directory_can_be_listed "${RELEASES_DIR}" || return 1
   if [[ -e "${CURRENT_LINK}" || -L "${CURRENT_LINK}" ]]; then
     release_target "${CURRENT_LINK}" >/dev/null || return 1
@@ -1482,13 +1503,13 @@ legacy_install_root_is_valid() {
   local entry name
   local saw_lock=false saw_releases=false
 
-  [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] || return 1
+  legacy_tree_is_user_owned_and_unmounted "${INSTALL_ROOT}" || return 1
   directory_can_be_listed "${INSTALL_ROOT}" || return 1
   while IFS= read -r -d '' entry; do
     name="$(basename "${entry}")"
     case "${name}" in
       releases)
-        [[ -d "${entry}" && ! -L "${entry}" ]] || return 1
+        legacy_directory_is_user_owned "${entry}" || return 1
         saw_releases=true
         ;;
       current|previous)
@@ -1532,9 +1553,10 @@ legacy_cache_root_is_valid() {
   local entry name release_id
 
   if [[ ! -e "${CACHE_ROOT}" && ! -L "${CACHE_ROOT}" ]]; then
-    return 0
+    future_user_directory_ancestry_is_safe "${CACHE_ROOT}"
+    return
   fi
-  [[ -d "${CACHE_ROOT}" && ! -L "${CACHE_ROOT}" ]] || return 1
+  legacy_tree_is_user_owned_and_unmounted "${CACHE_ROOT}" || return 1
   directory_can_be_listed "${CACHE_ROOT}" || return 1
   legacy_root_marker_is_compatible "${CACHE_ROOT}" || return 1
   while IFS= read -r -d '' entry; do
@@ -1562,7 +1584,7 @@ legacy_cache_root_is_valid() {
 legacy_state_root_is_valid() {
   local entry name
 
-  [[ -d "${STATE_DIR}" && ! -L "${STATE_DIR}" ]] || return 1
+  legacy_tree_is_user_owned_and_unmounted "${STATE_DIR}" || return 1
   directory_can_be_listed "${STATE_DIR}" || return 1
   legacy_root_marker_is_compatible "${STATE_DIR}" || return 1
   while IFS= read -r -d '' entry; do
@@ -1585,9 +1607,10 @@ legacy_pre_activation_state_root_is_valid() {
   local entry name
 
   if [[ ! -e "${STATE_DIR}" && ! -L "${STATE_DIR}" ]]; then
-    return 0
+    future_user_directory_ancestry_is_safe "${STATE_DIR}"
+    return
   fi
-  [[ -d "${STATE_DIR}" && ! -L "${STATE_DIR}" ]] || return 1
+  legacy_tree_is_user_owned_and_unmounted "${STATE_DIR}" || return 1
   directory_can_be_listed "${STATE_DIR}" || return 1
   legacy_root_marker_is_compatible "${STATE_DIR}" || return 1
   while IFS= read -r -d '' entry; do
@@ -1670,6 +1693,891 @@ legacy_post_link_defaults_are_unclaimed() {
         ;;
     esac
   done
+}
+
+classify_legacy_refusal() {
+  LEGACY_CLASSIFICATION="refused"
+  LEGACY_REASON="$1"
+  LEGACY_OBSERVED="${2:-}"
+  LEGACY_REQUIRES_APP_STOP=false
+  return 1
+}
+
+reset_legacy_classification() {
+  LEGACY_CLASSIFICATION="refused"
+  LEGACY_REASON=""
+  LEGACY_OBSERVED=""
+  LEGACY_REQUIRES_APP_STOP=false
+  LEGACY_ORIGINAL_DEVIN=""
+  LEGACY_ORIGINAL_WINDSURF=""
+  LEGACY_ORIGINAL_WORKSPACE=""
+  LEGACY_FALLBACK_DEVIN=""
+  LEGACY_FALLBACK_WINDSURF=""
+  LEGACY_FALLBACK_WORKSPACE=""
+  LEGACY_PROVENANCE_FILE_DEVIN=""
+  LEGACY_PROVENANCE_FILE_WINDSURF=""
+  LEGACY_PROVENANCE_FILE_WORKSPACE=""
+  LEGACY_CURRENT_DEVIN_OWNED=false
+  LEGACY_CURRENT_WINDSURF_OWNED=false
+  LEGACY_CURRENT_WORKSPACE_OWNED=false
+}
+
+desktop_escape_command() {
+  local escaped_command="$1"
+
+  escaped_command="${escaped_command//\\/\\\\}"
+  escaped_command="${escaped_command//\"/\\\"}"
+  escaped_command="${escaped_command//\`/\\\`}"
+  escaped_command="${escaped_command//\$/\\\$}"
+  printf '%s' "${escaped_command}"
+}
+
+legacy_file_is_user_regular() {
+  local path="$1"
+  local owner mode
+
+  [[ -f "${path}" && ! -L "${path}" ]] || return 1
+  owner="$(stat -c '%u' -- "${path}" 2>/dev/null)" || return 1
+  mode="$(stat -c '%a' -- "${path}" 2>/dev/null)" || return 1
+  [[ "${owner}" == "${EUID}" ]] && preflight_mode_is_safe "${mode}"
+}
+
+legacy_directory_is_user_owned() {
+  local path="$1"
+
+  [[ -d "${path}" && ! -L "${path}" &&
+    "$(stat -c '%u' -- "${path}" 2>/dev/null)" == "${EUID}" ]]
+}
+
+legacy_symlink_is_user_owned() {
+  local path="$1"
+
+  [[ -L "${path}" &&
+    "$(stat -c '%u' -- "${path}" 2>/dev/null)" == "${EUID}" ]]
+}
+
+legacy_mountinfo_path() {
+  printf '/proc/self/mountinfo\n'
+}
+
+legacy_mount_table_has_no_targets_at_or_below() {
+  local root="$1"
+  local mountinfo
+
+  mountinfo="$(legacy_mountinfo_path)" || return 1
+  [[ -r "${mountinfo}" ]] || return 1
+  DEVIN_DESKTOP_MANAGER_MOUNT_ROOT="${root}" awk '
+    function decode_mount_path(value, encoded) {
+      encoded = value
+      gsub(/\\(040|011|012|134)/, "", encoded)
+      if (encoded ~ /\\/) {
+        invalid_escape = 1
+        return value
+      }
+      gsub(/\\040/, " ", value)
+      gsub(/\\011/, "\t", value)
+      gsub(/\\012/, "\n", value)
+      gsub(/\\134/, sprintf("%c", 92), value)
+      return value
+    }
+    BEGIN { root = ENVIRON["DEVIN_DESKTOP_MANAGER_MOUNT_ROOT"] }
+    {
+      separator = 0
+      for (field_index = 7; field_index <= NF; field_index++) {
+        if ($field_index == "-") {
+          separator = field_index
+          break
+        }
+      }
+      if ($1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ ||
+          $3 !~ /^[0-9]+:[0-9]+$/ ||
+          substr($5, 1, 1) != "/" ||
+          separator == 0 || separator > NF - 3) {
+        invalid = 1
+        next
+      }
+      target = decode_mount_path($5)
+      if (target == root || index(target, root "/") == 1) mounted = 1
+      saw_mount = 1
+    }
+    END {
+      exit saw_mount && !invalid && !invalid_escape && !mounted ? 0 : 1
+    }
+  ' "${mountinfo}"
+}
+
+legacy_tree_is_user_owned_and_unmounted() {
+  local root="$1"
+  local canonical_root
+
+  legacy_directory_is_user_owned "${root}" || return 1
+  user_directory_ancestry_is_safe "${root}" || return 1
+  canonical_root="$(readlink -f -- "${root}")" || return 1
+  legacy_mount_table_has_no_targets_at_or_below "${canonical_root}" || return 1
+  find "${root}" -xdev -exec stat -c '%u' -- {} + |
+    awk -v expected_owner="${EUID}" '
+      $0 != expected_owner { invalid = 1 }
+      END { exit invalid ? 1 : 0 }
+    ' || return 1
+  find "${root}" -xdev ! -type l -exec stat -c '%u %a' -- {} + |
+    awk -v expected_owner="${EUID}" '
+      {
+        mode = $2
+        group_mode = substr(mode, length(mode) - 1, 1)
+        other_mode = substr(mode, length(mode), 1)
+        if ($1 != expected_owner || mode !~ /^[0-7]+$/ ||
+            (length(mode) != 3 && length(mode) != 4) ||
+            group_mode ~ /[2367]/ || other_mode ~ /[2367]/) {
+          invalid = 1
+        }
+      }
+      END { exit invalid ? 1 : 0 }
+    ' || return 1
+}
+
+legacy_release_tree_is_user_owned() {
+  local release_dir="$1"
+
+  legacy_tree_is_user_owned_and_unmounted "${release_dir}"
+}
+
+legacy_desktop_is_user_regular() {
+  legacy_file_is_user_regular "$1"
+}
+
+legacy_desktop_semantics_are_valid() {
+  local path="$1"
+  local role="$2"
+  local escaped_command
+
+  escaped_command="$(desktop_escape_command "${APP_COMMAND}")"
+  legacy_desktop_is_user_regular "${path}" || return 1
+  desktop-file-validate "${path}" >/dev/null 2>&1 || return 1
+  DEVIN_DESKTOP_MANAGER_AWK_QUOTED_COMMAND="\"${escaped_command}\"" \
+    awk \
+    -v role="${role}" \
+    -v command="${APP_COMMAND}" \
+    -v mime_devin="${MIME_DEVIN}" \
+    -v mime_windsurf="${MIME_WINDSURF}" \
+    -v mime_workspace="${MIME_WORKSPACE}" '
+    function list_matches(value, expected, actual, wanted, count, needed, i, item, old) {
+      count = split(value, actual, ";")
+      if (count > 0 && actual[count] == "") count--
+      needed = split(expected, wanted, ";")
+      if (count != needed) return 0
+      for (old in present) delete present[old]
+      for (i = 1; i <= count; i++) {
+        item = actual[i]
+        if (item == "" || present[item]++) return 0
+      }
+      for (i = 1; i <= needed; i++) {
+        if (!(wanted[i] in present)) return 0
+      }
+      return 1
+    }
+    function localized_display_key(key) {
+      return key ~ /^(Name|GenericName|Comment)(\[[^][]+\])?$/
+    }
+    function reject() { invalid = 1 }
+    BEGIN {
+      section = ""
+      desktop_sections = 0
+      action_sections = 0
+      quoted_command = ENVIRON["DEVIN_DESKTOP_MANAGER_AWK_QUOTED_COMMAND"]
+    }
+    /\r$/ { reject(); next }
+    /^[[:space:]]*($|#)/ { next }
+    /^\[/ {
+      if ($0 == "[Desktop Entry]") {
+        desktop_sections++
+        section = "desktop"
+      } else if ($0 == "[Desktop Action new-empty-window]") {
+        action_sections++
+        section = "action"
+      } else {
+        reject()
+      }
+      next
+    }
+    {
+      separator = index($0, "=")
+      if (separator < 2 || section == "") {
+        reject()
+        next
+      }
+      key = substr($0, 1, separator - 1)
+      value = substr($0, separator + 1)
+      identity = section SUBSEP key
+      if (seen[identity]++) {
+        reject()
+        next
+      }
+      values[identity] = value
+      if (section == "desktop") {
+        if (localized_display_key(key)) next
+        if (key !~ /^(Exec|TryExec|Icon|Type|StartupNotify|StartupWMClass|Categories|MimeType|Actions|Keywords|NoDisplay|X-Devin-Desktop-Manager)$/) reject()
+      } else {
+        if (key ~ /^Name(\[[^][]+\])?$/) next
+        if (key !~ /^(Exec|Icon)$/) reject()
+      }
+    }
+    END {
+      if (desktop_sections != 1) reject()
+      if (role == "main" && action_sections != 1) reject()
+      if (role == "url" && action_sections != 0) reject()
+      if (values["desktop" SUBSEP "Type"] != "Application") reject()
+      if (values["desktop" SUBSEP "TryExec"] != command) reject()
+      if (values["desktop" SUBSEP "Icon"] != "devin-desktop") reject()
+      if (values["desktop" SUBSEP "StartupWMClass"] != "Devin") reject()
+      if (values["desktop" SUBSEP "Keywords"] != "vscode;") reject()
+      if (values["desktop" SUBSEP "X-Devin-Desktop-Manager"] != "true") reject()
+      if (role == "main") {
+        if (values["desktop" SUBSEP "Exec"] != quoted_command " %F") reject()
+        if (values["desktop" SUBSEP "StartupNotify"] != "false") reject()
+        if (!list_matches(values["desktop" SUBSEP "Categories"], "TextEditor;Development;IDE")) reject()
+        if (!list_matches(values["desktop" SUBSEP "MimeType"], mime_workspace)) reject()
+        if (!list_matches(values["desktop" SUBSEP "Actions"], "new-empty-window")) reject()
+        if (("desktop" SUBSEP "NoDisplay") in values) reject()
+        if (values["action" SUBSEP "Exec"] != quoted_command " --new-window %F") reject()
+        if (values["action" SUBSEP "Icon"] != "devin-desktop") reject()
+      } else {
+        if (values["desktop" SUBSEP "Exec"] != quoted_command " --open-url %U") reject()
+        if (values["desktop" SUBSEP "NoDisplay"] != "true") reject()
+        if (values["desktop" SUBSEP "StartupNotify"] != "true") reject()
+        if (!list_matches(values["desktop" SUBSEP "Categories"], "Utility;TextEditor;Development;IDE")) reject()
+        if (!list_matches(values["desktop" SUBSEP "MimeType"], mime_devin ";" mime_windsurf)) reject()
+        if (("desktop" SUBSEP "Actions") in values) reject()
+      }
+      exit invalid ? 1 : 0
+    }
+  ' "${path}"
+}
+
+legacy_expected_desktop_id() {
+  case "$1" in
+    "${MIME_DEVIN}"|"${MIME_WINDSURF}")
+      printf '%s\n' "${LEGACY_URL_DESKTOP_ID}"
+      ;;
+    "${MIME_WORKSPACE}")
+      printf '%s\n' "${LEGACY_MAIN_DESKTOP_ID}"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+legacy_mime_record_is_manager_id() {
+  case "$1" in
+    "${MAIN_DESKTOP_ID}"|"${URL_DESKTOP_ID}"|\
+      "${LEGACY_MAIN_DESKTOP_ID}"|"${LEGACY_URL_DESKTOP_ID}")
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+legacy_reason_mime_key() {
+  local mime_type="$1"
+
+  if [[ "${mime_type}" =~ ^[A-Za-z0-9][A-Za-z0-9._+!-]*/[A-Za-z0-9][A-Za-z0-9._+!-]*$ ]]; then
+    printf '%s\n' "${mime_type}"
+  else
+    printf 'unknown\n'
+  fi
+}
+
+legacy_desktop_relative_path_is_available() {
+  local directory="$1"
+  local desktop_id="$2"
+  local prefix="" remainder="${desktop_id}" segment
+
+  if [[ -f "${directory}/${desktop_id}" ]]; then
+    LEGACY_DESKTOP_CANDIDATE="${directory}/${desktop_id}"
+    return 0
+  fi
+  while [[ "${remainder}" == *-* ]]; do
+    segment="${remainder%%-*}"
+    remainder="${remainder#*-}"
+    if [[ -n "${prefix}" ]]; then
+      prefix+="-"
+    fi
+    prefix+="${segment}"
+    case "${prefix}" in
+      ""|.|..) continue ;;
+    esac
+    if [[ -d "${directory}/${prefix}" ]] &&
+      legacy_desktop_relative_path_is_available \
+        "${directory}/${prefix}" "${remainder}"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+legacy_desktop_try_exec_is_available() {
+  local encoded="$1"
+  local decoded="" character escape
+
+  while [[ -n "${encoded}" ]]; do
+    character="${encoded:0:1}"
+    encoded="${encoded:1}"
+    if [[ "${character}" != \\ ]]; then
+      decoded+="${character}"
+      continue
+    fi
+    [[ -n "${encoded}" ]] || return 1
+    escape="${encoded:0:1}"
+    encoded="${encoded:1}"
+    case "${escape}" in
+      s) decoded+=" " ;;
+      n) decoded+=$'\n' ;;
+      t) decoded+=$'\t' ;;
+      r) decoded+=$'\r' ;;
+      \\) decoded+="\\" ;;
+      *) return 1 ;;
+    esac
+  done
+  [[ -n "${decoded}" ]] || return 1
+  case "${decoded}" in
+    /*) [[ -f "${decoded}" && -x "${decoded}" ]] ;;
+    */*) return 1 ;;
+    *) type -P -- "${decoded}" >/dev/null ;;
+  esac
+}
+
+legacy_desktop_candidate_is_available() {
+  local path="$1"
+  local validation has_try_exec try_exec
+
+  [[ -f "${path}" ]] || return 1
+  desktop-file-validate "${path}" >/dev/null 2>&1 || return 1
+  validation="$(awk '
+    $0 == "[Desktop Entry]" { in_desktop = 1; next }
+    /^\[/ { in_desktop = 0 }
+    in_desktop && /^[[:space:]]*Type[[:space:]]*=/ {
+      value = $0
+      sub(/^[^=]*=[[:space:]]*/, "", value)
+      sub(/[[:space:]]*$/, "", value)
+      type = value
+    }
+    in_desktop && /^[[:space:]]*Hidden[[:space:]]*=/ {
+      value = $0
+      sub(/^[^=]*=[[:space:]]*/, "", value)
+      sub(/[[:space:]]*$/, "", value)
+      if (value == "true" || value == "1") hidden = 1
+    }
+    in_desktop && /^[[:space:]]*TryExec[[:space:]]*=/ {
+      value = $0
+      sub(/^[^=]*=[[:space:]]*/, "", value)
+      sub(/[[:space:]]*$/, "", value)
+      try_exec = value
+      has_try_exec = 1
+    }
+    END {
+      valid = type == "Application" && !hidden
+      if (valid) print (has_try_exec ? "1" : "0") "\t" try_exec
+      exit valid ? 0 : 1
+    }
+  ' "${path}")" || return 1
+  [[ "${validation}" == *$'\t'* ]] || return 1
+  has_try_exec="${validation%%$'\t'*}"
+  try_exec="${validation#*$'\t'}"
+  [[ "${has_try_exec}" == 0 ]] ||
+    legacy_desktop_try_exec_is_available "${try_exec}"
+}
+
+legacy_desktop_id_is_available() {
+  local desktop_id="$1"
+  local data_directory
+  local -a data_directories=() system_data_directories=()
+
+  is_safe_desktop_id "${desktop_id}" || return 1
+  data_directories=("${DATA_HOME}")
+  IFS=':' read -r -a system_data_directories \
+    <<<"${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+  for data_directory in "${system_data_directories[@]}"; do
+    [[ "${data_directory}" == /* ]] || continue
+    data_directories+=("${data_directory}")
+  done
+  for data_directory in "${data_directories[@]}"; do
+    LEGACY_DESKTOP_CANDIDATE=""
+    if legacy_desktop_relative_path_is_available \
+      "${data_directory}/applications" "${desktop_id}"; then
+      legacy_desktop_candidate_is_available "${LEGACY_DESKTOP_CANDIDATE}" &&
+        return 0
+      return 1
+    fi
+  done
+  return 1
+}
+
+legacy_mimeapps_file_is_safe() {
+  local file="$1"
+  local section="" line mime_type value desktop_id expected reason_mime
+  local record_has_expected record_fallback
+  local -a desktop_ids=()
+  local -A seen_records=()
+
+  legacy_file_is_user_regular "${file}" || {
+    LEGACY_REASON="default-provenance:unknown"
+    LEGACY_OBSERVED="${file}"
+    return 1
+  }
+  user_file_parent_is_safe "${file}" || {
+    LEGACY_REASON="default-provenance:unknown"
+    LEGACY_OBSERVED="${file}"
+    return 1
+  }
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    [[ "${line}" != *$'\r' ]] || {
+      LEGACY_REASON="default-shape:unknown"
+      LEGACY_OBSERVED="${file}"
+      return 1
+    }
+    case "${line}" in
+      ""|'#'*|';'*) continue ;;
+      '['*']') section="${line}"; continue ;;
+    esac
+    [[ "${line}" == *=* ]] || {
+      LEGACY_REASON="default-shape:unknown"
+      LEGACY_OBSERVED="${file}"
+      return 1
+    }
+    mime_type="${line%%=*}"
+    value="${line#*=}"
+    [[ -n "${section}" && -n "${mime_type}" ]] || {
+      LEGACY_REASON="default-shape:unknown"
+      LEGACY_OBSERVED="${file}"
+      return 1
+    }
+    case "${mime_type}" in
+      "${MIME_DEVIN}"|"${MIME_WINDSURF}"|"${MIME_WORKSPACE}") ;;
+      *)
+        reason_mime="$(legacy_reason_mime_key "${mime_type}")"
+        IFS=';' read -r -a desktop_ids <<<"${value}"
+        for desktop_id in "${desktop_ids[@]}"; do
+          [[ -n "${desktop_id}" ]] || continue
+          is_safe_desktop_id "${desktop_id}" || {
+            LEGACY_REASON="default-shape:${reason_mime}"
+            LEGACY_OBSERVED="${desktop_id}"
+            return 1
+          }
+          legacy_mime_record_is_manager_id "${desktop_id}" || continue
+          LEGACY_REASON="default-provenance:${reason_mime}"
+          LEGACY_OBSERVED="${file}"
+          return 1
+        done
+        continue
+        ;;
+    esac
+    [[ -z "${seen_records[${section}|${mime_type}]:-}" ]] || {
+      LEGACY_REASON="default-provenance:${mime_type}"
+      LEGACY_OBSERVED="${file}"
+      return 1
+    }
+    seen_records["${section}|${mime_type}"]=true
+    [[ "${value}" != ';'* && "${value}" != *';;'* ]] || {
+      LEGACY_REASON="default-provenance:${mime_type}"
+      LEGACY_OBSERVED="${file}"
+      return 1
+    }
+    IFS=';' read -r -a desktop_ids <<<"${value}"
+    expected="$(legacy_expected_desktop_id "${mime_type}")" || return 1
+    record_has_expected=false
+    record_fallback=""
+    for desktop_id in "${desktop_ids[@]}"; do
+      [[ -n "${desktop_id}" ]] || continue
+      is_safe_desktop_id "${desktop_id}" || {
+        LEGACY_REASON="default-shape:${mime_type}"
+        LEGACY_OBSERVED="${desktop_id}"
+        return 1
+      }
+      if legacy_mime_record_is_manager_id "${desktop_id}"; then
+        if [[ "${desktop_id}" != "${expected}" ||
+          ( "${section}" != "[Default Applications]" &&
+            "${section}" != "[Added Associations]" ) ]]; then
+          LEGACY_REASON="default-shape:${mime_type}"
+          LEGACY_OBSERVED="${desktop_id}"
+          return 1
+        fi
+        if [[ "${section}" == "[Default Applications]" ]]; then
+          record_has_expected=true
+        fi
+      elif [[ "${section}" == "[Default Applications]" &&
+        "${record_has_expected}" == "true" && -z "${record_fallback}" ]] &&
+        legacy_desktop_id_is_available "${desktop_id}"; then
+        record_fallback="${desktop_id}"
+      fi
+    done
+    if [[ "${record_has_expected}" == "true" ]]; then
+      case "${mime_type}" in
+        "${MIME_DEVIN}")
+          if [[ "${LEGACY_PROVENANCE_DEVIN}" != "true" ]]; then
+            LEGACY_FALLBACK_DEVIN="${record_fallback}"
+            LEGACY_PROVENANCE_FILE_DEVIN="${file}"
+          fi
+          LEGACY_PROVENANCE_DEVIN=true
+          ;;
+        "${MIME_WINDSURF}")
+          if [[ "${LEGACY_PROVENANCE_WINDSURF}" != "true" ]]; then
+            LEGACY_FALLBACK_WINDSURF="${record_fallback}"
+            LEGACY_PROVENANCE_FILE_WINDSURF="${file}"
+          fi
+          LEGACY_PROVENANCE_WINDSURF=true
+          ;;
+        "${MIME_WORKSPACE}")
+          if [[ "${LEGACY_PROVENANCE_WORKSPACE}" != "true" ]]; then
+            LEGACY_FALLBACK_WORKSPACE="${record_fallback}"
+            LEGACY_PROVENANCE_FILE_WORKSPACE="${file}"
+          fi
+          LEGACY_PROVENANCE_WORKSPACE=true
+          ;;
+      esac
+    fi
+  done <"${file}"
+}
+
+legacy_external_mimeapps_manager_defaults_are_absent() {
+  local directory file section="" line mime_type value desktop_id provenance_file fallback
+  local -a config_directories=() data_directories=() candidates=() desktop_ids=()
+
+  IFS=':' read -r -a config_directories <<<"${XDG_CONFIG_DIRS:-/etc/xdg}"
+  for directory in "${config_directories[@]}"; do
+    [[ "${directory}" == /* ]] || continue
+    candidates+=(
+      "${directory}/mimeapps.list"
+      "${directory}"/*-mimeapps.list
+    )
+  done
+  IFS=':' read -r -a data_directories \
+    <<<"${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+  for directory in "${data_directories[@]}"; do
+    [[ "${directory}" == /* ]] || continue
+    candidates+=(
+      "${directory}/applications/mimeapps.list"
+      "${directory}/applications"/*-mimeapps.list
+    )
+  done
+  for file in "${candidates[@]}"; do
+    [[ -f "${file}" ]] || continue
+    section=""
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      case "${line}" in
+        ""|'#'*|';'*) continue ;;
+        '['*']') section="${line}"; continue ;;
+      esac
+      [[ "${section}" == "[Default Applications]" && "${line}" == *=* ]] ||
+        continue
+      mime_type="${line%%=*}"
+      value="${line#*=}"
+      IFS=';' read -r -a desktop_ids <<<"${value}"
+      for desktop_id in "${desktop_ids[@]}"; do
+        legacy_mime_record_is_manager_id "${desktop_id}" || continue
+        case "${mime_type}" in
+          "${MIME_DEVIN}")
+            provenance_file="${LEGACY_PROVENANCE_FILE_DEVIN}"
+            fallback="${LEGACY_FALLBACK_DEVIN}"
+            ;;
+          "${MIME_WINDSURF}")
+            provenance_file="${LEGACY_PROVENANCE_FILE_WINDSURF}"
+            fallback="${LEGACY_FALLBACK_WINDSURF}"
+            ;;
+          "${MIME_WORKSPACE}")
+            provenance_file="${LEGACY_PROVENANCE_FILE_WORKSPACE}"
+            fallback="${LEGACY_FALLBACK_WORKSPACE}"
+            ;;
+          *) continue ;;
+        esac
+        if [[ "${provenance_file}" == "${CONFIG_HOME}/mimeapps.list" &&
+          -n "${fallback}" ]]; then
+          continue
+        fi
+        LEGACY_REASON="default-provenance:${mime_type}"
+        LEGACY_OBSERVED="${file}"
+        return 1
+      done
+    done <"${file}" || {
+      LEGACY_REASON="default-provenance:unknown"
+      LEGACY_OBSERVED="${file}"
+      return 1
+    }
+  done
+}
+
+legacy_desktop_specific_defaults_are_absent() {
+  local file line mime_type value desktop_id reason_mime
+  local -a candidates=() desktop_ids=()
+
+  candidates=(
+    "${CONFIG_HOME}"/*-mimeapps.list
+    "${DATA_HOME}"/*-mimeapps.list
+    "${DATA_HOME}/applications"/*-mimeapps.list
+  )
+  for file in "${candidates[@]}"; do
+    [[ -e "${file}" || -L "${file}" ]] || continue
+    [[ -f "${file}" && ! -L "${file}" ]] || {
+      LEGACY_REASON="desktop-specific-default:unknown"
+      LEGACY_OBSERVED="${file}"
+      return 1
+    }
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      case "${line}" in
+        ""|'#'*|';'*) continue ;;
+      esac
+      [[ "${line}" == *=* ]] || continue
+      mime_type="${line%%=*}"
+      value="${line#*=}"
+      IFS=';' read -r -a desktop_ids <<<"${value}"
+      for desktop_id in "${desktop_ids[@]}"; do
+        legacy_mime_record_is_manager_id "${desktop_id}" || continue
+        reason_mime="$(legacy_reason_mime_key "${mime_type}")"
+        LEGACY_REASON="desktop-specific-default:${reason_mime}"
+        LEGACY_OBSERVED="${file}"
+        return 1
+      done
+    done <"${file}"
+  done
+}
+
+classify_initial_manager_defaults() {
+  local file mime_type current expected provenance
+
+  LEGACY_PROVENANCE_DEVIN=false
+  LEGACY_PROVENANCE_WINDSURF=false
+  LEGACY_PROVENANCE_WORKSPACE=false
+  LEGACY_FALLBACK_DEVIN=""
+  LEGACY_FALLBACK_WINDSURF=""
+  LEGACY_FALLBACK_WORKSPACE=""
+  LEGACY_PROVENANCE_FILE_DEVIN=""
+  LEGACY_PROVENANCE_FILE_WINDSURF=""
+  LEGACY_PROVENANCE_FILE_WORKSPACE=""
+  LEGACY_CURRENT_DEVIN_OWNED=false
+  LEGACY_CURRENT_WINDSURF_OWNED=false
+  LEGACY_CURRENT_WORKSPACE_OWNED=false
+  for file in \
+    "${CONFIG_HOME}/mimeapps.list" \
+    "${DATA_HOME}/applications/mimeapps.list" \
+    "${DATA_HOME}/mimeapps.list"; do
+    if [[ -e "${file}" || -L "${file}" ]]; then
+      legacy_mimeapps_file_is_safe "${file}" || return 1
+    fi
+  done
+  legacy_desktop_specific_defaults_are_absent || return 1
+  legacy_external_mimeapps_manager_defaults_are_absent || return 1
+
+  for mime_type in \
+    "${MIME_DEVIN}" \
+    "${MIME_WINDSURF}" \
+    "${MIME_WORKSPACE}"; do
+    if ! current="$(query_default "${mime_type}")"; then
+      LEGACY_REASON="default-query:${mime_type}"
+      LEGACY_OBSERVED="${mime_type}"
+      return 1
+    fi
+    is_safe_desktop_id "${current}" || {
+      LEGACY_REASON="default-shape:${mime_type}"
+      LEGACY_OBSERVED="${current}"
+      return 1
+    }
+    expected="$(legacy_expected_desktop_id "${mime_type}")" || return 1
+    case "${mime_type}" in
+      "${MIME_DEVIN}") provenance="${LEGACY_PROVENANCE_DEVIN}" ;;
+      "${MIME_WINDSURF}") provenance="${LEGACY_PROVENANCE_WINDSURF}" ;;
+      "${MIME_WORKSPACE}") provenance="${LEGACY_PROVENANCE_WORKSPACE}" ;;
+    esac
+    if [[ "${current}" == "${expected}" ]]; then
+      if [[ "${provenance}" != "true" ]]; then
+        LEGACY_REASON="default-provenance:${mime_type}"
+        LEGACY_OBSERVED="${current}"
+        return 1
+      fi
+      case "${mime_type}" in
+        "${MIME_DEVIN}")
+          current="${LEGACY_FALLBACK_DEVIN}"
+          LEGACY_CURRENT_DEVIN_OWNED=true
+          ;;
+        "${MIME_WINDSURF}")
+          current="${LEGACY_FALLBACK_WINDSURF}"
+          LEGACY_CURRENT_WINDSURF_OWNED=true
+          ;;
+        "${MIME_WORKSPACE}")
+          current="${LEGACY_FALLBACK_WORKSPACE}"
+          LEGACY_CURRENT_WORKSPACE_OWNED=true
+          ;;
+      esac
+    elif legacy_mime_record_is_manager_id "${current}"; then
+      LEGACY_REASON="default-shape:${mime_type}"
+      LEGACY_OBSERVED="${current}"
+      return 1
+    fi
+    case "${mime_type}" in
+      "${MIME_DEVIN}") LEGACY_ORIGINAL_DEVIN="${current}" ;;
+      "${MIME_WINDSURF}") LEGACY_ORIGINAL_WINDSURF="${current}" ;;
+      "${MIME_WORKSPACE}") LEGACY_ORIGINAL_WORKSPACE="${current}" ;;
+    esac
+  done
+}
+
+initial_manager_integration_is_valid() {
+  local path
+
+  for path in \
+    "${APP_COMMAND}" \
+    "${LEGACY_MAIN_DESKTOP}" \
+    "${LEGACY_URL_DESKTOP}" \
+    "${LEGACY_ICON_FILE}" \
+    "${LEGACY_MIME_FILE}"; do
+    user_file_parent_is_safe "${path}" || {
+      LEGACY_REASON="install-root"
+      LEGACY_OBSERVED="$(dirname "${path}")"
+      return 1
+    }
+  done
+  if ! legacy_symlink_is_user_owned "${APP_COMMAND}" ||
+    [[ "$(readlink "${APP_COMMAND}")" != "${CURRENT_LINK}/app/bin/devin-desktop" ]]; then
+    LEGACY_REASON="app-link"
+    LEGACY_OBSERVED="${APP_COMMAND}"
+    return 1
+  fi
+  for path in "${MAIN_DESKTOP}" "${URL_DESKTOP}" "${ICON_FILE}" "${MIME_FILE}"; do
+    [[ ! -e "${path}" && ! -L "${path}" ]] || {
+      LEGACY_REASON="install-root"
+      LEGACY_OBSERVED="${path}"
+      return 1
+    }
+  done
+  legacy_desktop_semantics_are_valid "${LEGACY_MAIN_DESKTOP}" main || {
+    LEGACY_REASON="main-desktop"
+    LEGACY_OBSERVED="${LEGACY_MAIN_DESKTOP}"
+    return 1
+  }
+  legacy_desktop_semantics_are_valid "${LEGACY_URL_DESKTOP}" url || {
+    LEGACY_REASON="url-desktop"
+    LEGACY_OBSERVED="${LEGACY_URL_DESKTOP}"
+    return 1
+  }
+  asset_matches_release "${LEGACY_ICON_FILE}" devin-desktop.png || {
+    LEGACY_REASON="icon"
+    LEGACY_OBSERVED="${LEGACY_ICON_FILE}"
+    return 1
+  }
+  asset_matches_release "${LEGACY_MIME_FILE}" devin-desktop-workspace.xml || {
+    LEGACY_REASON="mime"
+    LEGACY_OBSERVED="${LEGACY_MIME_FILE}"
+    return 1
+  }
+}
+
+classify_state_less_legacy_integration() {
+  local initial_reason initial_observed
+
+  if [[ -e "${LEGACY_MAIN_DESKTOP}" || -L "${LEGACY_MAIN_DESKTOP}" ||
+    -e "${LEGACY_URL_DESKTOP}" || -L "${LEGACY_URL_DESKTOP}" ]]; then
+    if initial_manager_integration_is_valid; then
+      classify_initial_manager_defaults ||
+        classify_legacy_refusal \
+          "${LEGACY_REASON:-default-provenance:unknown}" \
+          "${LEGACY_OBSERVED}" || return 1
+      LEGACY_CLASSIFICATION="initial-complete"
+      LEGACY_REQUIRES_APP_STOP=true
+      return 0
+    fi
+
+    initial_reason="${LEGACY_REASON:-install-root}"
+    initial_observed="${LEGACY_OBSERVED}"
+    if legacy_post_link_integration_is_recoverable &&
+      legacy_post_link_defaults_are_unclaimed; then
+      LEGACY_CLASSIFICATION="public-post-link"
+      LEGACY_REASON=""
+      LEGACY_OBSERVED=""
+      LEGACY_REQUIRES_APP_STOP=true
+      return 0
+    fi
+    classify_legacy_refusal "${initial_reason}" "${initial_observed}"
+    return 1
+  fi
+
+  legacy_post_link_integration_is_recoverable ||
+    classify_legacy_refusal install-root "${INSTALL_ROOT}" || return 1
+  legacy_post_link_defaults_are_unclaimed ||
+    classify_legacy_refusal default-shape:unknown "${INSTALL_ROOT}" || return 1
+  LEGACY_CLASSIFICATION="public-post-link"
+  LEGACY_REQUIRES_APP_STOP=true
+}
+
+classify_markerless_layout() {
+  local sentinel="${INSTALL_ROOT}/${OWNERSHIP_SENTINEL_NAME}"
+
+  reset_legacy_classification
+
+  legacy_directory_is_user_owned "${INSTALL_ROOT}" ||
+    classify_legacy_refusal install-root "${INSTALL_ROOT}" || return 1
+  [[ ! -e "${sentinel}" && ! -L "${sentinel}" ]] ||
+    classify_legacy_refusal install-root "${sentinel}" || return 1
+
+  if [[ ! -e "${CURRENT_LINK}" && ! -L "${CURRENT_LINK}" &&
+    ! -e "${PREVIOUS_LINK}" && ! -L "${PREVIOUS_LINK}" ]]; then
+    legacy_install_root_is_valid false ||
+      classify_legacy_refusal install-root "${INSTALL_ROOT}" || return 1
+    legacy_cache_root_is_valid ||
+      classify_legacy_refusal cache-root "${CACHE_ROOT}" || return 1
+    legacy_pre_activation_state_root_is_valid ||
+      classify_legacy_refusal state-root "${STATE_DIR}" || return 1
+    legacy_pre_activation_integration_is_absent ||
+      classify_legacy_refusal app-link "${APP_COMMAND}" || return 1
+    LEGACY_CLASSIFICATION="public-pre-activation"
+    return 0
+  fi
+
+  legacy_install_root_is_valid ||
+    classify_legacy_refusal release-inventory "${RELEASES_DIR}" || return 1
+  legacy_cache_root_is_valid ||
+    classify_legacy_refusal cache-root "${CACHE_ROOT}" || return 1
+  if [[ -e "${STATE_FILE}" || -L "${STATE_FILE}" ]]; then
+    legacy_state_root_is_valid ||
+      classify_legacy_refusal state-root "${STATE_DIR}" || return 1
+    LEGACY_CLASSIFICATION="public-stateful"
+    LEGACY_REQUIRES_APP_STOP=true
+    return 0
+  fi
+  legacy_pre_activation_state_root_is_valid ||
+    classify_legacy_refusal state-root "${STATE_DIR}" || return 1
+  classify_state_less_legacy_integration
+}
+
+reclassify_interrupted_legacy_recovery() {
+  [[ -z "${LEGACY_CLASSIFICATION}" ]] || return 0
+  [[ ! -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || return 0
+  [[ -e "${CURRENT_LINK}" || -L "${CURRENT_LINK}" ]] || return 0
+
+  reset_legacy_classification
+  if ! classify_state_less_legacy_integration; then
+    die "interrupted legacy recovery could not be safely revalidated: conflict [${LEGACY_REASON:-install-root}] at $(preflight_escape "${LEGACY_OBSERVED:-${INSTALL_ROOT}}"); existing ownership metadata was preserved; no desktop files or associations were changed; inspect or move aside the conflicting path or association, then rerun devin-desktop-manager ${ACTIVE_COMMAND}"
+  fi
+  if [[ "${LEGACY_REQUIRES_APP_STOP}" == "true" ]]; then
+    require_app_stopped
+  fi
+}
+
+die_legacy_classification_refusal() {
+  local reason="${LEGACY_REASON:-install-root}"
+  local observed context="public ${LEGACY_MANAGER_VERSION} installation"
+
+  observed="$(preflight_escape "${LEGACY_OBSERVED:-${INSTALL_ROOT}}")"
+  if [[ ! -e "${STATE_FILE}" && ! -L "${STATE_FILE}" &&
+    ( -e "${CURRENT_LINK}" || -L "${CURRENT_LINK}" ) ]]; then
+    context="public ${LEGACY_MANAGER_VERSION} post-link installation"
+  elif [[ ! -e "${CURRENT_LINK}" && ! -L "${CURRENT_LINK}" ]]; then
+    context="public ${LEGACY_MANAGER_VERSION} pre-activation installation"
+  fi
+  die "${context} could not be safely verified; refusing ownership migration: conflict [${reason}] at ${observed}; ownership was not claimed; inspect or move aside the conflicting path or association, then rerun devin-desktop-manager ${ACTIVE_COMMAND}"
+}
+
+report_recoverable_legacy_installation() {
+  printf 'recoverable Legacy Installation: %s\n' \
+    "${LEGACY_CLASSIFICATION}" >&2
+  printf '  Run devin-desktop-manager update to adopt it and continue updating.\n' >&2
+  printf '  Or run devin-desktop-manager uninstall to remove the managed application.\n' >&2
+  printf '  Lifecycle commands revalidate the installation under lock before claiming ownership.\n' >&2
 }
 
 upgrade_legacy_release_metadata() {
@@ -1776,6 +2684,7 @@ migrate_legacy_layout_if_needed() {
   local sentinel="${INSTALL_ROOT}/${OWNERSHIP_SENTINEL_NAME}"
   local release_dir
   local pre_activation=false
+  local migration_description="public ${LEGACY_MANAGER_VERSION}"
 
   [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" ]] || return 0
   if fresh_markerless_install_root_is_valid; then
@@ -1794,35 +2703,26 @@ migrate_legacy_layout_if_needed() {
     return 0
   fi
 
-  if [[ ! -e "${CURRENT_LINK}" && ! -L "${CURRENT_LINK}" &&
-    ! -e "${PREVIOUS_LINK}" && ! -L "${PREVIOUS_LINK}" ]]; then
-    pre_activation=true
-    if ! legacy_install_root_is_valid false ||
-      ! legacy_cache_root_is_valid ||
-      ! legacy_pre_activation_state_root_is_valid ||
-      ! legacy_pre_activation_integration_is_absent; then
-      die "public ${LEGACY_MANAGER_VERSION} pre-activation installation could not be safely verified; refusing ownership migration"
-    fi
-  elif [[ ! -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]]; then
-    pre_activation=true
-    if ! legacy_install_root_is_valid ||
-      ! legacy_cache_root_is_valid ||
-      ! legacy_pre_activation_state_root_is_valid ||
-      ! legacy_post_link_integration_is_recoverable ||
-      ! legacy_post_link_defaults_are_unclaimed; then
-      die "public ${LEGACY_MANAGER_VERSION} post-link installation could not be safely verified; refusing ownership migration"
-    fi
-  elif ! legacy_install_root_is_valid ||
-    ! legacy_cache_root_is_valid ||
-    ! legacy_state_root_is_valid; then
-    die "public ${LEGACY_MANAGER_VERSION} installation could not be safely verified; refusing ownership migration"
+  if ! classify_markerless_layout; then
+    die_legacy_classification_refusal
   fi
+  case "${LEGACY_CLASSIFICATION}" in
+    public-pre-activation) pre_activation=true ;;
+    public-post-link|public-stateful) pre_activation=false ;;
+    initial-complete)
+      pre_activation=false
+      migration_description="initial-manager"
+      ;;
+    *)
+      die "unrecognized legacy installation profile; refusing ownership migration"
+      ;;
+  esac
 
-  if [[ "${pre_activation}" == "false" ]]; then
+  if [[ "${LEGACY_REQUIRES_APP_STOP}" == "true" ]]; then
     require_app_stopped
   fi
 
-  info "migrating verified public ${LEGACY_MANAGER_VERSION} installation to ownership schema ${OWNERSHIP_SCHEMA_VERSION}"
+  info "migrating verified ${migration_description} installation to ownership schema ${OWNERSHIP_SCHEMA_VERSION}"
   cleanup_legacy_migration_temporaries ||
     die "could not clean an interrupted ownership migration"
   while IFS= read -r -d '' release_dir; do
@@ -1830,16 +2730,12 @@ migrate_legacy_layout_if_needed() {
       die "could not upgrade legacy release metadata: ${release_dir}"
   done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -type d -print0)
   if [[ ! -e "${CACHE_ROOT}" && ! -L "${CACHE_ROOT}" ]]; then
-    mkdir -p -- "${CACHE_ROOT}" ||
-      die "could not recreate the legacy cache root"
-    chmod 0700 "${CACHE_ROOT}" ||
-      die "could not secure the legacy cache root"
+    create_secure_user_directory_path "${CACHE_ROOT}" ||
+      die "could not securely recreate the legacy cache root"
   fi
   if [[ ! -e "${STATE_DIR}" && ! -L "${STATE_DIR}" ]]; then
-    mkdir -p -- "${STATE_DIR}" ||
-      die "could not recreate the legacy state root"
-    chmod 0700 "${STATE_DIR}" ||
-      die "could not secure the legacy state root"
+    create_secure_user_directory_path "${STATE_DIR}" ||
+      die "could not securely recreate the legacy state root"
   fi
   write_ownership_sentinel "${CACHE_ROOT}" ||
     die "could not mark the legacy cache as manager-owned"
@@ -1855,6 +2751,7 @@ migrate_legacy_layout_if_needed() {
 
 ensure_layout() {
   migrate_legacy_layout_if_needed
+  reclassify_interrupted_legacy_recovery
   if owned_root_is_valid "${INSTALL_ROOT}"; then
     cleanup_install_temporaries ||
       die "could not safely recover interrupted installation temporaries"
@@ -2014,18 +2911,23 @@ release_label() {
 }
 
 app_is_running() {
-  local process_path executable
+  local process_path executable canonical_install_root canonical_releases_dir
+
+  canonical_install_root="$(readlink -m -- "${INSTALL_ROOT}")" || return 1
+  canonical_releases_dir="${canonical_install_root}/releases"
 
   for process_path in /proc/[0-9]*; do
     executable="$(readlink "${process_path}/exe" 2>/dev/null || true)"
     executable="${executable% (deleted)}"
     case "${executable}" in
-      "${RELEASES_DIR}"/*/app/devin-desktop|\
-        "${RELEASES_DIR}"/*/app/bin/devin-desktop|\
-        "${INSTALL_ROOT}"/.release-prune-*/app/devin-desktop|\
-        "${INSTALL_ROOT}"/.release-prune-*/app/bin/devin-desktop|\
-        "${INSTALL_ROOT}".uninstall-*/releases/*/app/devin-desktop|\
-        "${INSTALL_ROOT}".uninstall-*/releases/*/app/bin/devin-desktop) return 0 ;;
+      "${canonical_releases_dir}"/*/app/devin-desktop|\
+        "${canonical_releases_dir}"/*/app/bin/devin-desktop|\
+        "${canonical_install_root}"/.release-prune-*/app/devin-desktop|\
+        "${canonical_install_root}"/.release-prune-*/app/bin/devin-desktop|\
+        "${canonical_install_root}".uninstall-*/releases/*/app/devin-desktop|\
+        "${canonical_install_root}".uninstall-*/releases/*/app/bin/devin-desktop)
+        return 0
+        ;;
     esac
   done
 
@@ -2375,6 +3277,7 @@ validate_release() {
   local expected_product_version="${3:-}"
   local app_dir="${release_dir}/app"
   local version_text build_output architecture_output probe_status
+  local ldd_output ldd_status
   local -a version_output=()
 
   [[ -x "${app_dir}/devin-desktop" && ! -L "${app_dir}/devin-desktop" ]] ||
@@ -2390,9 +3293,15 @@ validate_release() {
     ! -L "${release_dir}/integration/devin-desktop-workspace.xml" ]] ||
     die "release is missing its MIME declaration"
 
-  if ldd "${app_dir}/devin-desktop" 2>&1 | grep -q 'not found'; then
+  if ldd_output="$(ldd "${app_dir}/devin-desktop" 2>&1)"; then
+    ldd_status=0
+  else
+    ldd_status=$?
+  fi
+  if grep -q 'not found' <<<"${ldd_output}"; then
     die "release has missing runtime libraries"
   fi
+  [[ "${ldd_status}" -eq 0 ]] || die "release executable validation failed"
 
   if version_text="$(
     timeout --signal=TERM --kill-after=5s 30s \
@@ -2591,11 +3500,9 @@ ensure_integration_manageable() {
 write_desktop_entries() {
   local main_destination="$1"
   local url_destination="$2"
-  local escaped_command="${APP_COMMAND//\\/\\\\}"
+  local escaped_command
 
-  escaped_command="${escaped_command//\"/\\\"}"
-  escaped_command="${escaped_command//\`/\\\`}"
-  escaped_command="${escaped_command//\$/\\\$}"
+  escaped_command="$(desktop_escape_command "${APP_COMMAND}")"
 
   cat >"${main_destination}" <<EOF
 [Desktop Entry]
@@ -2792,7 +3699,7 @@ register_associations() {
 legacy_desktop_owned() {
   local path="$1"
 
-  [[ -f "${path}" && ! -L "${path}" ]] &&
+  legacy_desktop_is_user_regular "${path}" &&
     grep -qx "${MANAGER_DESKTOP_MARKER}" "${path}"
 }
 
@@ -2817,16 +3724,19 @@ asset_matches_release() {
   local release_name="$2"
   local release_dir path_hash release_hash
 
-  [[ -f "${path}" && ! -L "${path}" ]] || return 1
-  path_hash="$(sha256sum "${path}" | awk '{print $1}')"
+  legacy_file_is_user_regular "${path}" || return 1
+  path_hash="$(sha256sum "${path}" 2>/dev/null | awk '{print $1}')" || return 1
+  [[ "${path_hash}" =~ ^[0-9a-f]{64}$ ]] || return 1
   for release_dir in \
     "$(release_path "${CURRENT_LINK}" 2>/dev/null || true)" \
     "$(release_path "${PREVIOUS_LINK}" 2>/dev/null || true)"; do
     [[ -n "${release_dir}" && -f "${release_dir}/integration/${release_name}" ]] ||
       continue
     release_hash="$(
-      sha256sum "${release_dir}/integration/${release_name}" | awk '{print $1}'
-    )"
+      sha256sum "${release_dir}/integration/${release_name}" 2>/dev/null |
+        awk '{print $1}'
+    )" || return 1
+    [[ "${release_hash}" =~ ^[0-9a-f]{64}$ ]] || return 1
     if [[ "${path_hash}" == "${release_hash}" ]]; then
       return 0
     fi
@@ -2937,9 +3847,15 @@ refresh_desktop_caches() {
 install_integration_from_stage() {
   local original_devin original_windsurf original_workspace
 
-  original_devin="$(original_default "${MIME_DEVIN}")" || return 1
-  original_windsurf="$(original_default "${MIME_WINDSURF}")" || return 1
-  original_workspace="$(original_default "${MIME_WORKSPACE}")" || return 1
+  if [[ "${LEGACY_CLASSIFICATION}" == "initial-complete" ]]; then
+    original_devin="${LEGACY_ORIGINAL_DEVIN}"
+    original_windsurf="${LEGACY_ORIGINAL_WINDSURF}"
+    original_workspace="${LEGACY_ORIGINAL_WORKSPACE}"
+  else
+    original_devin="$(original_default "${MIME_DEVIN}")" || return 1
+    original_windsurf="$(original_default "${MIME_WINDSURF}")" || return 1
+    original_workspace="$(original_default "${MIME_WORKSPACE}")" || return 1
+  fi
 
   atomic_app_link || return 1
   atomic_copy "${INTEGRATION_STAGE}/${MAIN_DESKTOP_ID}" "${MAIN_DESKTOP}" 0644 ||
@@ -2951,6 +3867,18 @@ install_integration_from_stage() {
   atomic_copy "${INTEGRATION_STAGE}/devin-desktop-manager-workspace.xml" \
     "${MIME_FILE}" 0644 || return 1
   register_associations false || return 1
+  if [[ "${LEGACY_CLASSIFICATION}" == "initial-complete" ]]; then
+    remove_initial_manager_associations || return 1
+    verify_initial_manager_association_result \
+      "${MIME_DEVIN}" "${URL_DESKTOP_ID}" "${original_devin}" \
+      "${LEGACY_CURRENT_DEVIN_OWNED}" || return 1
+    verify_initial_manager_association_result \
+      "${MIME_WINDSURF}" "${URL_DESKTOP_ID}" "${original_windsurf}" \
+      "${LEGACY_CURRENT_WINDSURF_OWNED}" || return 1
+    verify_initial_manager_association_result \
+      "${MIME_WORKSPACE}" "${MAIN_DESKTOP_ID}" "${original_workspace}" \
+      "${LEGACY_CURRENT_WORKSPACE_OWNED}" || return 1
+  fi
   remove_legacy_integration || return 1
   refresh_desktop_caches || return 1
   write_state "${original_devin}" "${original_windsurf}" "${original_workspace}"
@@ -4417,6 +5345,7 @@ command_set_defaults() {
 command_doctor() {
   local current_dir metadata_build metadata_product command_target
   local handler
+  local recoverable_legacy=false
   local -a failures=()
   local -a warnings=()
 
@@ -4425,11 +5354,30 @@ command_doctor() {
   ensure_supported_architecture
   ensure_user_namespaces
 
+  if [[ -d "${INSTALL_ROOT}" && ! -L "${INSTALL_ROOT}" &&
+    ! -e "${INSTALL_ROOT}/${OWNERSHIP_SENTINEL_NAME}" &&
+    ! -L "${INSTALL_ROOT}/${OWNERSHIP_SENTINEL_NAME}" ]]; then
+    if classify_markerless_layout; then
+      if [[ "${LEGACY_CLASSIFICATION}" == "public-pre-activation" ]]; then
+        report_recoverable_legacy_installation
+        return 1
+      fi
+      recoverable_legacy=true
+    else
+      die_legacy_classification_refusal
+    fi
+  fi
+
   current_dir="$(release_path "${CURRENT_LINK}")" ||
     die "no active release is installed"
   metadata_build="$(jq -r '.build // empty' "${current_dir}/release.json")"
   metadata_product="$(jq -r '.productVersion // empty' "${current_dir}/release.json")"
   validate_release "${current_dir}" "${metadata_build}" "${metadata_product}"
+
+  if [[ "${recoverable_legacy}" == "true" ]]; then
+    report_recoverable_legacy_installation
+    return 1
+  fi
 
   [[ -L "${APP_COMMAND}" ]] || failures+=("terminal command is not a symlink")
   command_target="$(readlink -f "${APP_COMMAND}" 2>/dev/null || true)"
@@ -4483,17 +5431,102 @@ command_doctor() {
   fi
 }
 
+user_directory_ancestry_is_safe() {
+  local directory="$1"
+  local owner permissions special_mode group_mode other_mode
+  local direct_parent=true
+
+  [[ "${directory}" == /* ]] || return 1
+  while :; do
+    [[ -d "${directory}" && ! -L "${directory}" ]] || return 1
+    owner="$(stat -c '%u' -- "${directory}" 2>/dev/null)" || return 1
+    if [[ "${direct_parent}" == "true" ]]; then
+      [[ "${owner}" == "${EUID}" ]] || return 1
+    else
+      [[ "${owner}" == 0 || "${owner}" == "${EUID}" ]] || return 1
+    fi
+    permissions="$(stat -c '%a' -- "${directory}" 2>/dev/null)" || return 1
+    [[ "${permissions}" =~ ^[0-7]{3,4}$ ]] || return 1
+    if ((${#permissions} == 4)); then
+      special_mode="${permissions:0:1}"
+    else
+      special_mode=0
+    fi
+    permissions="${permissions: -3}"
+    group_mode="${permissions:1:1}"
+    other_mode="${permissions:2:1}"
+    if (((group_mode & 2) != 0 || (other_mode & 2) != 0)); then
+      [[ "${direct_parent}" != "true" ]] || return 1
+      (((special_mode & 1) == 1)) || return 1
+    fi
+    [[ "${directory}" != / ]] || break
+    directory="$(dirname "${directory}")"
+    direct_parent=false
+  done
+}
+
+future_user_directory_ancestry_is_safe() {
+  local directory="$1"
+  local parent
+
+  [[ "${directory}" == /* ]] || return 1
+  while [[ ! -e "${directory}" && ! -L "${directory}" ]]; do
+    parent="$(dirname "${directory}")"
+    [[ "${parent}" != "${directory}" ]] || return 1
+    directory="${parent}"
+  done
+  user_directory_ancestry_is_safe "${directory}"
+}
+
+create_secure_user_directory_path() {
+  local directory="$1"
+  local parent index
+  local -a missing=()
+
+  future_user_directory_ancestry_is_safe "${directory}" || return 1
+  while [[ ! -e "${directory}" && ! -L "${directory}" ]]; do
+    missing+=("${directory}")
+    parent="$(dirname "${directory}")"
+    [[ "${parent}" != "${directory}" ]] || return 1
+    directory="${parent}"
+  done
+  for ((index = ${#missing[@]} - 1; index >= 0; index--)); do
+    mkdir -m 0700 -- "${missing[index]}" || return 1
+    [[ -d "${missing[index]}" && ! -L "${missing[index]}" &&
+      "$(stat -c '%u' -- "${missing[index]}" 2>/dev/null)" == "${EUID}" ]] ||
+      return 1
+  done
+}
+
+user_file_parent_is_safe() {
+  user_directory_ancestry_is_safe "$(dirname "$1")"
+}
+
+mimeapps_temporary_is_safe() {
+  local temporary="$1"
+
+  [[ -f "${temporary}" && ! -L "${temporary}" &&
+    "$(stat -c '%u:%h' -- "${temporary}" 2>/dev/null)" == "${EUID}:1" ]]
+}
+
 rewrite_mimeapps_without_handler() {
   local file="$1"
   local mime_type="$2"
   local desktop_id="$3"
   local temporary
 
-  [[ -f "${file}" && ! -L "${file}" ]] || return 0
-  temporary="${file}.new.$$"
-  awk -v mime="${mime_type}" -v remove_id="${desktop_id}" '
+  [[ -e "${file}" || -L "${file}" ]] || return 0
+  legacy_file_is_user_regular "${file}" || return 1
+  user_file_parent_is_safe "${file}" || return 1
+  temporary="$(mktemp -- "${file}.new.XXXXXXXX")" || return 1
+  if ! mimeapps_temporary_is_safe "${temporary}"; then
+    rm -f -- "${temporary}" || true
+    return 1
+  fi
+  if ! awk -v mime="${mime_type}" -v remove_id="${desktop_id}" '
     /^\[/ { section = $0 }
-    section == "[Default Applications]" && index($0, mime "=") == 1 {
+    (section == "[Default Applications]" ||
+      section == "[Added Associations]") && index($0, mime "=") == 1 {
       value = substr($0, length(mime) + 2)
       count = split(value, entries, ";")
       output = ""
@@ -4508,10 +5541,110 @@ rewrite_mimeapps_without_handler() {
       next
     }
     { print }
-  ' "${file}" >"${temporary}" || return 1
-  chmod --reference="${file}" "${temporary}" || return 1
-  mv -Tf -- "${temporary}" "${file}" || return 1
+  ' "${file}" >"${temporary}"; then
+    rm -f -- "${temporary}" || true
+    return 1
+  fi
+  if cmp -s -- "${file}" "${temporary}"; then
+    rm -f -- "${temporary}" || return 1
+    return 0
+  fi
+  if ! cp --attributes-only --preserve=all -- "${file}" "${temporary}" ||
+    ! chmod --reference="${file}" "${temporary}" ||
+    ! mimeapps_temporary_is_safe "${temporary}" ||
+    ! mv -Tf -- "${temporary}" "${file}"; then
+    rm -f -- "${temporary}" || true
+    return 1
+  fi
   record_user_configuration_path_result "${file}"
+}
+
+remove_initial_manager_associations() {
+  remove_handler_from_user_defaults \
+    "${MIME_DEVIN}" "${LEGACY_URL_DESKTOP_ID}" || return 1
+  remove_handler_from_user_defaults \
+    "${MIME_WINDSURF}" "${LEGACY_URL_DESKTOP_ID}" || return 1
+  remove_handler_from_user_defaults \
+    "${MIME_WORKSPACE}" "${LEGACY_MAIN_DESKTOP_ID}"
+}
+
+reveal_initial_manager_original_default() {
+  local mime_type="$1"
+  local original="$2"
+  local current_was_owned="$3"
+
+  [[ "${current_was_owned}" == "true" && -n "${original}" ]] || return 0
+  xdg-mime default "${original}" "${mime_type}" || return 1
+  record_user_configuration_results
+}
+
+reveal_initial_manager_original_defaults() {
+  reveal_initial_manager_original_default \
+    "${MIME_DEVIN}" "${LEGACY_ORIGINAL_DEVIN}" \
+    "${LEGACY_CURRENT_DEVIN_OWNED}" || return 1
+  reveal_initial_manager_original_default \
+    "${MIME_WINDSURF}" "${LEGACY_ORIGINAL_WINDSURF}" \
+    "${LEGACY_CURRENT_WINDSURF_OWNED}" || return 1
+  reveal_initial_manager_original_default \
+    "${MIME_WORKSPACE}" "${LEGACY_ORIGINAL_WORKSPACE}" \
+    "${LEGACY_CURRENT_WORKSPACE_OWNED}"
+}
+
+association_matches() {
+  local mime_type="$1"
+  local expected="$2"
+  local current
+
+  current="$(query_default "${mime_type}")" || return 1
+  [[ "${current}" == "${expected}" ]]
+}
+
+verify_association_result() {
+  local mime_type="$1"
+  local manager_desktop_id="$2"
+  local original="$3"
+
+  association_matches "${mime_type}" "${original:-${manager_desktop_id}}"
+}
+
+verify_initial_manager_association_result() {
+  local mime_type="$1"
+  local manager_desktop_id="$2"
+  local original="$3"
+  local current_was_owned="$4"
+
+  if [[ "${current_was_owned}" == "true" ]]; then
+    association_matches "${mime_type}" "${manager_desktop_id}"
+  else
+    verify_association_result \
+      "${mime_type}" "${manager_desktop_id}" "${original}"
+  fi
+}
+
+initial_manager_original_default_matches() {
+  local mime_type="$1"
+  local original="$2"
+  local current
+
+  current="$(query_default "${mime_type}")" || return 1
+  is_safe_desktop_id "${current}" || return 1
+  if [[ -n "${original}" ]]; then
+    [[ "${current}" == "${original}" ]]
+    return
+  fi
+  if legacy_mime_record_is_manager_id "${current}"; then
+    return 1
+  fi
+  return 0
+}
+
+verify_initial_manager_original_defaults() {
+  initial_manager_original_default_matches \
+    "${MIME_DEVIN}" "${LEGACY_ORIGINAL_DEVIN}" &&
+    initial_manager_original_default_matches \
+      "${MIME_WINDSURF}" "${LEGACY_ORIGINAL_WINDSURF}" &&
+    initial_manager_original_default_matches \
+      "${MIME_WORKSPACE}" "${LEGACY_ORIGINAL_WORKSPACE}"
 }
 
 remove_handler_from_user_defaults() {
@@ -4815,6 +5948,11 @@ stage_install_root_for_uninstall() {
 
 perform_uninstall() {
   restore_associations || return 1
+  if [[ "${LEGACY_CLASSIFICATION}" == "initial-complete" ]]; then
+    remove_initial_manager_associations || return 1
+    reveal_initial_manager_original_defaults || return 1
+    verify_initial_manager_original_defaults || return 1
+  fi
 
   if [[ -L "${APP_COMMAND}" &&
     "$(readlink "${APP_COMMAND}")" == "${CURRENT_LINK}/app/bin/devin-desktop" ]]; then
