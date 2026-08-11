@@ -1212,6 +1212,24 @@ EOF
     "refused|default-provenance:x-scheme-handler/devin|${external_config}/mimeapps.list" ]
 }
 
+@test "[LIR-U1-R06] hidden system data manager defaults remain refused" {
+  local external_data="${BATS_TEST_TMPDIR}/system-data"
+
+  seed_complete_initial_manager_layout
+  mkdir -p -- "${external_data}/applications"
+  printf '%s\n' \
+    '[Default Applications]' \
+    'x-scheme-handler/devin=devin-desktop-url-handler.desktop;browser.desktop;' \
+    >"${external_data}/applications/mimeapps.list"
+  export XDG_DATA_DIRS="${external_data}"
+
+  classify_test_layout
+
+  [ "${status}" -eq 1 ]
+  [ "${output}" = \
+    "refused|default-provenance:x-scheme-handler/devin|${external_data}/applications/mimeapps.list" ]
+}
+
 @test "[LIR-U1-R06] MIME provenance near-miss matrix remains refused" {
   local baseline="${BATS_TEST_TMPDIR}/mimeapps.list"
   local parked="${BATS_TEST_TMPDIR}/mimeapps.regular"
@@ -1498,6 +1516,35 @@ EOF
 
   [ "${status}" -eq 0 ]
   [ "$(query_default x-scheme-handler/devin)" = "browser.desktop" ]
+}
+
+@test "[LIR-U2-R08] non-regular fallbacks do not mask system copies" {
+  local applications="${TEST_HOME}/.local/share/applications"
+  local system_data="${BATS_TEST_TMPDIR}/system/share"
+  local candidate="${applications}/browser.desktop"
+  local directory_target="${BATS_TEST_TMPDIR}/directory-target"
+  local shape
+
+  mkdir -p -- "${applications}" "${directory_target}"
+  write_fallback_desktop \
+    "${system_data}/applications/browser.desktop" 'System Browser'
+  for shape in directory fifo symlink-directory; do
+    rm -rf -- "${candidate}"
+    case "${shape}" in
+      directory) mkdir -- "${candidate}" ;;
+      fifo) mkfifo -- "${candidate}" ;;
+      symlink-directory) ln -s -- "${directory_target}" "${candidate}" ;;
+    esac
+
+    run env HOME="${TEST_HOME}" \
+      XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+      XDG_DATA_DIRS="${system_data}" \
+      PATH="${MOCK_BIN}:${PATH}" \
+      bash -c 'source "$1"; legacy_desktop_id_is_available browser.desktop' \
+      _ "${MANAGER}"
+
+    [ "${status}" -eq 0 ]
+  done
 }
 
 @test "[LIR-U2-R08] update resolves nested desktop ID fallbacks" {
@@ -1991,6 +2038,35 @@ EOF
 
   [ "${status}" -eq 1 ]
   [[ "${output}" == *"release version probe failed"* ]]
+  [[ "${output}" != *"recoverable Legacy Installation"* ]]
+}
+
+@test "[LIR-U3-R01] doctor rejects an invalid legacy GUI executable" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local release
+
+  seed_complete_initial_manager_layout
+  release="${install_root}/$(readlink "${install_root}/current")"
+  cat >"${release}/app/devin-desktop" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod 0755 "${release}/app/devin-desktop"
+  cat >"${MOCK_BIN}/ldd" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+  printf 'ldd (GNU libc) 2.39\n'
+  exit 0
+fi
+printf 'not a dynamic executable\n' >&2
+exit 1
+EOF
+  chmod 0755 "${MOCK_BIN}/ldd"
+
+  run manager_env doctor
+
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"release executable validation failed"* ]]
   [[ "${output}" != *"recoverable Legacy Installation"* ]]
 }
 

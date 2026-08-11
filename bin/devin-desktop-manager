@@ -1990,8 +1990,7 @@ legacy_desktop_relative_path_is_available() {
   local desktop_id="$2"
   local prefix="" remainder="${desktop_id}" segment
 
-  if [[ -e "${directory}/${desktop_id}" ||
-    -L "${directory}/${desktop_id}" ]]; then
+  if [[ -f "${directory}/${desktop_id}" ]]; then
     LEGACY_DESKTOP_CANDIDATE="${directory}/${desktop_id}"
     return 0
   fi
@@ -2103,10 +2102,6 @@ legacy_desktop_id_is_available() {
     LEGACY_DESKTOP_CANDIDATE=""
     if legacy_desktop_relative_path_is_available \
       "${data_directory}/applications" "${desktop_id}"; then
-      if [[ -L "${LEGACY_DESKTOP_CANDIDATE}" &&
-        ! -e "${LEGACY_DESKTOP_CANDIDATE}" ]]; then
-        continue
-      fi
       legacy_desktop_candidate_is_available "${LEGACY_DESKTOP_CANDIDATE}" &&
         return 0
       return 1
@@ -2243,7 +2238,7 @@ legacy_mimeapps_file_is_safe() {
 
 legacy_external_mimeapps_manager_defaults_are_absent() {
   local directory file section="" line mime_type value desktop_id provenance_file fallback
-  local -a config_directories=() candidates=() desktop_ids=()
+  local -a config_directories=() data_directories=() candidates=() desktop_ids=()
 
   IFS=':' read -r -a config_directories <<<"${XDG_CONFIG_DIRS:-/etc/xdg}"
   for directory in "${config_directories[@]}"; do
@@ -2251,6 +2246,15 @@ legacy_external_mimeapps_manager_defaults_are_absent() {
     candidates+=(
       "${directory}/mimeapps.list"
       "${directory}"/*-mimeapps.list
+    )
+  done
+  IFS=':' read -r -a data_directories \
+    <<<"${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+  for directory in "${data_directories[@]}"; do
+    [[ "${directory}" == /* ]] || continue
+    candidates+=(
+      "${directory}/applications/mimeapps.list"
+      "${directory}/applications"/*-mimeapps.list
     )
   done
   for file in "${candidates[@]}"; do
@@ -3273,6 +3277,7 @@ validate_release() {
   local expected_product_version="${3:-}"
   local app_dir="${release_dir}/app"
   local version_text build_output architecture_output probe_status
+  local ldd_output ldd_status
   local -a version_output=()
 
   [[ -x "${app_dir}/devin-desktop" && ! -L "${app_dir}/devin-desktop" ]] ||
@@ -3288,9 +3293,15 @@ validate_release() {
     ! -L "${release_dir}/integration/devin-desktop-workspace.xml" ]] ||
     die "release is missing its MIME declaration"
 
-  if ldd "${app_dir}/devin-desktop" 2>&1 | grep -q 'not found'; then
+  if ldd_output="$(ldd "${app_dir}/devin-desktop" 2>&1)"; then
+    ldd_status=0
+  else
+    ldd_status=$?
+  fi
+  if grep -q 'not found' <<<"${ldd_output}"; then
     die "release has missing runtime libraries"
   fi
+  [[ "${ldd_status}" -eq 0 ]] || die "release executable validation failed"
 
   if version_text="$(
     timeout --signal=TERM --kill-after=5s 30s \
