@@ -1,6 +1,7 @@
 ---
 title: Behavior-Preserving Simplification for Security-Sensitive Bash
 date: 2026-07-20
+last_updated: 2026-08-09
 category: best-practices
 module: devin-desktop-manager safety and verification
 problem_type: best_practice
@@ -39,13 +40,14 @@ appeared together (session history):
 
 - CI and the release gate ran the Bats suite once through `verify` and again
   through `coverage`, even though coverage already runs all tests under BashCov
-  and enforces the configured minimum (`Makefile:68-83`).
+  and enforces the configured minimum (`Makefile:11`,
+  `scripts/run-coverage:128-140`, `scripts/run-coverage-suite:17-55`).
 - Every manager test rebuilt the same mini Debian fixture even though Bats
   provides file-scoped setup. The immutable fixture is now built once, while
   each test still receives isolated home and mock directories
   (`tests/manager.bats:5-26`).
 - Migration validators repeated the same temporary-file invariant across
-  validation and cleanup paths (`bin/devin-desktop-manager:301-310`).
+  validation and cleanup paths (`bin/devin-desktop-manager:1235-1244`).
 
 Earlier review sessions showed that aggregate coverage was only a signal: the
 important gaps were concrete release-contract and recovery scenarios. They
@@ -59,16 +61,15 @@ missed by targeted tests:
 
 - `setup_file` could own the shared fixture, but per-test setup still needed
   `FIXTURE_BUILDER` because several tests construct variant packages
-  (`tests/manager.bats:14-22`, `tests/manager.bats:342-349`,
-  `tests/manager.bats:430-440`).
+  (`tests/manager.bats:14-23`, `tests/manager.bats:433-478`).
 - An exported termination mock had to be unset before the same test triggered
-  its recovery mutation (`tests/manager.bats:1286-1306`).
+  its recovery mutation (`tests/manager.bats:4007-4043`).
 
 The session's final verification output recorded 99 passing tests and 92.58%
 BashCov line coverage (2033 of 2196 relevant lines). Those numbers are a dated
 session result, not a persistent code property. The durable guarantees are the
 checked targets and the repository's explicit 84% ratchet (`Makefile`,
-`tests/makefile.bats:41-47`).
+`tests/makefile.bats:355-370`).
 
 ## Guidance
 
@@ -77,14 +78,16 @@ checked targets and the repository's explicit 84% ratchet (`Makefile`,
 When coverage already executes the complete suite and rejects results below
 the threshold, run lint separately and let coverage own the test execution.
 CI now runs `make lint` followed by `bundle exec make coverage`
-(`.github/workflows/ci.yml:42-45`), and `release-check` depends on
-`lint coverage` before release validation and packaging (`Makefile:88-90`).
+(`.github/workflows/ci.yml:42-49`), and `release-check` executes lint and the
+locked coverage publisher before release validation and packaging
+(`Makefile:362-383`).
 The fast local `make verify` command remains lint plus ordinary tests
-(`Makefile:79-83`).
+(`Makefile:351-355`).
 
-Policy tests pin both optimized paths (`tests/repository.bats:78-90`,
-`tests/makefile.bats:41-47`). This keeps the optimization visible and prevents
-a future edit from silently restoring duplicate work or dropping a gate.
+Policy tests pin both optimized paths (`tests/repository.bats:268-295`,
+`tests/makefile.bats:355-370`). This keeps the optimization visible and
+prevents a future edit from silently restoring duplicate work or dropping a
+gate.
 
 ### Hoist only immutable fixtures
 
@@ -99,33 +102,33 @@ test-specific variants.
 Share an invariant only when every caller requires the same contract. The
 temporary-file helper checks the exact allowed prefix, a numeric suffix, a
 regular file, and the absence of a symlink
-(`bin/devin-desktop-manager:301-310`). Legacy installation, cache, state, and
-release validators call it (`bin/devin-desktop-manager:391-392`,
-`bin/devin-desktop-manager:497-499`, `bin/devin-desktop-manager:523-525`,
-`bin/devin-desktop-manager:550-552`), and cleanup calls the same predicate
-before deletion (`bin/devin-desktop-manager:577-599`). Acceptance and removal
-therefore cannot drift into different definitions of a manager temporary.
+(`bin/devin-desktop-manager:1235-1244`). Release and state validators call it
+(`bin/devin-desktop-manager:1397-1399`,
+`bin/devin-desktop-manager:1578-1607`), and cleanup calls the same predicate
+before deletion (`bin/devin-desktop-manager:2211-2220`,
+`bin/devin-desktop-manager:2252-2262`). Acceptance and removal therefore
+cannot drift into different definitions of a manager temporary.
 
 ### Name compatibility contracts by domain
 
 Ownership sentinels, release metadata, and state documents have independent
 schema constants even though all currently equal `1`
-(`bin/devin-desktop-manager:14-17`). Their consumers remain separate:
+(`bin/devin-desktop-manager:21-23`). Their consumers remain separate:
 ownership cleanup records use `OWNERSHIP_SCHEMA_VERSION`
-(`bin/devin-desktop-manager:1735-1744`), state validation uses
-`STATE_SCHEMA_VERSION` (`bin/devin-desktop-manager:1175-1182`), and release
+(`bin/devin-desktop-manager:4066-4069`), state validation uses
+`STATE_SCHEMA_VERSION` (`bin/devin-desktop-manager:1432-1456`), and release
 ownership uses `RELEASE_METADATA_SCHEMA_VERSION`
-(`bin/devin-desktop-manager:1799-1816`). Equal current values do not make these
+(`bin/devin-desktop-manager:1317-1350`). Equal current values do not make these
 persisted formats one protocol.
 
 ### Prefer auditability at trust boundaries
 
 Keep staged validation when the stages expose the invariant. Legacy release
 metadata first validates object shape and types, then validates identifiers,
-digest, URL, and directory identity (`bin/devin-desktop-manager:320-368`).
+digest, URL, and directory identity (`bin/devin-desktop-manager:1317-1405`).
 Legacy state migration separately checks structure, safe desktop identifiers,
 managed-file hashes, and the command link
-(`bin/devin-desktop-manager:420-472`).
+(`bin/devin-desktop-manager:1432-1484`).
 
 Do not collapse these paths into TSV extraction or a broad state snapshot just
 to save a few `jq` calls during a rare migration. Optimize frequent mechanical
@@ -143,7 +146,7 @@ Centralizing the migration predicate improves safety because validation and
 cleanup share one fail-closed definition. The regression suite proves the
 critical boundary: a symlinked manager temporary causes migration to fail,
 does not claim the installation, and leaves the external target unchanged
-(`tests/manager.bats:503-519`).
+(`tests/manager.bats:2161-2177`).
 
 Conversely, merging independent schema constants or flattening staged
 validators would reduce superficial repetition while increasing semantic
@@ -173,9 +176,13 @@ Avoid running the same suite twice in a release gate:
 
 ```make
 # coverage already runs the Bats suite and checks the threshold.
-release-check: lint coverage
-	@./scripts/release-check "$(VERSION)"
-	@./scripts/package-release "$(VERSION)" "$(DIST_DIR)"
+release-check:
+	@$(PREPARE_SCRIPT_RUNNER); \
+	$(DO_LINT); \
+	$(DO_LOCKED_COVERAGE); \
+	run_script "$$PROJECT_ROOT/scripts/release-check" \
+		--project-root "$$PROJECT_ROOT" "$(VERSION)"; \
+	$(call DO_LOCKED_PACKAGE,)
 ```
 
 Share the complete temporary-file invariant:

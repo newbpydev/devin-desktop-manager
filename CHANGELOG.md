@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-09
+
 ### Changed
 
 - Make targets now execute checkout source, apply target-class capability
@@ -28,6 +30,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- Recover complete installations created by the initial manager when release,
+  desktop, asset, and MIME-default provenance all match the shipped legacy
+  layout. Ambiguous or modified candidates remain unchanged and fail closed.
+- Report a recoverable Legacy Installation as one root-cause diagnosis, clean
+  proven legacy IDs from both default and added MIME associations, and require
+  the active application to stop before ownership migration.
 - Safely migrate installations created by the public 0.1.0 markerless layout
   after cache eviction or an interrupted migration, without accepting unsafe
   links or weakening ownership checks for unknown directories.
@@ -50,5 +58,6 @@ All notable changes to this project are documented here. The format is based on
 - Offline Bats and ShellCheck verification, deterministic source packages,
   pinned GitHub Actions, release provenance, and a scheduled manifest canary.
 
-[Unreleased]: https://github.com/newbpydev/devin-desktop-manager/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/newbpydev/devin-desktop-manager/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/newbpydev/devin-desktop-manager/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/newbpydev/devin-desktop-manager/releases/tag/v0.1.0

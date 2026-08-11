@@ -100,57 +100,57 @@ run_locked_package() {
 }
 
 @test "[PMC-U6-C01] release checker accepts a consistent release contract" {
-  run "${PROJECT_ROOT}/scripts/release-check" 0.1.0
+  run "${PROJECT_ROOT}/scripts/release-check" 0.1.1
 
   [ "${status}" -eq 0 ]
-  [ "${output}" = "Release contract is consistent for v0.1.0" ]
+  [ "${output}" = "Release contract is consistent for v0.1.1" ]
 }
 
 @test "release checker rejects a manager version mismatch" {
-  sed -i 's/MANAGER_VERSION="0.1.0"/MANAGER_VERSION="9.9.9"/' \
+  sed -i 's/MANAGER_VERSION="0.1.1"/MANAGER_VERSION="9.9.9"/' \
     "${FIXTURE}/bin/devin-desktop-manager"
 
-  run "${FIXTURE}/scripts/release-check" --project-root "${FIXTURE}" 0.1.0
+  run "${FIXTURE}/scripts/release-check" --project-root "${FIXTURE}" 0.1.1
 
   [ "${status}" -ne 0 ]
-  [[ "${output}" == *"manager version 9.9.9 does not match 0.1.0"* ]]
+  [[ "${output}" == *"manager version 9.9.9 does not match 0.1.1"* ]]
 }
 
 @test "release checker rejects a Makefile version mismatch" {
-  sed -i 's/VERSION := 0.1.0/VERSION := 9.9.9/' "${FIXTURE}/Makefile"
+  sed -i 's/VERSION := 0.1.1/VERSION := 9.9.9/' "${FIXTURE}/Makefile"
 
-  run "${FIXTURE}/scripts/release-check" --project-root "${FIXTURE}" 0.1.0
+  run "${FIXTURE}/scripts/release-check" --project-root "${FIXTURE}" 0.1.1
 
   [ "${status}" -ne 0 ]
-  [[ "${output}" == *"Makefile version 9.9.9 does not match 0.1.0"* ]]
+  [[ "${output}" == *"Makefile version 9.9.9 does not match 0.1.1"* ]]
 }
 
 @test "release checker rejects a missing changelog entry" {
-  sed -i 's/## \[0.1.0\]/## [unreleased]/' "${FIXTURE}/CHANGELOG.md"
+  sed -i 's/## \[0.1.1\]/## [unreleased]/' "${FIXTURE}/CHANGELOG.md"
 
-  run "${FIXTURE}/scripts/release-check" --project-root "${FIXTURE}" 0.1.0
+  run "${FIXTURE}/scripts/release-check" --project-root "${FIXTURE}" 0.1.1
 
   [ "${status}" -ne 0 ]
-  [[ "${output}" == *"CHANGELOG.md has no 0.1.0 release entry"* ]]
+  [[ "${output}" == *"CHANGELOG.md has no 0.1.1 release entry"* ]]
 }
 
 @test "release checker rejects a missing license" {
   rm "${FIXTURE}/LICENSE"
 
-  run "${FIXTURE}/scripts/release-check" --project-root "${FIXTURE}" 0.1.0
+  run "${FIXTURE}/scripts/release-check" --project-root "${FIXTURE}" 0.1.1
 
   [ "${status}" -ne 0 ]
   [[ "${output}" == *"LICENSE is missing"* ]]
 }
 
 @test "[PMC-U6-C01] release checker rejects explicit and GitHub tag mismatches" {
-  run "${PROJECT_ROOT}/scripts/release-check" --release-tag v9.9.9 0.1.0
+  run "${PROJECT_ROOT}/scripts/release-check" --release-tag v9.9.9 0.1.1
   [ "${status}" -ne 0 ]
-  [[ "${output}" == *"tag v9.9.9 must match v0.1.0"* ]]
+  [[ "${output}" == *"tag v9.9.9 must match v0.1.1"* ]]
 
-  run "${PROJECT_ROOT}/scripts/release-check" --release-tag v9.9.9 0.1.0
+  run "${PROJECT_ROOT}/scripts/release-check" --release-tag v9.9.9 0.1.1
   [ "${status}" -ne 0 ]
-  [[ "${output}" == *"tag v9.9.9 must match v0.1.0"* ]]
+  [[ "${output}" == *"tag v9.9.9 must match v0.1.1"* ]]
 }
 
 @test "[PMC-U6-R02] official release requires clean annotated tag and workflow commit provenance" {
@@ -165,11 +165,11 @@ run_locked_package() {
   commit="$(git -C "${repository}" rev-parse HEAD)"
 
   git -C "${repository}" -c user.name=Test -c user.email=test@example.invalid \
-    tag -a v0.1.0 -m release
+    tag -a v0.1.1 -m release
   mkdir -p "${repository}/dist"
-  make_package_pair "${repository}/dist" devin-desktop-manager-0.1.0.tar.gz
+  make_package_pair "${repository}/dist" devin-desktop-manager-0.1.1.tar.gz
   run env GITHUB_SHA="${commit}" "${repository}/scripts/release-check" \
-    --project-root "${repository}" --release-tag v0.1.0 0.1.0
+    --project-root "${repository}" --release-tag v0.1.1 0.1.1
   [ "${status}" -eq 0 ]
 
   mkdir -p "${repository}/generated [release]/coverage" \
@@ -177,10 +177,10 @@ run_locked_package() {
   printf 'generated coverage\n' \
     >"${repository}/generated [release]/coverage/result.json"
   make_package_pair "${repository}/generated [release]/dist" \
-    devin-desktop-manager-0.1.0.tar.gz
+    devin-desktop-manager-0.1.1.tar.gz
   run env GITHUB_SHA="${commit}" MAKE_COVERAGE_DIR='generated [release]/coverage' \
     MAKE_DIST_DIR='generated [release]/dist' "${repository}/scripts/release-check" \
-    --project-root "${repository}" --release-tag v0.1.0 0.1.0
+    --project-root "${repository}" --release-tag v0.1.1 0.1.1
   [ "${status}" -eq 0 ]
 
   printf 'tracked input\n' \
@@ -188,7 +188,7 @@ run_locked_package() {
   git -C "${repository}" add -- 'generated [release]/coverage/tracked.txt'
   run env GITHUB_SHA="${commit}" MAKE_COVERAGE_DIR='generated [release]/coverage' \
     MAKE_DIST_DIR='generated [release]/dist' "${repository}/scripts/release-check" \
-    --project-root "${repository}" --release-tag v0.1.0 0.1.0
+    --project-root "${repository}" --release-tag v0.1.1 0.1.1
   [ "${status}" -eq 1 ]
   [[ "${output}" == *'generated output roots must not contain tracked release inputs'* ]]
   git -C "${repository}" rm --cached --quiet -- \
@@ -197,21 +197,21 @@ run_locked_package() {
 
   printf 'dirty\n' >>"${repository}/README.md"
   run env GITHUB_SHA="${commit}" "${repository}/scripts/release-check" \
-    --project-root "${repository}" --release-tag v0.1.0 0.1.0
+    --project-root "${repository}" --release-tag v0.1.1 0.1.1
   [ "${status}" -ne 0 ]
   [[ "${output}" == *"clean index and working tree"* ]]
   git -C "${repository}" checkout -- README.md
 
   run env GITHUB_SHA=0000000000000000000000000000000000000000 \
     "${repository}/scripts/release-check" --project-root "${repository}" \
-    --release-tag v0.1.0 0.1.0
+    --release-tag v0.1.1 0.1.1
   [ "${status}" -ne 0 ]
   [[ "${output}" == *"workflow commit"* ]]
 
-  git -C "${repository}" tag -d v0.1.0 >/dev/null
-  git -C "${repository}" tag v0.1.0
+  git -C "${repository}" tag -d v0.1.1 >/dev/null
+  git -C "${repository}" tag v0.1.1
   run env GITHUB_SHA="${commit}" "${repository}/scripts/release-check" \
-    --project-root "${repository}" --release-tag v0.1.0 0.1.0
+    --project-root "${repository}" --release-tag v0.1.1 0.1.1
   [ "${status}" -ne 0 ]
   [[ "${output}" == *"annotated tag"* ]]
 }
@@ -224,7 +224,7 @@ run_locked_package() {
 }
 
 @test "release checker rejects a relative project root override" {
-  run "${PROJECT_ROOT}/scripts/release-check" --project-root relative 0.1.0
+  run "${PROJECT_ROOT}/scripts/release-check" --project-root relative 0.1.1
 
   [ "${status}" -ne 0 ]
   [[ "${output}" == *"project root must be an absolute directory"* ]]
@@ -240,7 +240,7 @@ run_locked_package() {
   git -C "${no_head}" init --quiet
 
   for root in "${extracted}" "${nested}" "${no_head}"; do
-    run "${PROJECT_ROOT}/scripts/release-check" --project-root "${root}" 0.1.0
+    run "${PROJECT_ROOT}/scripts/release-check" --project-root "${root}" 0.1.1
     [ "${status}" -eq 1 ]
     [[ "${output}" == *"exact Git root"*"HEAD"* ]]
   done
@@ -256,23 +256,23 @@ run_locked_package() {
     commit --quiet -m fixture
   commit="$(git -C "${repository}" rev-parse HEAD)"
   git -C "${repository}" -c user.name=Test -c user.email=test@example.invalid \
-    tag -a v0.1.0 -m release
-  make_package_pair "${repository}/dist" devin-desktop-manager-0.1.0.tar.gz
+    tag -a v0.1.1 -m release
+  make_package_pair "${repository}/dist" devin-desktop-manager-0.1.1.tar.gz
 
   run env GITHUB_SHA="${commit}" "${repository}/scripts/release-check" \
-    --project-root "${repository}" --release-tag v0.1.0 0.1.0
+    --project-root "${repository}" --release-tag v0.1.1 0.1.1
   [ "${status}" -eq 0 ]
 
-  archive="${repository}/dist/devin-desktop-manager-0.1.0.tar.gz"
+  archive="${repository}/dist/devin-desktop-manager-0.1.1.tar.gz"
   printf 'changed\n' >>"${archive}"
   run env GITHUB_SHA="${commit}" "${repository}/scripts/release-check" \
-    --project-root "${repository}" --release-tag v0.1.0 0.1.0
+    --project-root "${repository}" --release-tag v0.1.1 0.1.1
   [ "${status}" -eq 1 ]
   [[ "${output}" == *"package handoff"* ]]
-  make_package_pair "${repository}/dist" devin-desktop-manager-0.1.0.tar.gz
+  make_package_pair "${repository}/dist" devin-desktop-manager-0.1.1.tar.gz
   printf 'extra\n' >"${repository}/dist/other.tar.gz"
   run env GITHUB_SHA="${commit}" "${repository}/scripts/release-check" \
-    --project-root "${repository}" --release-tag v0.1.0 0.1.0
+    --project-root "${repository}" --release-tag v0.1.1 0.1.1
   [ "${status}" -eq 1 ]
   [[ "${output}" == *"package handoff"* ]]
 }

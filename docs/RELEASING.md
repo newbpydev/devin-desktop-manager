@@ -14,7 +14,11 @@ Only repository maintainers publish releases.
     and deterministic packaging with `SHA256SUMS`.
 4. Review the archive contents and test installation from that archive in a
    disposable user account or VM.
-5. Confirm the scheduled manifest canary is green.
+5. For 0.1.1, confirm the complete initial-manager recovery fixture, one
+   refusal, doctor diagnosis, interruption retry, and clean-install workflow.
+   Keep affected-host evidence separate from disposable-environment evidence.
+6. Confirm all four compatibility jobs pass on the same commit and the
+   scheduled manifest canary is green.
 
 Release engineering requires the selected physical directory to be the exact
 Git root with a valid HEAD on a local same-device filesystem. Extracted source
@@ -24,13 +28,18 @@ target classes, but never for `package` or `release-check`. Do not redirect
 directory before release validation. The legacy `MANAGER` override is not a
 release input because checkout targets always execute reviewed source.
 
+Affected 0.1.0 users must obtain the verified 0.1.1 archive or checkout and run
+`make install-manager` before `make update`; the old installed manager cannot
+publish its own replacement. Never advise users to create ownership markers,
+delete lock files, or use a force-repair path.
+
 ## Tag and draft
 
 Create an annotated tag whose name exactly matches the manager version:
 
 ```bash
-git tag -a v0.1.0 -m "Devin Desktop Manager v0.1.0"
-git push origin v0.1.0
+git tag -a v0.1.1 -m "Devin Desktop Manager v0.1.1"
+git push origin v0.1.1
 ```
 
 The release workflow rejects lightweight tags, version mismatches, and coverage
@@ -52,7 +61,7 @@ command; direct status 2 means the invocation itself is invalid.
 3. Verify provenance with:
 
    ```bash
-   gh attestation verify devin-desktop-manager-0.1.0.tar.gz \
+   gh attestation verify devin-desktop-manager-0.1.1.tar.gz \
      --repo newbpydev/devin-desktop-manager
    ```
 
