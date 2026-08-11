@@ -1194,6 +1194,24 @@ EOF
     "refused|default-provenance:x-scheme-handler/devin|${external_config}/mimeapps.list" ]
 }
 
+@test "[LIR-U1-R06] hidden external manager defaults remain refused" {
+  local external_config="${BATS_TEST_TMPDIR}/system-config"
+
+  seed_complete_initial_manager_layout
+  mkdir -p -- "${external_config}"
+  printf '%s\n' \
+    '[Default Applications]' \
+    'x-scheme-handler/devin=devin-desktop-url-handler.desktop;browser.desktop;' \
+    >"${external_config}/mimeapps.list"
+  export XDG_CONFIG_DIRS="${external_config}"
+
+  classify_test_layout
+
+  [ "${status}" -eq 1 ]
+  [ "${output}" = \
+    "refused|default-provenance:x-scheme-handler/devin|${external_config}/mimeapps.list" ]
+}
+
 @test "[LIR-U1-R06] MIME provenance near-miss matrix remains refused" {
   local baseline="${BATS_TEST_TMPDIR}/mimeapps.list"
   local parked="${BATS_TEST_TMPDIR}/mimeapps.regular"

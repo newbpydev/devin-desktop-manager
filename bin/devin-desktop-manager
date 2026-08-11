@@ -2238,7 +2238,7 @@ legacy_mimeapps_file_is_safe() {
 }
 
 legacy_external_mimeapps_manager_defaults_are_absent() {
-  local directory file section="" line mime_type value desktop_id provenance_file
+  local directory file section="" line mime_type value desktop_id provenance_file fallback
   local -a config_directories=() candidates=() desktop_ids=()
 
   IFS=':' read -r -a config_directories <<<"${XDG_CONFIG_DIRS:-/etc/xdg}"
@@ -2265,16 +2265,24 @@ legacy_external_mimeapps_manager_defaults_are_absent() {
       for desktop_id in "${desktop_ids[@]}"; do
         legacy_mime_record_is_manager_id "${desktop_id}" || continue
         case "${mime_type}" in
-          "${MIME_DEVIN}") provenance_file="${LEGACY_PROVENANCE_FILE_DEVIN}" ;;
+          "${MIME_DEVIN}")
+            provenance_file="${LEGACY_PROVENANCE_FILE_DEVIN}"
+            fallback="${LEGACY_FALLBACK_DEVIN}"
+            ;;
           "${MIME_WINDSURF}")
             provenance_file="${LEGACY_PROVENANCE_FILE_WINDSURF}"
+            fallback="${LEGACY_FALLBACK_WINDSURF}"
             ;;
           "${MIME_WORKSPACE}")
             provenance_file="${LEGACY_PROVENANCE_FILE_WORKSPACE}"
+            fallback="${LEGACY_FALLBACK_WORKSPACE}"
             ;;
           *) continue ;;
         esac
-        [[ "${provenance_file}" != "${CONFIG_HOME}/mimeapps.list" ]] || continue
+        if [[ "${provenance_file}" == "${CONFIG_HOME}/mimeapps.list" &&
+          -n "${fallback}" ]]; then
+          continue
+        fi
         LEGACY_REASON="default-provenance:${mime_type}"
         LEGACY_OBSERVED="${file}"
         return 1
