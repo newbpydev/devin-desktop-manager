@@ -128,7 +128,10 @@ Releases live under `~/.local/opt/devin-desktop`. Manager state is stored with
 mode `0600` at
 `${XDG_STATE_HOME:-~/.local/state}/devin-desktop-manager/state.json`.
 Desktop, icon, and MIME files use manager-specific names under
-`${XDG_DATA_HOME:-~/.local/share}`.
+`${XDG_DATA_HOME:-~/.local/share}`. A hidden, manager-owned
+`devin-desktop.desktop` compatibility entry matches the application's runtime
+identity so desktop shells can persist pinned launchers without adding a
+duplicate application-menu entry.
 
 Recognized markerless installations are migrated automatically only after all
 profile-specific ownership evidence validates. This includes the public 0.1.0

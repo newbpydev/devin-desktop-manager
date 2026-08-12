@@ -501,14 +501,42 @@ downgrade_to_public_0_1_layout() {
   rm -f -- \
     "${install_root}/.devin-desktop-manager-owned" \
     "${cache_root}/.devin-desktop-manager-owned" \
-    "${state_root}/.devin-desktop-manager-owned"
+    "${state_root}/.devin-desktop-manager-owned" \
+    "${TEST_HOME}/.local/share/applications/devin-desktop.desktop"
   if [[ -f "${state_root}/state.json" ]]; then
     temporary="${state_root}/state.json.legacy"
-    jq '.managerVersion = "0.1.0"' \
+    jq '
+      .managerVersion = "0.1.0" |
+      del(.managedFiles.runtimeDesktop)
+    ' \
       "${state_root}/state.json" >"${temporary}"
     mv -Tf -- "${temporary}" "${state_root}/state.json"
   fi
   : >"${install_root}/.manager.lock"
+}
+
+simulate_pre_runtime_identity_current_manager() {
+  local data_home="${TEST_HOME}/.local/share"
+  local state_file="${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
+  local main_desktop="${data_home}/applications/devin-desktop-manager.desktop"
+  local url_desktop="${data_home}/applications/devin-desktop-manager-url-handler.desktop"
+  local runtime_desktop="${data_home}/applications/devin-desktop.desktop"
+  local temporary="${state_file}.pre-runtime"
+  local main_hash url_hash
+
+  rm -f -- "${runtime_desktop}"
+  sed -i 's/^StartupWMClass=devin-desktop$/StartupWMClass=Devin/' \
+    "${main_desktop}" "${url_desktop}"
+  main_hash="$(sha256sum "${main_desktop}" | awk '{print $1}')"
+  url_hash="$(sha256sum "${url_desktop}" | awk '{print $1}')"
+  jq \
+    --arg main_hash "${main_hash}" \
+    --arg url_hash "${url_hash}" '
+      .managedFiles.mainDesktop.sha256 = $main_hash |
+      .managedFiles.urlDesktop.sha256 = $url_hash |
+      del(.managedFiles.runtimeDesktop)
+    ' "${state_file}" >"${temporary}"
+  mv -Tf -- "${temporary}" "${state_file}"
 }
 
 seed_complete_initial_manager_layout() {
@@ -1426,7 +1454,17 @@ EOF
   [ -f "${install_root}/.devin-desktop-manager-owned" ]
   [ "$(stat -c %a "${TEST_HOME}/.local/state/devin-desktop-manager/state.json")" = "600" ]
   [ -f "${data_home}/applications/devin-desktop-manager.desktop" ]
-  [ ! -e "${data_home}/applications/devin-desktop.desktop" ]
+  [ -f "${data_home}/applications/devin-desktop.desktop" ]
+  grep -Fqx 'NoDisplay=true' \
+    "${data_home}/applications/devin-desktop.desktop"
+  grep -Fqx 'StartupWMClass=devin-desktop' \
+    "${data_home}/applications/devin-desktop.desktop"
+  run jq -e \
+    --arg path "${data_home}/applications/devin-desktop.desktop" \
+    '.managedFiles.runtimeDesktop.path == $path and
+      (.managedFiles.runtimeDesktop.sha256 | test("^[0-9a-f]{64}$"))' \
+    "${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
+  [ "${status}" -eq 0 ]
   [ "$(query_default x-scheme-handler/devin)" = \
     "devin-desktop-manager-url-handler.desktop" ]
   run grep -F 'devin-desktop-url-handler.desktop' "${DEFAULTS_FILE}"
@@ -3523,6 +3561,9 @@ EOF
 }
 
 @test "update installs validated release and unique cross-desktop integration" {
+  local state_file="${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
+  local runtime_desktop="${TEST_HOME}/.local/share/applications/devin-desktop.desktop"
+
   run install_fixture
 
   [ "${status}" -eq 0 ]
@@ -3532,9 +3573,40 @@ EOF
   [ -f "${TEST_HOME}/.local/share/applications/devin-desktop-manager-url-handler.desktop" ]
   [ -f "${TEST_HOME}/.local/share/icons/hicolor/512x512/apps/devin-desktop-manager.png" ]
   [ -f "${TEST_HOME}/.local/share/mime/packages/devin-desktop-manager-workspace.xml" ]
-  [ ! -e "${TEST_HOME}/.local/share/applications/devin-desktop.desktop" ]
-  [ "$(stat -c '%a' "${TEST_HOME}/.local/state/devin-desktop-manager/state.json")" = "600" ]
+  [ -f "${runtime_desktop}" ]
+  [ "$(stat -c '%a' "${state_file}")" = "600" ]
+  [ "$(jq -r '.managedFiles.runtimeDesktop.path' "${state_file}")" = \
+    "${runtime_desktop}" ]
+  [ "$(jq -r '.managedFiles.runtimeDesktop.sha256' "${state_file}")" = \
+    "$(sha256sum "${runtime_desktop}" | awk '{print $1}')" ]
   [ "$(query_default x-scheme-handler/devin)" = "devin-desktop-manager-url-handler.desktop" ]
+}
+
+@test "up-to-date update repairs the pre-runtime-identity manager layout" {
+  local data_home="${TEST_HOME}/.local/share"
+  local state_file="${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
+  local main_desktop="${data_home}/applications/devin-desktop-manager.desktop"
+  local runtime_desktop="${data_home}/applications/devin-desktop.desktop"
+
+  install_fixture
+  simulate_pre_runtime_identity_current_manager
+  [ ! -e "${runtime_desktop}" ]
+  grep -Fqx 'StartupWMClass=Devin' "${main_desktop}"
+
+  run install_fixture
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"active release already matches"* ]]
+  [ -f "${runtime_desktop}" ]
+  grep -Fqx 'StartupWMClass=devin-desktop' "${main_desktop}"
+  grep -Fqx 'NoDisplay=true' "${runtime_desktop}"
+  [ "$(jq -r '.managedFiles.runtimeDesktop.path' "${state_file}")" = \
+    "${runtime_desktop}" ]
+  [ "$(jq -r '.managedFiles.runtimeDesktop.sha256' "${state_file}")" = \
+    "$(sha256sum "${runtime_desktop}" | awk '{print $1}')" ]
+
+  run manager_env doctor
+  [ "${status}" -eq 0 ]
 }
 
 @test "an up-to-date update still rejects a corrupted active release" {
@@ -3823,6 +3895,8 @@ EOF
 }
 
 @test "set-defaults is explicit and uninstall restores previous defaults" {
+  local runtime_desktop="${TEST_HOME}/.local/share/applications/devin-desktop.desktop"
+
   seed_defaults
   install_fixture
 
@@ -3837,6 +3911,7 @@ EOF
   [ "$(query_default application/x-devin-desktop-workspace)" = "workspace.desktop" ]
   [ ! -e "${TEST_HOME}/.local/opt/devin-desktop" ]
   [ ! -e "${TEST_HOME}/.local/state/devin-desktop-manager" ]
+  [ ! -e "${runtime_desktop}" ]
 }
 
 @test "uninstall is idempotent when the application is not installed" {
@@ -3970,6 +4045,7 @@ EOF
   [[ "${output}" == *"restoring the previous release and desktop state"* ]]
   [ ! -L "${TEST_HOME}/.local/opt/devin-desktop/current" ]
   [ ! -e "${TEST_HOME}/.local/share/applications/devin-desktop-manager.desktop" ]
+  [ ! -e "${TEST_HOME}/.local/share/applications/devin-desktop.desktop" ]
   [ ! -e "${TEST_HOME}/.local/share/icons/hicolor/512x512/apps/devin-desktop-manager.png" ]
   [ ! -e "${TEST_HOME}/.local/share/mime/packages/devin-desktop-manager-workspace.xml" ]
   [ ! -e "${TEST_HOME}/.local/state/devin-desktop-manager/state.json" ]
@@ -4431,6 +4507,46 @@ EOF
   [ "${lines[-1]}" = "original" ]
 }
 
+@test "transaction recovery restores the managed runtime desktop launcher" {
+  local desktop="${TEST_HOME}/.local/share/applications/devin-desktop.desktop"
+  local journal="${TEST_HOME}/.local/state/devin-desktop-manager.transaction"
+  local original_hash
+
+  install_fixture
+  original_hash="$(sha256sum "${desktop}" | awk '{print $1}')"
+
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      acquire_lock
+      backup_transaction
+      printf "interrupted runtime launcher\n" >"${RUNTIME_DESKTOP}"
+    ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
+  [ -d "${journal}" ]
+  [ "$(cat "${desktop}")" = "interrupted runtime launcher" ]
+
+  run env HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME="${TEST_HOME}/.local/share" \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" bash -c '
+      source "$1"
+      acquire_lock
+    ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"recovering an unfinished manager transaction"* ]]
+  [ "$(sha256sum "${desktop}" | awk '{print $1}')" = "${original_hash}" ]
+  [ ! -e "${journal}" ]
+}
+
 @test "[PMC-U2-C01] transaction recovery preserves a user file created after an absent snapshot" {
   local mimeapps="${TEST_HOME}/.config/mimeapps.list"
   local journal="${TEST_HOME}/.local/state/devin-desktop-manager.transaction"
@@ -4797,7 +4913,7 @@ EOF
   [ ! -L "${TEST_HOME}/.local/opt/devin-desktop/current" ]
 }
 
-@test "update preserves unowned desktop files that use legacy names" {
+@test "update refuses an unowned runtime desktop identity without changing it" {
   local data_archive="${BATS_TEST_TMPDIR}/data.tar.gz"
   local data_home="${TEST_HOME}/.local/share"
 
@@ -4825,15 +4941,16 @@ EOF
 
   run install_fixture
 
-  [ "${status}" -eq 0 ]
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"cannot be safely replaced"* ]]
+  grep -Fqx 'Name=Independent Devin' \
+    "${data_home}/applications/devin-desktop.desktop"
   [ -f "${data_home}/applications/devin-desktop.desktop" ]
   [ -f "${data_home}/applications/devin-desktop-url-handler.desktop" ]
   [ -f "${data_home}/icons/hicolor/512x512/apps/devin-desktop.png" ]
   [ -f "${data_home}/mime/packages/devin-desktop-workspace.xml" ]
   [ "$(query_default x-scheme-handler/devin)" = "devin-desktop-url-handler.desktop" ]
-  run jq -r '.originalDefaults["x-scheme-handler/devin"]' \
-    "${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
-  [ "${output}" = "devin-desktop-url-handler.desktop" ]
+  [ ! -L "${TEST_HOME}/.local/opt/devin-desktop/current" ]
 }
 
 @test "update migrates integration created by the pre-0.1 manager" {
@@ -4868,7 +4985,11 @@ EOF
   run install_fixture
 
   [ "${status}" -eq 0 ]
-  [ ! -e "${data_home}/applications/devin-desktop.desktop" ]
+  [ -f "${data_home}/applications/devin-desktop.desktop" ]
+  grep -Fqx 'NoDisplay=true' \
+    "${data_home}/applications/devin-desktop.desktop"
+  grep -Fqx 'StartupWMClass=devin-desktop' \
+    "${data_home}/applications/devin-desktop.desktop"
   [ ! -e "${data_home}/applications/devin-desktop-url-handler.desktop" ]
   [ ! -e "${data_home}/icons/hicolor/512x512/apps/devin-desktop.png" ]
   [ ! -e "${data_home}/mime/packages/devin-desktop-workspace.xml" ]
@@ -4880,6 +5001,19 @@ EOF
 
 @test "update refuses a manager desktop entry modified after installation" {
   local desktop="${TEST_HOME}/.local/share/applications/devin-desktop-manager.desktop"
+
+  install_fixture
+  printf '# user customization\n' >>"${desktop}"
+
+  run install_fixture
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"was modified and cannot be safely replaced"* ]]
+  grep -Fq '# user customization' "${desktop}"
+}
+
+@test "update refuses a runtime desktop entry modified after installation" {
+  local desktop="${TEST_HOME}/.local/share/applications/devin-desktop.desktop"
 
   install_fixture
   printf '# user customization\n' >>"${desktop}"
@@ -5477,6 +5611,18 @@ EOF
   [[ "${output}" == *"Installation problems:"* ]]
 }
 
+@test "doctor reports a missing runtime desktop launcher" {
+  local desktop="${TEST_HOME}/.local/share/applications/devin-desktop.desktop"
+
+  install_fixture
+  rm -f -- "${desktop}"
+
+  run manager_env doctor
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"runtime desktop entry differs from manager state"* ]]
+}
+
 @test "uninstall leaves a manager file modified by the user" {
   install_fixture
   printf 'user replacement\n' \
@@ -5501,6 +5647,38 @@ EOF
   [[ "${output}" == *"leaving modified or non-manager-owned path"* ]]
   [ -f "${desktop}" ]
   grep -Fq '# user customization' "${desktop}"
+}
+
+@test "uninstall leaves a modified runtime desktop entry in place" {
+  local desktop="${TEST_HOME}/.local/share/applications/devin-desktop.desktop"
+
+  install_fixture
+  printf '# user customization\n' >>"${desktop}"
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"leaving modified or non-manager-owned path"* ]]
+  [ -f "${desktop}" ]
+  grep -Fq '# user customization' "${desktop}"
+}
+
+@test "uninstall preserves the runtime launcher when its state record is damaged" {
+  local desktop="${TEST_HOME}/.local/share/applications/devin-desktop.desktop"
+  local state_file="${TEST_HOME}/.local/state/devin-desktop-manager/state.json"
+  local temporary="${state_file}.damaged"
+
+  install_fixture
+  jq '.managedFiles.runtimeDesktop.sha256 = "invalid"' \
+    "${state_file}" >"${temporary}"
+  mv -Tf -- "${temporary}" "${state_file}"
+
+  run manager_env uninstall --yes
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"leaving modified or non-manager-owned path"* ]]
+  [ -f "${desktop}" ]
+  grep -Fqx 'X-Devin-Desktop-Manager=true' "${desktop}"
 }
 
 @test "uninstall propagates MIME rewrite failure and keeps the installation usable" {

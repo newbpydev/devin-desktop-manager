@@ -8,15 +8,16 @@ setup() {
   TEST_HOME="${BATS_TEST_TMPDIR}/home with space"
   MAIN_ENTRY="${BATS_TEST_TMPDIR}/devin-desktop-manager.desktop"
   URL_ENTRY="${BATS_TEST_TMPDIR}/devin-desktop-manager-url-handler.desktop"
+  RUNTIME_ENTRY="${BATS_TEST_TMPDIR}/devin-desktop.desktop"
   mkdir -p "${TEST_HOME}"
 }
 
 @test "generated desktop entries pass the real freedesktop validator" {
   run env HOME="${TEST_HOME}" bash -c '
     source "$1"
-    write_desktop_entries "$2" "$3"
-    desktop-file-validate "$2" "$3"
-  ' _ "${MANAGER}" "${MAIN_ENTRY}" "${URL_ENTRY}"
+    write_desktop_entries "$2" "$3" "$4"
+    desktop-file-validate "$2" "$3" "$4"
+  ' _ "${MANAGER}" "${MAIN_ENTRY}" "${URL_ENTRY}" "${RUNTIME_ENTRY}"
 
   [ "${status}" -eq 0 ]
   grep -Fq \
@@ -26,6 +27,16 @@ setup() {
     "Exec=/usr/bin/env -- \"${TEST_HOME}/.local/bin/devin-desktop\" --open-url %U" \
     "${URL_ENTRY}"
   grep -Fq 'Icon=devin-desktop-manager' "${MAIN_ENTRY}"
+  grep -Fq 'StartupWMClass=devin-desktop' "${MAIN_ENTRY}"
   grep -Fq 'MimeType=x-scheme-handler/devin;x-scheme-handler/windsurf;' \
     "${URL_ENTRY}"
+  grep -Fq 'StartupWMClass=devin-desktop' "${URL_ENTRY}"
+  grep -Fq \
+    "Exec=/usr/bin/env -- \"${TEST_HOME}/.local/bin/devin-desktop\" %F" \
+    "${RUNTIME_ENTRY}"
+  grep -Fq 'Icon=devin-desktop-manager' "${RUNTIME_ENTRY}"
+  grep -Fq 'NoDisplay=true' "${RUNTIME_ENTRY}"
+  grep -Fq 'StartupWMClass=devin-desktop' "${RUNTIME_ENTRY}"
+  grep -Fq 'X-Devin-Desktop-Manager=true' "${RUNTIME_ENTRY}"
+  ! grep -Fq 'MimeType=' "${RUNTIME_ENTRY}"
 }

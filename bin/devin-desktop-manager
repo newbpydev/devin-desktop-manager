@@ -49,15 +49,20 @@ readonly RELEASE_PRUNE_CLEANUP_PROOF="${RELEASE_PRUNE_CLEANUP_RECORD}.proof"
 readonly APP_COMMAND="${BIN_DIR}/devin-desktop"
 readonly MANAGER_COMMAND="${BIN_DIR}/devin-desktop-manager"
 
+readonly APP_RUNTIME_IDENTITY="devin-desktop"
 readonly MAIN_DESKTOP_ID="devin-desktop-manager.desktop"
 readonly URL_DESKTOP_ID="devin-desktop-manager-url-handler.desktop"
+readonly RUNTIME_DESKTOP_ID="${APP_RUNTIME_IDENTITY}.desktop"
 readonly ICON_NAME="devin-desktop-manager"
 readonly MAIN_DESKTOP="${DATA_HOME}/applications/${MAIN_DESKTOP_ID}"
 readonly URL_DESKTOP="${DATA_HOME}/applications/${URL_DESKTOP_ID}"
+readonly RUNTIME_DESKTOP="${DATA_HOME}/applications/${RUNTIME_DESKTOP_ID}"
 readonly ICON_FILE="${DATA_HOME}/icons/hicolor/512x512/apps/${ICON_NAME}.png"
 readonly MIME_FILE="${DATA_HOME}/mime/packages/devin-desktop-manager-workspace.xml"
 
-readonly LEGACY_MAIN_DESKTOP_ID="devin-desktop.desktop"
+# Transaction recovery snapshots this shared path as legacy-main. Keep these
+# aliases coupled unless the journal gains a separate runtime-desktop entry.
+readonly LEGACY_MAIN_DESKTOP_ID="${RUNTIME_DESKTOP_ID}"
 readonly LEGACY_URL_DESKTOP_ID="devin-desktop-url-handler.desktop"
 readonly LEGACY_MAIN_DESKTOP="${DATA_HOME}/applications/${LEGACY_MAIN_DESKTOP_ID}"
 readonly LEGACY_URL_DESKTOP="${DATA_HOME}/applications/${LEGACY_URL_DESKTOP_ID}"
@@ -3453,6 +3458,18 @@ validate_state_or_absent() {
 managed_file_matches_state() {
   local key="$1"
   local path="$2"
+  local expected_hash
+
+  state_declares_managed_file "${key}" "${path}" || return 1
+  expected_hash="$(jq -r --arg key "${key}" \
+    '.managedFiles[$key].sha256 // empty' "${STATE_FILE}")"
+  [[ -f "${path}" && ! -L "${path}" ]] || return 1
+  [[ "$(sha256sum "${path}" | awk '{print $1}')" == "${expected_hash}" ]]
+}
+
+state_declares_managed_file() {
+  local key="$1"
+  local path="$2"
   local expected_path expected_hash
 
   state_is_valid || return 1
@@ -3460,10 +3477,15 @@ managed_file_matches_state() {
     '.managedFiles[$key].path // empty' "${STATE_FILE}")"
   expected_hash="$(jq -r --arg key "${key}" \
     '.managedFiles[$key].sha256 // empty' "${STATE_FILE}")"
-  [[ "${expected_path}" == "${path}" && "${expected_hash}" =~ ^[0-9a-f]{64}$ ]] ||
-    return 1
-  [[ -f "${path}" && ! -L "${path}" ]] || return 1
-  [[ "$(sha256sum "${path}" | awk '{print $1}')" == "${expected_hash}" ]]
+  [[ "${expected_path}" == "${path}" && "${expected_hash}" =~ ^[0-9a-f]{64}$ ]]
+}
+
+state_has_managed_file_record() {
+  local key="$1"
+
+  state_is_valid || return 1
+  jq -e --arg key "${key}" '.managedFiles | has($key)' \
+    "${STATE_FILE}" >/dev/null 2>&1
 }
 
 ensure_regular_path_manageable() {
@@ -3506,6 +3528,7 @@ ensure_integration_manageable() {
   ensure_app_command_manageable
   ensure_regular_path_manageable "${MAIN_DESKTOP}" mainDesktop true
   ensure_regular_path_manageable "${URL_DESKTOP}" urlDesktop true
+  ensure_regular_path_manageable "${RUNTIME_DESKTOP}" runtimeDesktop true
   ensure_regular_path_manageable \
     "${ICON_FILE}" icon false devin-desktop.png
   ensure_regular_path_manageable \
@@ -3515,6 +3538,7 @@ ensure_integration_manageable() {
 write_desktop_entries() {
   local main_destination="$1"
   local url_destination="$2"
+  local runtime_destination="$3"
   local escaped_command
 
   escaped_command="$(desktop_escape_command "${APP_COMMAND}")"
@@ -3528,7 +3552,7 @@ Exec=/usr/bin/env -- "${escaped_command}" %F
 Icon=${ICON_NAME}
 Type=Application
 StartupNotify=false
-StartupWMClass=Devin
+StartupWMClass=${APP_RUNTIME_IDENTITY}
 Categories=TextEditor;Development;IDE;
 MimeType=${MIME_WORKSPACE};
 Actions=new-empty-window;
@@ -3551,13 +3575,35 @@ Icon=${ICON_NAME}
 Type=Application
 NoDisplay=true
 StartupNotify=true
-StartupWMClass=Devin
+StartupWMClass=${APP_RUNTIME_IDENTITY}
 Categories=Utility;TextEditor;Development;IDE;
 MimeType=${MIME_DEVIN};${MIME_WINDSURF};
 Keywords=vscode;
 ${MANAGER_DESKTOP_MARKER}
 EOF
-  chmod 0644 "${main_destination}" "${url_destination}"
+
+  cat >"${runtime_destination}" <<EOF
+[Desktop Entry]
+Name=Devin
+Comment=Tomorrow's Editor, Today.
+GenericName=Text Editor
+Exec=/usr/bin/env -- "${escaped_command}" %F
+Icon=${ICON_NAME}
+Type=Application
+NoDisplay=true
+StartupNotify=false
+StartupWMClass=${APP_RUNTIME_IDENTITY}
+Actions=new-empty-window;
+Keywords=vscode;
+${MANAGER_DESKTOP_MARKER}
+
+[Desktop Action new-empty-window]
+Name=New Empty Window
+Exec=/usr/bin/env -- "${escaped_command}" --new-window %F
+Icon=${ICON_NAME}
+EOF
+  chmod 0644 \
+    "${main_destination}" "${url_destination}" "${runtime_destination}"
 }
 
 build_integration_stage() {
@@ -3574,7 +3620,8 @@ build_integration_stage() {
   mkdir -p "${INTEGRATION_STAGE}"
   write_desktop_entries \
     "${INTEGRATION_STAGE}/${MAIN_DESKTOP_ID}" \
-    "${INTEGRATION_STAGE}/${URL_DESKTOP_ID}"
+    "${INTEGRATION_STAGE}/${URL_DESKTOP_ID}" \
+    "${INTEGRATION_STAGE}/${RUNTIME_DESKTOP_ID}"
   cp -- "${release_dir}/integration/devin-desktop.png" \
     "${INTEGRATION_STAGE}/${ICON_NAME}.png"
   cp -- "${release_dir}/integration/devin-desktop-workspace.xml" \
@@ -3584,7 +3631,8 @@ build_integration_stage() {
 
   desktop-file-validate \
     "${INTEGRATION_STAGE}/${MAIN_DESKTOP_ID}" \
-    "${INTEGRATION_STAGE}/${URL_DESKTOP_ID}"
+    "${INTEGRATION_STAGE}/${URL_DESKTOP_ID}" \
+    "${INTEGRATION_STAGE}/${RUNTIME_DESKTOP_ID}"
 }
 
 atomic_copy() {
@@ -3761,12 +3809,19 @@ asset_matches_release() {
 
 remove_legacy_integration() {
   local legacy_assets_owned=false
+  local runtime_desktop_has_state_record=false
 
-  if legacy_desktop_owned "${LEGACY_MAIN_DESKTOP}" &&
+  if state_has_managed_file_record runtimeDesktop; then
+    runtime_desktop_has_state_record=true
+  fi
+
+  if [[ "${runtime_desktop_has_state_record}" == "false" ]] &&
+    legacy_desktop_owned "${LEGACY_MAIN_DESKTOP}" &&
     legacy_desktop_owned "${LEGACY_URL_DESKTOP}"; then
     legacy_assets_owned=true
   fi
-  if legacy_desktop_owned "${LEGACY_MAIN_DESKTOP}"; then
+  if [[ "${runtime_desktop_has_state_record}" == "false" ]] &&
+    legacy_desktop_owned "${LEGACY_MAIN_DESKTOP}"; then
     rm -f -- "${LEGACY_MAIN_DESKTOP}" || return 1
   fi
   if legacy_desktop_owned "${LEGACY_URL_DESKTOP}"; then
@@ -3787,7 +3842,7 @@ write_state() {
   local original_windsurf="$2"
   local original_workspace="$3"
   local temporary="${STATE_FILE}.new.$$"
-  local main_hash url_hash icon_hash mime_hash
+  local main_hash url_hash runtime_hash icon_hash mime_hash
 
   is_safe_desktop_id "${original_devin}" ||
     die "existing default for ${MIME_DEVIN} is unsafe"
@@ -3798,6 +3853,7 @@ write_state() {
 
   main_hash="$(sha256sum "${MAIN_DESKTOP}" | awk '{print $1}')"
   url_hash="$(sha256sum "${URL_DESKTOP}" | awk '{print $1}')"
+  runtime_hash="$(sha256sum "${RUNTIME_DESKTOP}" | awk '{print $1}')"
   icon_hash="$(sha256sum "${ICON_FILE}" | awk '{print $1}')"
   mime_hash="$(sha256sum "${MIME_FILE}" | awk '{print $1}')"
 
@@ -3812,6 +3868,8 @@ write_state() {
     --arg mainHash "${main_hash}" \
     --arg urlPath "${URL_DESKTOP}" \
     --arg urlHash "${url_hash}" \
+    --arg runtimePath "${RUNTIME_DESKTOP}" \
+    --arg runtimeHash "${runtime_hash}" \
     --arg iconPath "${ICON_FILE}" \
     --arg iconHash "${icon_hash}" \
     --arg mimePath "${MIME_FILE}" \
@@ -3832,6 +3890,7 @@ write_state() {
       managedFiles: {
         mainDesktop: {path: $mainPath, sha256: $mainHash},
         urlDesktop: {path: $urlPath, sha256: $urlHash},
+        runtimeDesktop: {path: $runtimePath, sha256: $runtimeHash},
         icon: {path: $iconPath, sha256: $iconHash},
         mime: {path: $mimePath, sha256: $mimeHash}
       },
@@ -3897,6 +3956,9 @@ install_integration_from_stage() {
       "${LEGACY_CURRENT_WORKSPACE_OWNED}" || return 1
   fi
   remove_legacy_integration || return 1
+  atomic_copy \
+    "${INTEGRATION_STAGE}/${RUNTIME_DESKTOP_ID}" "${RUNTIME_DESKTOP}" 0644 ||
+    return 1
   refresh_desktop_caches || return 1
   write_state "${original_devin}" "${original_windsurf}" "${original_workspace}"
 }
@@ -5405,10 +5467,14 @@ command_doctor() {
     failures+=("main desktop entry is invalid")
   desktop-file-validate "${URL_DESKTOP}" >/dev/null 2>&1 ||
     failures+=("URL desktop entry is invalid")
+  desktop-file-validate "${RUNTIME_DESKTOP}" >/dev/null 2>&1 ||
+    failures+=("runtime desktop entry is invalid")
   managed_file_matches_state mainDesktop "${MAIN_DESKTOP}" ||
     failures+=("main desktop entry differs from manager state")
   managed_file_matches_state urlDesktop "${URL_DESKTOP}" ||
     failures+=("URL desktop entry differs from manager state")
+  managed_file_matches_state runtimeDesktop "${RUNTIME_DESKTOP}" ||
+    failures+=("runtime desktop entry differs from manager state")
   managed_file_matches_state icon "${ICON_FILE}" ||
     failures+=("application icon differs from manager state")
   managed_file_matches_state mime "${MIME_FILE}" ||
@@ -5980,6 +6046,8 @@ perform_uninstall() {
 
   remove_managed_regular_file "${MAIN_DESKTOP}" mainDesktop true || return 1
   remove_managed_regular_file "${URL_DESKTOP}" urlDesktop true || return 1
+  remove_managed_regular_file \
+    "${RUNTIME_DESKTOP}" runtimeDesktop true || return 1
   remove_managed_regular_file \
     "${ICON_FILE}" icon false devin-desktop.png || return 1
   remove_managed_regular_file \
