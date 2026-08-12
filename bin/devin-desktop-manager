@@ -60,6 +60,8 @@ readonly RUNTIME_DESKTOP="${DATA_HOME}/applications/${RUNTIME_DESKTOP_ID}"
 readonly ICON_FILE="${DATA_HOME}/icons/hicolor/512x512/apps/${ICON_NAME}.png"
 readonly MIME_FILE="${DATA_HOME}/mime/packages/devin-desktop-manager-workspace.xml"
 
+# Transaction recovery snapshots this shared path as legacy-main. Keep these
+# aliases coupled unless the journal gains a separate runtime-desktop entry.
 readonly LEGACY_MAIN_DESKTOP_ID="${RUNTIME_DESKTOP_ID}"
 readonly LEGACY_URL_DESKTOP_ID="devin-desktop-url-handler.desktop"
 readonly LEGACY_MAIN_DESKTOP="${DATA_HOME}/applications/${LEGACY_MAIN_DESKTOP_ID}"
