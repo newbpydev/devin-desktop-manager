@@ -13,6 +13,9 @@ All notable changes to this project are documented here. The format is based on
   to reject malformed or metadata-inconsistent release identifiers.
 - Publish desktop commands through an absolute `env` launcher so quoted
   user-local paths remain launchable and discoverable by `xdg-mime` on KDE.
+- Keep pinned taskbar launchers available after Devin exits by publishing a
+  hidden, state-tracked `devin-desktop.desktop` entry that matches the
+  application's runtime desktop identity.
 
 ## [0.1.1] - 2026-08-09
 
