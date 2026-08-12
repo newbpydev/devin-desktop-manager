@@ -97,6 +97,9 @@ EOF
 EOF
   cat >"${MOCK_BIN}/update-desktop-database" <<'EOF'
 #!/usr/bin/env bash
+if [[ "${MOCK_CACHE_REQUIRE_DATA_HOME:-0}" == "1" ]]; then
+  [[ "${XDG_DATA_HOME:-}" == "${TEST_HOME}/.local/share" ]] || exit 76
+fi
 if [[ "${MOCK_CACHE_REQUIRE_DIRECTORY:-0}" == "1" ]]; then
   [[ -d "$1" ]] || exit 75
 fi
@@ -104,6 +107,9 @@ fi
 EOF
   cat >"${MOCK_BIN}/update-mime-database" <<'EOF'
 #!/usr/bin/env bash
+if [[ "${MOCK_CACHE_REQUIRE_DATA_HOME:-0}" == "1" ]]; then
+  [[ "${XDG_DATA_HOME:-}" == "${TEST_HOME}/.local/share" ]] || exit 76
+fi
 if [[ "${MOCK_CACHE_REQUIRE_DIRECTORY:-0}" == "1" ]]; then
   [[ -d "$1" ]] || exit 75
 fi
@@ -155,6 +161,21 @@ case "${1:-}" in
         exit
       }
     ' "${database}")"
+    if [[ "${MOCK_XDG_REQUIRE_DISCOVERABLE_EXEC:-0}" == "1" &&
+      -n "${current}" ]]; then
+      desktop="${XDG_DATA_HOME}/applications/${current}"
+      exec_word="$(
+        awk -F= '/^Exec=/ { print substr($0, 6); exit }' "${desktop}" 2>/dev/null |
+          {
+            IFS=' ' read -r first _ || true
+            printf '%s\n' "${first:-}"
+          }
+      )"
+      if [[ -z "${exec_word}" ]] ||
+        ! command -v -- "${exec_word}" >/dev/null 2>&1; then
+        current=""
+      fi
+    fi
     if [[ -n "${current}" ]]; then
       printf '%s\n' "${current}"
       exit 0
@@ -508,6 +529,24 @@ seed_complete_initial_manager_layout_with_previous() {
   downgrade_owned_installation_to_initial_manager_layout
 }
 
+rename_linked_release_to_historical_identifier() {
+  local link="$1"
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local target release metadata version build historical_id historical_release
+
+  target="$(readlink "${link}")"
+  release="${install_root}/${target}"
+  metadata="${release}/release.json"
+  version="$(jq -r '.windsurfVersion' "${metadata}")"
+  build="$(jq -r '.build' "${metadata}")"
+  historical_id="${version}-${build:0:12}"
+  historical_release="${install_root}/releases/${historical_id}"
+
+  mv -- "${release}" "${historical_release}"
+  rm -f -- "${link}"
+  ln -s -- "releases/${historical_id}" "${link}"
+}
+
 downgrade_owned_installation_to_initial_manager_layout() {
   local data_home="${TEST_HOME}/.local/share"
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
@@ -692,6 +731,36 @@ write_mountinfo_fixture() {
   [ "${output}" = "initial-complete|||||" ]
   [ -L "${install_root}/current" ]
   [ -L "${install_root}/previous" ]
+}
+
+@test "[LIR-U1-R01] mixed historical and current release identifiers are recoverable" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+
+  seed_complete_initial_manager_layout_with_previous
+  rename_linked_release_to_historical_identifier "${install_root}/previous"
+
+  classify_test_layout
+
+  [ "${status}" -eq 0 ]
+  [ "${output}" = "initial-complete|||||" ]
+  [ "$(readlink "${install_root}/previous")" = \
+    "releases/3.4.27-0d4bf12ed4a7" ]
+}
+
+@test "[LIR-U1-R04] malformed historical release identifiers remain refused" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local historical_target historical_release malformed_target
+
+  seed_complete_initial_manager_layout_with_previous
+  rename_linked_release_to_historical_identifier "${install_root}/previous"
+  historical_target="$(readlink "${install_root}/previous")"
+  historical_release="${install_root}/${historical_target}"
+  malformed_target="${historical_target}-unexpected"
+  mv -- "${historical_release}" "${install_root}/${malformed_target}"
+  rm -f -- "${install_root}/previous"
+  ln -s -- "${malformed_target}" "${install_root}/previous"
+
+  assert_classification_refused release-inventory
 }
 
 @test "[LIR-U1-R02] complete layout preserves a safe external default" {
@@ -1364,6 +1433,32 @@ EOF
   [ "${status}" -eq 1 ]
   run grep -F 'devin-desktop.desktop' "${DEFAULTS_FILE}"
   [ "${status}" -eq 1 ]
+}
+
+@test "[LIR-U2-R01] update publishes xdg-utils-discoverable desktop commands" {
+  local data_home="${TEST_HOME}/.local/share"
+  local applications="${data_home}/applications"
+
+  seed_complete_initial_manager_layout
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+  export MOCK_XDG_REQUIRE_DISCOVERABLE_EXEC=1
+  export MOCK_XDG_FALLBACK_DEVIN=devin-desktop-url-handler.desktop
+  export MOCK_XDG_FALLBACK_WINDSURF=devin-desktop-url-handler.desktop
+  export MOCK_XDG_FALLBACK_WORKSPACE=devin-desktop.desktop
+
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  grep -Fqx \
+    "Exec=/usr/bin/env -- \"${TEST_HOME}/.local/bin/devin-desktop\" %F" \
+    "${applications}/devin-desktop-manager.desktop"
+  grep -Fqx \
+    "Exec=/usr/bin/env -- \"${TEST_HOME}/.local/bin/devin-desktop\" --new-window %F" \
+    "${applications}/devin-desktop-manager.desktop"
+  grep -Fqx \
+    "Exec=/usr/bin/env -- \"${TEST_HOME}/.local/bin/devin-desktop\" --open-url %U" \
+    "${applications}/devin-desktop-manager-url-handler.desktop"
 }
 
 @test "[LIR-U2-R08] update preserves legacy default fallbacks for uninstall" {
@@ -2754,6 +2849,47 @@ JSON
   esac
 }
 
+@test "update migrates and prunes a mixed historical release inventory" {
+  local third="${BATS_TEST_TMPDIR}/third.deb"
+  local third_build="cccccccccccccccccccccccccccccccccccccccc"
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local historical_target historical_release
+
+  seed_complete_initial_manager_layout_with_previous
+  rename_linked_release_to_historical_identifier "${install_root}/previous"
+  historical_target="$(readlink "${install_root}/previous")"
+  historical_release="${install_root}/${historical_target}"
+
+  run manager_env doctor
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"recoverable Legacy Installation"* ]]
+  [ ! -e "${install_root}/.devin-desktop-manager-owned" ]
+
+  "${FIXTURE_BUILDER}" "${third}" safe "${third_build}" "3.4.29"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${third_build}/Devin-linux-x64-3.4.29.deb" \
+    "${third}" "3.4.29" "${third_build}" 1783378475000
+
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"migrating verified initial-manager installation"* ]]
+  [ -f "${install_root}/.devin-desktop-manager-owned" ]
+  [ ! -e "${historical_release}" ]
+  case "$(readlink "${install_root}/current")" in
+    releases/3.4.29-*) ;;
+    *) return 1 ;;
+  esac
+  case "$(readlink "${install_root}/previous")" in
+    releases/3.4.28-*) ;;
+    *) return 1 ;;
+  esac
+
+  run manager_env doctor
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"Healthy: 3.4.29"* ]]
+}
+
 @test "migration waits for the public 0.1.0 lock without changing the legacy layout" {
   local install_root="${TEST_HOME}/.local/opt/devin-desktop"
   local legacy_lock="${install_root}/.manager.lock"
@@ -3787,6 +3923,24 @@ EOF
 
   [ "${status}" -eq 0 ]
   [[ "${output}" == *"KDE cache refresh failed"* ]]
+  [ -L "${TEST_HOME}/.local/opt/devin-desktop/current" ]
+}
+
+@test "[LIR-U2-R02] cache refresh exports the computed XDG data home" {
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
+
+  export MOCK_CACHE_REQUIRE_DATA_HOME=1
+  run env \
+    HOME="${TEST_HOME}" \
+    XDG_CACHE_HOME="${TEST_HOME}/.cache" \
+    XDG_CONFIG_HOME="${TEST_HOME}/.config" \
+    XDG_DATA_HOME= \
+    XDG_STATE_HOME="${TEST_HOME}/.local/state" \
+    PATH="${MOCK_BIN}:${PATH}" \
+    "${MANAGER}" update
+
+  [ "${status}" -eq 0 ]
   [ -L "${TEST_HOME}/.local/opt/devin-desktop/current" ]
 }
 

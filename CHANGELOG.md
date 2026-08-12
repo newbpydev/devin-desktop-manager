@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- Recover mixed inventories containing the historical two-part release
+  directory name alongside current checksum-qualified names, while continuing
+  to reject malformed or metadata-inconsistent release identifiers.
+- Publish desktop commands through an absolute `env` launcher so quoted
+  user-local paths remain launchable and discoverable by `xdg-mime` on KDE.
+
 ## [0.1.1] - 2026-08-09
 
 ### Changed

@@ -19,7 +19,12 @@ setup() {
   ' _ "${MANAGER}" "${MAIN_ENTRY}" "${URL_ENTRY}"
 
   [ "${status}" -eq 0 ]
-  grep -Fq "Exec=\"${TEST_HOME}/.local/bin/devin-desktop\"" "${MAIN_ENTRY}"
+  grep -Fq \
+    "Exec=/usr/bin/env -- \"${TEST_HOME}/.local/bin/devin-desktop\" %F" \
+    "${MAIN_ENTRY}"
+  grep -Fq \
+    "Exec=/usr/bin/env -- \"${TEST_HOME}/.local/bin/devin-desktop\" --open-url %U" \
+    "${URL_ENTRY}"
   grep -Fq 'Icon=devin-desktop-manager' "${MAIN_ENTRY}"
   grep -Fq 'MimeType=x-scheme-handler/devin;x-scheme-handler/windsurf;' \
     "${URL_ENTRY}"
