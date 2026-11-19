@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- Accept the upstream URL handler desktop entry rename in current official
+  stable packages (`devin-desktop.UrlHandler.desktop`) while retaining the
+  historical `devin-desktop-url-handler.desktop` name, so updates and clean
+  reinstalls validate the current release.
 - Recover mixed inventories containing the historical two-part release
   directory name alongside current checksum-qualified names, while continuing
   to reject malformed or metadata-inconsistent release identifiers.

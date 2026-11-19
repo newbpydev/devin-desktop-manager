@@ -5055,6 +5055,51 @@ EOF
   [ ! -L "${TEST_HOME}/.local/opt/devin-desktop/current" ]
 }
 
+@test "archive validation accepts the historical URL handler desktop entry" {
+  local legacy="${BATS_TEST_TMPDIR}/legacy-url-handler.deb"
+
+  "${FIXTURE_BUILDER}" "${legacy}" legacy-url-handler
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb" \
+    "${legacy}"
+
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  [ -L "${TEST_HOME}/.local/opt/devin-desktop/current" ]
+}
+
+@test "archive validation rejects a payload without a URL handler desktop entry" {
+  local missing="${BATS_TEST_TMPDIR}/missing-url-handler.deb"
+
+  "${FIXTURE_BUILDER}" "${missing}" missing-url-handler
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb" \
+    "${missing}"
+
+  run manager_env update
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"missing a recognized URL handler desktop entry"* ]]
+  [ ! -L "${TEST_HOME}/.local/opt/devin-desktop/current" ]
+}
+
+@test "update removes a staging directory left by failed payload validation" {
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local staging="${install_root}/.staging-3.14.30819-c3f852dad740-99f35b26eb95-191434"
+
+  mkdir -p "${install_root}/releases" "${staging}/root"
+  printf 'io.github.newbpydev.devin-desktop-manager schema=1\n' \
+    >"${install_root}/.devin-desktop-manager-owned"
+  chmod 0600 "${install_root}/.devin-desktop-manager-owned"
+
+  run install_fixture
+
+  [ "${status}" -eq 0 ]
+  [ ! -e "${staging}" ]
+  [ -L "${install_root}/current" ]
+}
+
 @test "[PMC-U2-C01] rollback swaps releases and refreshes managed state" {
   local second="${BATS_TEST_TMPDIR}/second.deb"
   local second_build="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"

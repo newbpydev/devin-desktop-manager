@@ -3210,6 +3210,7 @@ validate_archive_paths() {
   local member_list="$3"
   local verbose_list="${member_list}.verbose"
   local member normalized line link_target link_member resolved_target
+  local url_handler_path url_handler_found=false
   declare -A seen_members=()
 
   bsdtar -xOf "${artifact}" "${data_member}" | bsdtar -tf - >"${member_list}" ||
@@ -3269,12 +3270,22 @@ validate_archive_paths() {
     usr/share/devin-desktop/devin-desktop \
     usr/share/devin-desktop/bin/devin-desktop \
     usr/share/applications/devin-desktop.desktop \
-    usr/share/applications/devin-desktop-url-handler.desktop \
     usr/share/pixmaps/devin-desktop.png \
     usr/share/mime/packages/devin-desktop-workspace.xml; do
     [[ -n "${seen_members["${member}"]+present}" ]] ||
       die "application payload is missing required path: ${member}"
   done
+
+  for url_handler_path in \
+    usr/share/applications/devin-desktop.UrlHandler.desktop \
+    usr/share/applications/devin-desktop-url-handler.desktop; do
+    if [[ -n "${seen_members["${url_handler_path}"]+present}" ]]; then
+      url_handler_found=true
+      break
+    fi
+  done
+  [[ "${url_handler_found}" == "true" ]] ||
+    die "application payload is missing a recognized URL handler desktop entry"
 }
 
 validate_extracted_links() {

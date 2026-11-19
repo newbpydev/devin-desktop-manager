@@ -19,18 +19,25 @@ main() {
   local build="${3:-0d4bf12ed4a7597cb8ae9016fe8474468aad98a2}"
   local version="${4:-3.4.27}"
   local work script_dir
+  local url_handler_name="devin-desktop.UrlHandler.desktop"
   local -a data_tar_options=()
   local control_tar_source="."
 
   [[ -n "${output}" ]] ||
     {
-      printf 'Usage: build-mini-deb OUTPUT [safe|unsafe-symlink|unsafe-hardlink|control-no-dot] [BUILD] [VERSION]\n' >&2
+      printf 'Usage: build-mini-deb OUTPUT [safe|unsafe-symlink|unsafe-hardlink|control-no-dot|legacy-url-handler|missing-url-handler] [BUILD] [VERSION]\n' >&2
       exit 2
     }
   case "${mode}" in
     safe|unsafe-symlink|unsafe-hardlink|control-no-dot) ;;
+    legacy-url-handler)
+      url_handler_name="devin-desktop-url-handler.desktop"
+      ;;
+    missing-url-handler)
+      url_handler_name=""
+      ;;
     *)
-      printf 'Usage: build-mini-deb OUTPUT [safe|unsafe-symlink|unsafe-hardlink|control-no-dot] [BUILD] [VERSION]\n' >&2
+      printf 'Usage: build-mini-deb OUTPUT [safe|unsafe-symlink|unsafe-hardlink|control-no-dot|legacy-url-handler|missing-url-handler] [BUILD] [VERSION]\n' >&2
       exit 2
       ;;
   esac
@@ -76,12 +83,14 @@ Name=Devin
 Type=Application
 Exec=devin-desktop
 EOF
-  cat >"${work}/data/usr/share/applications/devin-desktop-url-handler.desktop" <<'EOF'
+  if [[ -n "${url_handler_name}" ]]; then
+    cat >"${work}/data/usr/share/applications/${url_handler_name}" <<'EOF'
 [Desktop Entry]
 Name=Devin URL
 Type=Application
 Exec=devin-desktop %U
 EOF
+  fi
   printf 'fixture icon\n' >"${work}/data/usr/share/pixmaps/devin-desktop.png"
   cat >"${work}/data/usr/share/mime/packages/devin-desktop-workspace.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
