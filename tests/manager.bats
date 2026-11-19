@@ -1723,7 +1723,7 @@ EOF
 
   [ "${status}" -eq 0 ]
   [ -x "${installed_manager}" ]
-  [ "$("${installed_manager}" --version)" = "devin-desktop-manager 0.1.1" ]
+  [ "$("${installed_manager}" --version)" = "devin-desktop-manager 0.1.2" ]
   [ -f "${TEST_HOME}/.local/state/devin-desktop-manager/state.json" ]
   [ "$(find "${install_root}/releases" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ]
 
@@ -2297,7 +2297,7 @@ EOF
   run "${MANAGER}" --version
 
   [ "${status}" -eq 0 ]
-  [ "${output}" = "devin-desktop-manager 0.1.1" ]
+  [ "${output}" = "devin-desktop-manager 0.1.2" ]
 }
 
 @test "no arguments show help successfully" {

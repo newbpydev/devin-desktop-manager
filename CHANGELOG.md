@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-19
+
 ### Fixed
 
 - Accept the upstream URL handler desktop entry rename in current official
@@ -73,6 +75,7 @@ All notable changes to this project are documented here. The format is based on
 - Offline Bats and ShellCheck verification, deterministic source packages,
   pinned GitHub Actions, release provenance, and a scheduled manifest canary.
 
-[Unreleased]: https://github.com/newbpydev/devin-desktop-manager/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/newbpydev/devin-desktop-manager/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/newbpydev/devin-desktop-manager/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/newbpydev/devin-desktop-manager/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/newbpydev/devin-desktop-manager/releases/tag/v0.1.0

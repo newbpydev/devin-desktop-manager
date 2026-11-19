@@ -43,10 +43,11 @@ setup() {
   local workorder="${PROJECT_ROOT}/docs/workorders/legacy-installation-recovery-issues-workorder.md"
   local docs
 
-  grep -Fq 'VERSION := 0.1.1' "${PROJECT_ROOT}/Makefile"
-  grep -Fq 'MANAGER_VERSION="0.1.1"' "${manager}"
+  grep -Fq 'VERSION := 0.1.2' "${PROJECT_ROOT}/Makefile"
+  grep -Fq 'MANAGER_VERSION="0.1.2"' "${manager}"
   grep -Fq 'LEGACY_MANAGER_VERSION="0.1.0"' "${manager}"
   [ "$(grep -c 'SCHEMA_VERSION=1' "${manager}")" -eq 3 ]
+  grep -Fq '## [0.1.2] - 2026-11-19' "${PROJECT_ROOT}/CHANGELOG.md"
   grep -Fq '## [0.1.1] - 2026-08-09' "${PROJECT_ROOT}/CHANGELOG.md"
   grep -Fq 'verification_plan: docs/user-workflows-test-plans/legacy-installation-recovery-user-workflow-test.md' "${plan}"
   grep -Fq 'issue_workorder: docs/workorders/legacy-installation-recovery-issues-workorder.md' "${plan}"
@@ -67,9 +68,9 @@ setup() {
   local install="${PROJECT_ROOT}/docs/INSTALL.md"
   local readme="${PROJECT_ROOT}/README.md"
 
-  grep -Fq 'verified 0.1.1 source' "${install}"
+  grep -Fq 'verified 0.1.2 source' "${install}"
   grep -Fq 'make install-manager' "${install}"
-  grep -Fq 'devin-desktop-manager 0.1.1' "${install}"
+  grep -Fq 'devin-desktop-manager 0.1.2' "${install}"
   grep -Fq 'old 0.1.0 manager cannot update itself' "${install}"
   grep -Fq 'make install-manager' "${readme}"
   grep -Fq 'make update' "${readme}"

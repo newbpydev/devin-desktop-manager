@@ -461,7 +461,7 @@ EOF
   [ "${status}" -eq 0 ]
   [ -x "${installed}" ]
   [ ! -L "${installed}" ]
-  [ "$("${installed}" --version)" = "devin-desktop-manager 0.1.1" ]
+  [ "$("${installed}" --version)" = "devin-desktop-manager 0.1.2" ]
 
   run "${MAKE_COMMAND}" --no-print-directory -s -C "${PROJECT_ROOT}" \
     HOME="${TEST_HOME}" install-manager
@@ -762,17 +762,17 @@ EOF
   local first="${repository}/first" second="${repository}/second"
   make_package_fixture "${repository}"
 
-  run_locked_package_fixture "${repository}" 0.1.1 first
+  run_locked_package_fixture "${repository}" 0.1.2 first
   [ "${status}" -eq 0 ]
-  run_locked_package_fixture "${repository}" 0.1.1 second
+  run_locked_package_fixture "${repository}" 0.1.2 second
   [ "${status}" -eq 0 ]
 
-  cmp "${first}/devin-desktop-manager-0.1.1.tar.gz" \
-    "${second}/devin-desktop-manager-0.1.1.tar.gz"
+  cmp "${first}/devin-desktop-manager-0.1.2.tar.gz" \
+    "${second}/devin-desktop-manager-0.1.2.tar.gz"
   cmp "${first}/SHA256SUMS" "${second}/SHA256SUMS"
-  tar -tzf "${first}/devin-desktop-manager-0.1.1.tar.gz" \
+  tar -tzf "${first}/devin-desktop-manager-0.1.2.tar.gz" \
     >"${BATS_TEST_TMPDIR}/archive-contents"
-  grep -qx 'devin-desktop-manager-0.1.1/bin/devin-desktop-manager' \
+  grep -qx 'devin-desktop-manager-0.1.2/bin/devin-desktop-manager' \
     "${BATS_TEST_TMPDIR}/archive-contents"
 }
 
@@ -796,15 +796,15 @@ EOF
   printf 'must not ship\n' >"${repository}/untracked-secret.txt"
   printf 'dirty tracked\n' >"${repository}/README.md"
 
-  run_locked_package_fixture "${repository}" 0.1.1 dist
+  run_locked_package_fixture "${repository}" 0.1.2 dist
 
   [ "${status}" -eq 0 ]
-  run tar -tzf "${dist_dir}/devin-desktop-manager-0.1.1.tar.gz"
+  run tar -tzf "${dist_dir}/devin-desktop-manager-0.1.2.tar.gz"
   [ "${status}" -eq 0 ]
-  [[ "${output}" == *"devin-desktop-manager-0.1.1/README.md"* ]]
+  [[ "${output}" == *"devin-desktop-manager-0.1.2/README.md"* ]]
   [[ "${output}" != *"untracked-secret.txt"* ]]
-  run tar -xOzf "${dist_dir}/devin-desktop-manager-0.1.1.tar.gz" \
-    devin-desktop-manager-0.1.1/README.md
+  run tar -xOzf "${dist_dir}/devin-desktop-manager-0.1.2.tar.gz" \
+    devin-desktop-manager-0.1.2/README.md
   [ "${status}" -eq 0 ]
   [ "${output}" = "dirty tracked" ]
 }
@@ -830,7 +830,7 @@ EOF
   git -C "${repository}" init --quiet
   git -C "${repository}" -c user.name=Test -c user.email=test@example.invalid \
     commit --quiet --allow-empty -m empty
-  run_locked_package_fixture "${repository}" 0.1.1 dist
+  run_locked_package_fixture "${repository}" 0.1.2 dist
   [ "${status}" -ne 0 ]
   [[ "${output}" == *"no repository files found"* ]]
 }
@@ -853,22 +853,22 @@ EOF
   git -C "${repository}" -c user.name=Test -c user.email=test@example.invalid \
     commit --quiet -m fixture
 
-  run_locked_package_fixture "${repository}" 0.1.1 dist
+  run_locked_package_fixture "${repository}" 0.1.2 dist
   [ "${status}" -eq 0 ]
   [ -f "${repository}/dist/SHA256SUMS" ]
 
-  run_locked_package_fixture "${extracted}" 0.1.1 dist
+  run_locked_package_fixture "${extracted}" 0.1.2 dist
   [ "${status}" -ne 0 ]
   [[ "${output}" == *"exact Git root"* ]]
   [ ! -e "${extracted}/dist" ]
 
   git -C "${BATS_TEST_TMPDIR}/parent" init --quiet
-  run_locked_package_fixture "${nested}" 0.1.1 dist
+  run_locked_package_fixture "${nested}" 0.1.2 dist
   [ "${status}" -ne 0 ]
   [[ "${output}" == *"exact Git root"* ]]
   [ ! -e "${nested}/dist" ]
 
-  run_locked_package_fixture "${repository}" 0.1.1 "${outside}"
+  run_locked_package_fixture "${repository}" 0.1.2 "${outside}"
   [ "${status}" -ne 0 ]
   [[ "${output}" == *"OUTPUT_DIRECTORY"* ]]
   [[ "${output}" == *"project-relative"* ]]
@@ -931,8 +931,8 @@ EOF
   [ "$(grep -c '^contract ' "${log}")" -eq 1 ]
   [ "$(grep -c '^package ' "${log}")" -eq 1 ]
   grep -Fq "coverage <--output-lock-fd 6 --project-root ${root}>" "${log}"
-  grep -Fq "contract <--project-root ${root} 0.1.1>" "${log}"
-  grep -Fq "package <--output-lock-fd 6 --project-root ${root} 0.1.1 dist>" "${log}"
+  grep -Fq "contract <--project-root ${root} 0.1.2>" "${log}"
+  grep -Fq "package <--output-lock-fd 6 --project-root ${root} 0.1.2 dist>" "${log}"
   run grep -F 'tests' "${log}"
   [ "${status}" -eq 1 ]
 }
@@ -942,7 +942,7 @@ EOF
   make_clean_checkout "${root}"
   make_coverage_tree "${root}/coverage"
   printf 'asset\n' >"${root}/coverage/assets/report.css"
-  make_package_pair "${root}/dist" devin-desktop-manager-0.1.1.tar.gz
+  make_package_pair "${root}/dist" devin-desktop-manager-0.1.2.tar.gz
 
   run "${MAKE_COMMAND}" --no-print-directory -s -C "${root}" \
     BASH="${HARNESS_BASH}" clean
@@ -966,8 +966,8 @@ EOF
   local root="${BATS_TEST_TMPDIR}/clean-checkout"
   make_clean_checkout "${root}"
   make_coverage_tree "${root}/coverage"
-  make_package_pair "${root}/dist" devin-desktop-manager-0.1.1.tar.gz
-  printf 'corrupt\n' >>"${root}/dist/devin-desktop-manager-0.1.1.tar.gz"
+  make_package_pair "${root}/dist" devin-desktop-manager-0.1.2.tar.gz
+  printf 'corrupt\n' >>"${root}/dist/devin-desktop-manager-0.1.2.tar.gz"
   snapshot_tree "${root}/coverage" "${BATS_TEST_TMPDIR}/coverage-before"
   snapshot_tree "${root}/dist" "${BATS_TEST_TMPDIR}/dist-before"
 
@@ -984,7 +984,7 @@ EOF
 @test "[PMC-U7-R03] clean preserves unknown dist regular siblings" {
   local root="${BATS_TEST_TMPDIR}/clean-checkout"
   make_clean_checkout "${root}"
-  make_package_pair "${root}/dist" devin-desktop-manager-0.1.1.tar.gz
+  make_package_pair "${root}/dist" devin-desktop-manager-0.1.2.tar.gz
   printf 'foreign\n' >"${root}/dist/keep.txt"
   printf 'older unrelated\n' >"${root}/dist/other-0.0.1.zip"
 
@@ -994,7 +994,7 @@ EOF
   [ "$(<"${root}/dist/keep.txt")" = foreign ]
   [ "$(<"${root}/dist/other-0.0.1.zip")" = "older unrelated" ]
   [ ! -e "${root}/dist/SHA256SUMS" ]
-  [ ! -e "${root}/dist/devin-desktop-manager-0.1.1.tar.gz" ]
+  [ ! -e "${root}/dist/devin-desktop-manager-0.1.2.tar.gz" ]
 }
 
 @test "[PMC-U7-R05] clean fails fast on output contention and succeeds on retry" {

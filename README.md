@@ -143,7 +143,7 @@ is left unchanged; inspect or move aside the reported conflict. Do not add a
 marker by hand or delete a lock to force adoption.
 
 If an installed 0.1.0 manager refuses this legacy profile, first obtain the
-verified 0.1.1 source, then install the fixed manager before updating the app:
+verified 0.1.2 source, then install the fixed manager before updating the app:
 
 ```bash
 make install-manager
