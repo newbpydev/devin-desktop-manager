@@ -5,8 +5,9 @@ Only repository maintainers publish releases.
 ## Prepare
 
 1. Update `MANAGER_VERSION` in `bin/devin-desktop-manager` and `VERSION` in the
-   `Makefile`.
-2. Move relevant changelog entries into a dated version heading.
+   `Makefile` to the new `X.Y.Z` version.
+2. Move relevant changelog entries into a dated `## [X.Y.Z]` heading and update
+   the compare links.
 3. Install Ruby and Bundler, run `bundle config set --local deployment true`
    followed by `bundle install`, then run `bundle exec make release-check`. The
    committed lockfile fixes Bashcov 3.3.0 and its dependency graph; the command
@@ -14,7 +15,7 @@ Only repository maintainers publish releases.
     and deterministic packaging with `SHA256SUMS`.
 4. Review the archive contents and test installation from that archive in a
    disposable user account or VM.
-5. For 0.1.2, confirm the complete initial-manager recovery fixture, one
+5. For each release, confirm the complete initial-manager recovery fixture, one
    refusal, doctor diagnosis, interruption retry, and clean-install workflow.
    Keep affected-host evidence separate from disposable-environment evidence.
 6. Confirm all four compatibility jobs pass on the same commit and the
@@ -28,7 +29,7 @@ target classes, but never for `package` or `release-check`. Do not redirect
 directory before release validation. The legacy `MANAGER` override is not a
 release input because checkout targets always execute reviewed source.
 
-Affected 0.1.0 users must obtain the verified 0.1.2 archive or checkout and run
+Affected 0.1.0 users must obtain a verified release archive or checkout and run
 `make install-manager` before `make update`; the old installed manager cannot
 publish its own replacement. Never advise users to create ownership markers,
 delete lock files, or use a force-repair path.
@@ -64,8 +65,8 @@ Social preview. Keep the README release badge pointed at the latest release.
 Create an annotated tag whose name exactly matches the manager version:
 
 ```bash
-git tag -a v0.1.2 -m "Devin Desktop Manager v0.1.2"
-git push origin v0.1.2
+git tag -a vX.Y.Z -m "Devin Desktop Manager vX.Y.Z"
+git push origin vX.Y.Z
 ```
 
 The release workflow rejects lightweight tags, version mismatches, and coverage
@@ -87,12 +88,17 @@ command; direct status 2 means the invocation itself is invalid.
 3. Verify provenance with:
 
    ```bash
-   gh attestation verify devin-desktop-manager-0.1.2.tar.gz \
+   gh attestation verify devin-desktop-manager-X.Y.Z.tar.gz \
      --repo newbpydev/devin-desktop-manager
    ```
 
 4. Review generated notes and the changelog link.
-5. Publish the draft manually.
+5. Publish the draft as the latest release:
 
-Enable immutable releases in repository settings when available. Do not
-replace assets on an existing version; publish a new patch release.
+   ```bash
+   gh release edit vX.Y.Z --draft=false --latest
+   ```
+
+6. Confirm the release is published, marked Latest, and immutable releases are
+   enabled in repository settings. Do not replace assets on an existing
+   version; publish a new patch release instead.
