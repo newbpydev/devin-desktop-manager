@@ -46,6 +46,19 @@ labels to merged pull requests before tagging:
 
 Dependabot applies `dependencies` and `github-actions` to its pull requests.
 
+## Repository presentation
+
+The social preview source is `docs/assets/social-preview.svg`. Regenerate the
+PNG with:
+
+```bash
+rsvg-convert -w 1280 -h 640 docs/assets/social-preview.svg \
+  -o docs/assets/social-preview.png
+```
+
+Upload `docs/assets/social-preview.png` under repository Settings > General >
+Social preview. Keep the README release badge pointed at the latest release.
+
 ## Tag and draft
 
 Create an annotated tag whose name exactly matches the manager version:

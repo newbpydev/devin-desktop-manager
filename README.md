@@ -1,6 +1,7 @@
 # Devin Desktop Manager
 
 [![CI](https://github.com/newbpydev/devin-desktop-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/newbpydev/devin-desktop-manager/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/newbpydev/devin-desktop-manager?sort=semver)](https://github.com/newbpydev/devin-desktop-manager/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 An unofficial, user-local installer and update manager for the official stable
