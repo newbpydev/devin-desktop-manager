@@ -86,8 +86,9 @@ Follow `docs/RELEASING.md` as the source of truth. The short form is:
    `gh attestation verify devin-desktop-manager-X.Y.Z.tar.gz --repo newbpydev/devin-desktop-manager`.
 8. Curate the release notes, then publish with
    `gh release edit vX.Y.Z --draft=false --latest`.
-9. Confirm the release is published, immutable, and marked Latest. Never
-   replace assets on a published version; ship a new patch release.
+9. Confirm the release is published, marked Latest, and immutable releases are
+   enabled in repository settings. Never replace assets on a published version;
+   ship a new patch release.
 
 ## Release-note labels
 

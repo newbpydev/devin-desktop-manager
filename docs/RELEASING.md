@@ -99,6 +99,6 @@ command; direct status 2 means the invocation itself is invalid.
    gh release edit vX.Y.Z --draft=false --latest
    ```
 
-6. Confirm the release is published and marked Latest. Immutable releases are
-   enabled; do not replace assets on an existing version. Publish a new patch
-   release instead.
+6. Confirm the release is published, marked Latest, and immutable releases are
+   enabled in repository settings. Do not replace assets on an existing
+   version; publish a new patch release instead.
