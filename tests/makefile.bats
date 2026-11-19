@@ -5,6 +5,7 @@ set -e
 load helpers/portable
 
 setup() {
+  unset MAKEFLAGS MAKEOVERRIDES MFLAGS RELEASE_TAG GITHUB_REF_TYPE GITHUB_REF_NAME
   PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
   CALL_LOG="${BATS_TEST_TMPDIR}/manager-calls"
   MOCK_MANAGER="${BATS_TEST_TMPDIR}/mock-manager"
@@ -921,8 +922,7 @@ EOF
   chmod 0755 "${root}/bin/devin-desktop-manager" "${root}/scripts/"* \
     "${shim_bin}/bundle" "${shim_bin}/shellcheck"
 
-  run env -u RELEASE_TAG -u GITHUB_REF_TYPE PATH="${shim_bin}:${PATH}" \
-    "${MAKE_COMMAND}" --no-print-directory -s \
+  run env PATH="${shim_bin}:${PATH}" "${MAKE_COMMAND}" --no-print-directory -s \
     -C "${root}" BASH="${HARNESS_BASH}" SHELLCHECK="${shim_bin}/shellcheck" \
     DIST_DIR=dist release-check
   [ "${status}" -eq 0 ]
