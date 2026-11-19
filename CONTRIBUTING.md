@@ -2,6 +2,9 @@
 
 Thank you for improving Devin Desktop Manager.
 
+Agent-assisted changes should also read [`AGENTS.md`](AGENTS.md), which
+summarizes the same validation, safety, and release rules.
+
 ## Before opening a change
 
 1. Search existing issues.
