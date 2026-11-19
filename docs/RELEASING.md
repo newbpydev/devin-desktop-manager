@@ -33,6 +33,19 @@ Affected 0.1.0 users must obtain the verified 0.1.2 archive or checkout and run
 publish its own replacement. Never advise users to create ownership markers,
 delete lock files, or use a force-repair path.
 
+## Release note labels
+
+Generated notes are grouped by `.github/release.yml`. Apply these repository
+labels to merged pull requests before tagging:
+
+- `bug` and `regression` appear under Fixes;
+- `compatibility` and `upstream` appear under Compatibility;
+- `enhancement` appears under Features;
+- `documentation` appears under Documentation;
+- `dependencies`, `github-actions`, and `release` are excluded.
+
+Dependabot applies `dependencies` and `github-actions` to its pull requests.
+
 ## Tag and draft
 
 Create an annotated tag whose name exactly matches the manager version:

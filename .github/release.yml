@@ -2,7 +2,7 @@ changelog:
   exclude:
     labels:
       - dependencies
-      - github_actions
+      - github-actions
       - release
   categories:
     - title: Fixes
