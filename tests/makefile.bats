@@ -5,6 +5,7 @@ set -e
 load helpers/portable
 
 setup() {
+  unset MAKEFLAGS MAKEOVERRIDES MFLAGS RELEASE_TAG GITHUB_REF_TYPE GITHUB_REF_NAME
   PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
   CALL_LOG="${BATS_TEST_TMPDIR}/manager-calls"
   MOCK_MANAGER="${BATS_TEST_TMPDIR}/mock-manager"
