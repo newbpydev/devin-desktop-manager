@@ -21,7 +21,7 @@ the reported state, wait for any holder to exit, and retry the same command.
 Never delete a lock or ownership marker. Status 2 from a direct helper means its
 invocation is invalid and should be corrected before retrying.
 
-If `doctor` reports a recoverable Legacy Installation, obtain verified 0.1.1
+If `doctor` reports a recoverable Legacy Installation, obtain verified 0.1.2
 source and run `make install-manager` before the lifecycle command it names.
 The old 0.1.0 manager cannot update itself. A diagnostic that instead names a
 failed invariant is a conflict: ownership was not claimed, so preserve the

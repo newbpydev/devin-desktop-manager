@@ -33,8 +33,8 @@ verify it, then extract and install:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf devin-desktop-manager-0.1.1.tar.gz
-cd devin-desktop-manager-0.1.1
+tar -xzf devin-desktop-manager-0.1.2.tar.gz
+cd devin-desktop-manager-0.1.2
 make install
 make doctor
 ```
@@ -63,15 +63,15 @@ refused. Add `~/.local/bin` to `PATH` if your distribution does not already.
 
 ## Recover an installation made by the initial manager
 
-Start from verified 0.1.1 source. The old 0.1.0 manager cannot update itself;
+Start from verified 0.1.2 source. The old 0.1.0 manager cannot update itself;
 its `update` command updates Devin Desktop only. From the verified Git checkout
-or extracted 0.1.1 archive, publish the repaired manager first and prove which
+or extracted 0.1.2 archive, publish the repaired manager first and prove which
 binary will run:
 
 ```bash
 make install-manager
 devin-desktop-manager --version
-# Expected: devin-desktop-manager 0.1.1
+# Expected: devin-desktop-manager 0.1.2
 make doctor
 make update
 make doctor

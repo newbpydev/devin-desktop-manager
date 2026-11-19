@@ -1,7 +1,7 @@
 SHELL := /bin/sh
 .SHELLFLAGS := -eu -c
 
-VERSION := 0.1.1
+VERSION := 0.1.2
 override PROJECT_ROOT := $(realpath $(dir $(firstword $(MAKEFILE_LIST))))
 BASH ?= bash
 BATS ?= bats

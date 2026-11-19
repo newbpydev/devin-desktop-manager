@@ -14,7 +14,7 @@ shopt -s inherit_errexit 2>/dev/null ||
   }
 umask 077
 
-readonly MANAGER_VERSION="0.1.1"
+readonly MANAGER_VERSION="0.1.2"
 readonly MANAGER_ID="io.github.newbpydev.devin-desktop-manager"
 readonly MANAGER_DESKTOP_MARKER="X-Devin-Desktop-Manager=true"
 readonly LEGACY_MANAGER_VERSION="0.1.0"

@@ -374,11 +374,11 @@ EOF
   sparse="$(make_sparse_bin bash git awk grep timeout env mkdir rm find sha256sum readlink stat)"
 
   run env PATH="${sparse}" "${HARNESS_BASH}" "${PROJECT_ROOT}/scripts/release-check" \
-    --project-root "${PROJECT_ROOT}" 0.1.1
+    --project-root "${PROJECT_ROOT}" 0.1.2
   [ "${status}" -eq 0 ]
 
   run env PATH="${sparse}" "${HARNESS_BASH}" "${PROJECT_ROOT}/scripts/release-check" \
-    --project-root "${PROJECT_ROOT}" --release-tag v0.1.1 0.1.1
+    --project-root "${PROJECT_ROOT}" --release-tag v0.1.2 0.1.2
   [ "${status}" -eq 1 ]
   [[ "${output}" == *"command.tail"* ]]
   [[ "${output}" != *"package handoff"* ]]
