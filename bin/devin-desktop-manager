@@ -3285,7 +3285,7 @@ validate_archive_paths() {
     fi
   done
   [[ "${url_handler_found}" == "true" ]] ||
-    die "application payload is missing a recognized URL handler desktop entry"
+    die "application payload is missing a recognized URL handler desktop entry (expected usr/share/applications/devin-desktop.UrlHandler.desktop or usr/share/applications/devin-desktop-url-handler.desktop)"
 }
 
 validate_extracted_links() {

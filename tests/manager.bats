@@ -5069,6 +5069,20 @@ EOF
   [ -L "${TEST_HOME}/.local/opt/devin-desktop/current" ]
 }
 
+@test "archive validation accepts both recognized URL handler desktop entries" {
+  local both="${BATS_TEST_TMPDIR}/both-url-handlers.deb"
+
+  "${FIXTURE_BUILDER}" "${both}" both-url-handlers
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb" \
+    "${both}"
+
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  [ -L "${TEST_HOME}/.local/opt/devin-desktop/current" ]
+}
+
 @test "archive validation rejects a payload without a URL handler desktop entry" {
   local missing="${BATS_TEST_TMPDIR}/missing-url-handler.deb"
 
