@@ -921,7 +921,8 @@ EOF
   chmod 0755 "${root}/bin/devin-desktop-manager" "${root}/scripts/"* \
     "${shim_bin}/bundle" "${shim_bin}/shellcheck"
 
-  run env PATH="${shim_bin}:${PATH}" "${MAKE_COMMAND}" --no-print-directory -s \
+  run env -u RELEASE_TAG -u GITHUB_REF_TYPE PATH="${shim_bin}:${PATH}" \
+    "${MAKE_COMMAND}" --no-print-directory -s \
     -C "${root}" BASH="${HARNESS_BASH}" SHELLCHECK="${shim_bin}/shellcheck" \
     DIST_DIR=dist release-check
   [ "${status}" -eq 0 ]
