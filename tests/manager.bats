@@ -2702,6 +2702,94 @@ EOF
   [[ "${output}" == *"artifact URL build does not match the manifest"* ]]
 }
 
+@test "check rejects composite artifact directories with an unsafe release qualifier" {
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2-%2e%2e/Devin-linux-x64-3.4.27.deb"
+
+  run manager_env check
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"artifact URL build does not match the manifest"* ]]
+}
+
+@test "artifact URL build matching validates its inputs" {
+  run env HOME="${TEST_HOME}" bash -c '
+    source "$1"
+    build="0d4bf12ed4a7597cb8ae9016fe8474468aad98a2"
+    long_qualifier="$(printf "q%.0s" {1..129})"
+    artifact_url_build_matches "${build}" "${build}" || exit 1
+    artifact_url_build_matches "${build}-qualifier" "${build}" || exit 1
+    if artifact_url_build_matches "${build}-${long_qualifier}" "${build}"; then exit 1; fi
+    if artifact_url_build_matches "-qualifier" ""; then exit 1; fi
+    if artifact_url_build_matches "${build}-qualifier" "../${build}"; then exit 1; fi
+  ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
+}
+
+@test "check treats qualifier-only artifact URL changes as the same installed release" {
+  local build="0d4bf12ed4a7597cb8ae9016fe8474468aad98a2"
+  local first_url="https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${build}-c16c32bf7d9d42345cd0c798c527a68e/Devin-linux-x64-3.4.27.deb"
+  local second_url="https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${build}-d27d43bf8e0e53465de1d908d638b79f/Devin-linux-x64-3.4.27.deb"
+
+  write_manifest_curl "${first_url}"
+  run manager_env update
+  [ "${status}" -eq 0 ]
+
+  write_manifest_curl "${second_url}"
+  run manager_env check
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"Status:  up to date"* ]]
+}
+
+@test "update rejects an installed composite release with an unsafe qualifier" {
+  local build="0d4bf12ed4a7597cb8ae9016fe8474468aad98a2"
+  local qualifier="c16c32bf7d9d42345cd0c798c527a68e"
+  local install_root="${TEST_HOME}/.local/opt/devin-desktop"
+  local current_release temporary second second_build
+
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${build}-${qualifier}/Devin-linux-x64-3.4.27.deb"
+  run manager_env update
+  [ "${status}" -eq 0 ]
+
+  current_release="${install_root}/$(readlink "${install_root}/current")"
+  temporary="${current_release}/release.json.test"
+  jq \
+    --arg artifact_url "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${build}-%2e%2e/Devin-linux-x64-3.4.27.deb" \
+    '.artifactUrl = $artifact_url' \
+    "${current_release}/release.json" >"${temporary}"
+  mv -Tf -- "${temporary}" "${current_release}/release.json"
+
+  second="${BATS_TEST_TMPDIR}/second.deb"
+  second_build="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  "${FIXTURE_BUILDER}" "${second}" safe "${second_build}" "3.4.28"
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${second_build}/Devin-linux-x64-3.4.28.deb" \
+    "${second}" "3.4.28" "${second_build}" 1783378474000
+
+  run manager_env update
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"retained or reused release is invalid"* ]]
+}
+
+@test "artifact URL validation keeps markerless legacy metadata exact" {
+  run env HOME="${TEST_HOME}" bash -c '
+    source "$1"
+    build="0d4bf12ed4a7597cb8ae9016fe8474468aad98a2"
+    exact="https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${build}/Devin-linux-x64-3.4.27.deb"
+    composite="https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${build}-qualifier/Devin-linux-x64-3.4.27.deb"
+    artifact_url_is_valid "${exact}" "3.4.27" "${build}" false || exit 1
+    artifact_url_is_valid "${exact}" "3.4.27" "${build}" true || exit 1
+    artifact_url_is_valid "${composite}" "3.4.27" "${build}" true || exit 1
+    if artifact_url_is_valid "${composite}" "3.4.27" "${build}" false; then exit 1; fi
+  ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
+}
+
 @test "check does not require working unprivileged user namespaces" {
   write_manifest_curl \
     "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"

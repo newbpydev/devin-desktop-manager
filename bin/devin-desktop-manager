@@ -1334,8 +1334,7 @@ legacy_release_metadata_is_valid() {
   local metadata="${release_dir}/release.json"
   local entry name
   local version build product_version sha256 artifact_url expected_id
-  local legacy_expected_id url_path url_build url_filename expected_filename
-  local url_prefix="https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/"
+  local legacy_expected_id composite_allowed
 
   legacy_release_tree_is_user_owned "${release_dir}" || return 1
   directory_can_be_listed "${release_dir}" || return 1
@@ -1382,14 +1381,12 @@ legacy_release_metadata_is_valid() {
   is_safe_release_identifier "${product_version}" || return 1
   is_safe_release_identifier "${build}" || return 1
   [[ "${sha256}" =~ ^[0-9a-f]{64}$ ]] || return 1
-  [[ "${artifact_url}" == "${url_prefix}"* ]] || return 1
-  url_path="${artifact_url#"${url_prefix}"}"
-  [[ "${url_path}" == */* && "${url_path#*/}" != */* ]] || return 1
-  url_build="${url_path%%/*}"
-  url_filename="${url_path#*/}"
-  expected_filename="Devin-linux-x64-${version}.deb"
-  artifact_url_build_matches "${url_build}" "${build}" || return 1
-  [[ "${url_filename}" == "${expected_filename}" ]] || return 1
+  composite_allowed=false
+  if jq -e 'has("schemaVersion")' "${metadata}" >/dev/null 2>&1; then
+    composite_allowed=true
+  fi
+  artifact_url_is_valid \
+    "${artifact_url}" "${version}" "${build}" "${composite_allowed}" || return 1
   expected_id="$(release_identifier "${version}" "${build}" "${sha256}")" ||
     return 1
   if [[ "${expected_release_name}" != "${expected_id}" ]]; then
@@ -2967,10 +2964,60 @@ artifact_url_build_matches() {
   local build="$2"
   local qualifier
 
+  is_safe_release_identifier "${build}" || return 1
   [[ "${url_build}" == "${build}" ]] && return 0
   [[ "${url_build}" == "${build}-"* ]] || return 1
   qualifier="${url_build#"${build}-"}"
   is_safe_release_identifier "${qualifier}"
+}
+
+artifact_url_validation_error() {
+  local artifact_url="$1"
+  local version="$2"
+  local build="$3"
+  local composite_allowed="${4:-false}"
+  local url_prefix="https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/"
+  local url_path url_build url_filename expected_filename
+
+  is_safe_release_identifier "${version}" || {
+    printf '%s\n' "version-mismatch"
+    return 1
+  }
+  is_safe_release_identifier "${build}" || {
+    printf '%s\n' "build-mismatch"
+    return 1
+  }
+  [[ "${artifact_url}" == "${url_prefix}"* ]] || {
+    printf '%s\n' "unexpected-url"
+    return 1
+  }
+  url_path="${artifact_url#"${url_prefix}"}"
+  [[ "${url_path}" == */* && "${url_path#*/}" != */* ]] || {
+    printf '%s\n' "unexpected-path"
+    return 1
+  }
+  url_build="${url_path%%/*}"
+  url_filename="${url_path#*/}"
+  if [[ "${composite_allowed}" == "true" ]]; then
+    artifact_url_build_matches "${url_build}" "${build}" || {
+      printf '%s\n' "build-mismatch"
+      return 1
+    }
+  else
+    [[ "${url_build}" == "${build}" ]] || {
+      printf '%s\n' "build-mismatch"
+      return 1
+    }
+  fi
+  expected_filename="Devin-linux-x64-${version}.deb"
+  [[ "${url_filename}" == "${expected_filename}" ]] || {
+    printf '%s\n' "version-mismatch"
+    return 1
+  }
+}
+
+artifact_url_is_valid() {
+  artifact_url_validation_error "$@" >/dev/null 2>&1
 }
 
 release_identifier() {
@@ -2997,7 +3044,7 @@ legacy_release_identifier() {
 fetch_manifest() {
   local manifest manifest_file fetch_status
   local url sha256 version build product_version timestamp display_name
-  local url_prefix url_path url_build url_filename expected_filename
+  local validation_error
   manifest_file="$(mktemp "${TMPDIR:-/tmp}/devin-desktop-manager.manifest.XXXXXXXX")" ||
     die "could not create a private manifest temporary"
   if curl_fetch_file "${MANIFEST_URL}" "${manifest_file}" \
@@ -3044,19 +3091,27 @@ fetch_manifest() {
   is_safe_release_identifier "${product_version}" ||
     die "official manifest returned an unsafe product version identifier"
 
-  url_prefix="https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/"
-  [[ "${url}" == "${url_prefix}"* ]] ||
-    die "official manifest returned an unexpected artifact URL"
-  url_path="${url#"${url_prefix}"}"
-  [[ "${url_path}" == */* && "${url_path#*/}" != */* ]] ||
-    die "official manifest returned an unexpected artifact path"
-  url_build="${url_path%%/*}"
-  url_filename="${url_path#*/}"
-  expected_filename="Devin-linux-x64-${version}.deb"
-  artifact_url_build_matches "${url_build}" "${build}" ||
-    die "artifact URL build does not match the manifest"
-  [[ "${url_filename}" == "${expected_filename}" ]] ||
-    die "artifact URL version does not match the manifest"
+  if ! validation_error="$(
+    artifact_url_validation_error "${url}" "${version}" "${build}" true
+  )"; then
+    case "${validation_error}" in
+      unexpected-url)
+        die "official manifest returned an unexpected artifact URL"
+        ;;
+      unexpected-path)
+        die "official manifest returned an unexpected artifact path"
+        ;;
+      build-mismatch)
+        die "artifact URL build does not match the manifest"
+        ;;
+      version-mismatch)
+        die "artifact URL version does not match the manifest"
+        ;;
+      *)
+        die "official manifest returned an unexpected artifact URL"
+        ;;
+    esac
+  fi
   [[ "${sha256}" =~ ^[0-9a-f]{64}$ ]] ||
     die "official manifest returned an invalid SHA-256"
   [[ "${timestamp}" =~ ^[0-9]+$ ]] ||
@@ -3069,16 +3124,28 @@ fetch_manifest() {
 
 manifest_matches_current() {
   local manifest="$1"
-  local current_dir expected_hash expected_url
+  local current_dir expected_hash composite_allowed
+  local expected_version expected_build expected_product_version
 
   current_dir="$(release_path "${CURRENT_LINK}")" || return 1
   [[ -f "${current_dir}/release.json" ]] || return 1
 
   expected_hash="$(jq -r '.sha256hash' <<<"${manifest}")"
-  expected_url="$(jq -r '.url' <<<"${manifest}")"
+  expected_version="$(jq -r '.windsurfVersion' <<<"${manifest}")"
+  expected_build="$(jq -r '.version' <<<"${manifest}")"
+  expected_product_version="$(jq -r '.productVersion' <<<"${manifest}")"
 
+  composite_allowed=false
+  if jq -e 'has("schemaVersion")' "${current_dir}/release.json" >/dev/null 2>&1; then
+    composite_allowed=true
+  fi
+  artifact_url_is_valid \
+    "$(jq -r '.artifactUrl // empty' "${current_dir}/release.json")" \
+    "${expected_version}" "${expected_build}" "${composite_allowed}" || return 1
   [[ "$(jq -r '.sha256 // empty' "${current_dir}/release.json")" == "${expected_hash}" &&
-    "$(jq -r '.artifactUrl // empty' "${current_dir}/release.json")" == "${expected_url}" ]]
+    "$(jq -r '.windsurfVersion // empty' "${current_dir}/release.json")" == "${expected_version}" &&
+    "$(jq -r '.build // empty' "${current_dir}/release.json")" == "${expected_build}" &&
+    "$(jq -r '.productVersion // empty' "${current_dir}/release.json")" == "${expected_product_version}" ]]
 }
 
 reject_manifest_downgrade() {
