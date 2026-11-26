@@ -1334,7 +1334,7 @@ legacy_release_metadata_is_valid() {
   local metadata="${release_dir}/release.json"
   local entry name
   local version build product_version sha256 artifact_url expected_id
-  local legacy_expected_id
+  local legacy_expected_id url_path url_build url_filename expected_filename
   local url_prefix="https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/"
 
   legacy_release_tree_is_user_owned "${release_dir}" || return 1
@@ -1382,8 +1382,14 @@ legacy_release_metadata_is_valid() {
   is_safe_release_identifier "${product_version}" || return 1
   is_safe_release_identifier "${build}" || return 1
   [[ "${sha256}" =~ ^[0-9a-f]{64}$ ]] || return 1
-  [[ "${artifact_url}" == \
-    "${url_prefix}${build}/Devin-linux-x64-${version}.deb" ]] || return 1
+  [[ "${artifact_url}" == "${url_prefix}"* ]] || return 1
+  url_path="${artifact_url#"${url_prefix}"}"
+  [[ "${url_path}" == */* && "${url_path#*/}" != */* ]] || return 1
+  url_build="${url_path%%/*}"
+  url_filename="${url_path#*/}"
+  expected_filename="Devin-linux-x64-${version}.deb"
+  artifact_url_build_matches "${url_build}" "${build}" || return 1
+  [[ "${url_filename}" == "${expected_filename}" ]] || return 1
   expected_id="$(release_identifier "${version}" "${build}" "${sha256}")" ||
     return 1
   if [[ "${expected_release_name}" != "${expected_id}" ]]; then
@@ -2956,6 +2962,17 @@ is_safe_release_identifier() {
   [[ "${value}" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]]
 }
 
+artifact_url_build_matches() {
+  local url_build="$1"
+  local build="$2"
+  local qualifier
+
+  [[ "${url_build}" == "${build}" ]] && return 0
+  [[ "${url_build}" == "${build}-"* ]] || return 1
+  qualifier="${url_build#"${build}-"}"
+  is_safe_release_identifier "${qualifier}"
+}
+
 release_identifier() {
   local version="$1"
   local build="$2"
@@ -3036,7 +3053,7 @@ fetch_manifest() {
   url_build="${url_path%%/*}"
   url_filename="${url_path#*/}"
   expected_filename="Devin-linux-x64-${version}.deb"
-  [[ "${url_build}" == "${build}" ]] ||
+  artifact_url_build_matches "${url_build}" "${build}" ||
     die "artifact URL build does not match the manifest"
   [[ "${url_filename}" == "${expected_filename}" ]] ||
     die "artifact URL version does not match the manifest"

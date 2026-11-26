@@ -2662,6 +2662,46 @@ EOF
   grep -q -- '--max-redirs 5' "${CURL_LOG}"
 }
 
+@test "update accepts composite official artifact release directories" {
+  local build="0d4bf12ed4a7597cb8ae9016fe8474468aad98a2"
+  local qualifier="c16c32bf7d9d42345cd0c798c527a68e"
+  local artifact_url="https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${build}-${qualifier}/Devin-linux-x64-3.4.27.deb"
+  local current_release
+
+  write_manifest_curl "${artifact_url}"
+
+  run manager_env update
+
+  [ "${status}" -eq 0 ]
+  current_release="${TEST_HOME}/.local/opt/devin-desktop/$(readlink "${TEST_HOME}/.local/opt/devin-desktop/current")"
+  [ "$(jq -r '.artifactUrl' "${current_release}/release.json")" = "${artifact_url}" ]
+
+  run manager_env check
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"Status:  up to date"* ]]
+}
+
+@test "check rejects composite artifact directories with a mismatched build" {
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-c16c32bf7d9d42345cd0c798c527a68e/Devin-linux-x64-3.4.27.deb"
+
+  run manager_env check
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"artifact URL build does not match the manifest"* ]]
+}
+
+@test "check rejects composite artifact directories with an empty release qualifier" {
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2-/Devin-linux-x64-3.4.27.deb"
+
+  run manager_env check
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"artifact URL build does not match the manifest"* ]]
+}
+
 @test "check does not require working unprivileged user namespaces" {
   write_manifest_curl \
     "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.27.deb"
