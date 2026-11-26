@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- Accept the upstream stable artifact directory's composite
+  `<build>-<release qualifier>` form while preserving official-host, filename,
+  build, SHA-256, and release-metadata validation, so current upstream releases
+  can be checked and installed. Compare installed releases by their verified
+  version, build, product version, and SHA-256 rather than the mutable artifact
+  qualifier, avoiding false update-available reports when upstream republishes
+  the same release under another qualifier.
+
 ## [0.1.2] - 2026-11-19
 
 ### Fixed
