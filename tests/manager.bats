@@ -2727,6 +2727,45 @@ EOF
   [ "${status}" -eq 0 ]
 }
 
+@test "artifact URL validation rejects unsafe version and build inputs" {
+  run env HOME="${TEST_HOME}" bash -c '
+    source "$1"
+    build="0d4bf12ed4a7597cb8ae9016fe8474468aad98a2"
+    url="https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${build}/Devin-linux-x64-3.4.27.deb"
+    error=""
+    if error="$(artifact_url_validation_error "${url}" "../3.4.27" "${build}" true)"; then exit 1; fi
+    [[ "${error}" == "version-mismatch" ]] || exit 1
+    error=""
+    if error="$(artifact_url_validation_error "${url}" "3.4.27" "" true)"; then exit 1; fi
+    [[ "${error}" == "build-mismatch" ]] || exit 1
+    error=""
+    if error="$(artifact_url_validation_error "${url}" "3.4.27" "../${build}" true)"; then exit 1; fi
+    [[ "${error}" == "build-mismatch" ]] || exit 1
+  ' _ "${MANAGER}"
+
+  [ "${status}" -eq 0 ]
+}
+
+@test "check rejects artifact URLs with an unexpected nested path" {
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/nested/Devin-linux-x64-3.4.27.deb"
+
+  run manager_env check
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"official manifest returned an unexpected artifact path"* ]]
+}
+
+@test "check rejects artifact URLs whose filename version mismatches the manifest" {
+  write_manifest_curl \
+    "https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/0d4bf12ed4a7597cb8ae9016fe8474468aad98a2/Devin-linux-x64-3.4.28.deb"
+
+  run manager_env check
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"artifact URL version does not match the manifest"* ]]
+}
+
 @test "check treats qualifier-only artifact URL changes as the same installed release" {
   local build="0d4bf12ed4a7597cb8ae9016fe8474468aad98a2"
   local first_url="https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${build}-c16c32bf7d9d42345cd0c798c527a68e/Devin-linux-x64-3.4.27.deb"
