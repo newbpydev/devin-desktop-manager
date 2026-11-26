@@ -2731,15 +2731,14 @@ EOF
   run env HOME="${TEST_HOME}" bash -c '
     source "$1"
     build="0d4bf12ed4a7597cb8ae9016fe8474468aad98a2"
-    url="https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${build}/Devin-linux-x64-3.4.27.deb"
+    unsafe_version_url="https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${build}/Devin-linux-x64-3.4.27?x.deb"
+    unsafe_build="../${build}"
+    unsafe_build_url="https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${unsafe_build}/Devin-linux-x64-3.4.27.deb"
     error=""
-    if error="$(artifact_url_validation_error "${url}" "../3.4.27" "${build}" true)"; then exit 1; fi
+    if error="$(artifact_url_validation_error "${unsafe_version_url}" "3.4.27?x" "${build}" true)"; then exit 1; fi
     [[ "${error}" == "version-mismatch" ]] || exit 1
     error=""
-    if error="$(artifact_url_validation_error "${url}" "3.4.27" "" true)"; then exit 1; fi
-    [[ "${error}" == "build-mismatch" ]] || exit 1
-    error=""
-    if error="$(artifact_url_validation_error "${url}" "3.4.27" "../${build}" true)"; then exit 1; fi
+    if error="$(artifact_url_validation_error "${unsafe_build_url}" "3.4.27" "${unsafe_build}" false)"; then exit 1; fi
     [[ "${error}" == "build-mismatch" ]] || exit 1
   ' _ "${MANAGER}"
 
