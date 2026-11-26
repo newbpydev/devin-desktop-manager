@@ -2732,7 +2732,7 @@ EOF
     source "$1"
     build="0d4bf12ed4a7597cb8ae9016fe8474468aad98a2"
     unsafe_version_url="https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${build}/Devin-linux-x64-3.4.27?x.deb"
-    unsafe_build="../${build}"
+    unsafe_build="${build}?x"
     unsafe_build_url="https://windsurf-stable.codeiumdata.com/linux-x64-deb/stable/${unsafe_build}/Devin-linux-x64-3.4.27.deb"
     error=""
     if error="$(artifact_url_validation_error "${unsafe_version_url}" "3.4.27?x" "${build}" true)"; then exit 1; fi
